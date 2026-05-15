@@ -93,6 +93,7 @@ brainstorming → delta spec → 实施（增量修改）→ 验证 → 主 spec
 - 关联 design doc 已标注归档状态
 - 关联 plan 已标注归档状态
 - `.openspec.yaml` 中 `comet.archived` 已记录为 `true`
+- **阶段守卫**：运行 `bash $COMET_GUARD <change-name> archive`，全部 PASS 后确认归档完整
 
 归档完成后，在归档目录的 `.openspec.yaml` 中合并更新：
 

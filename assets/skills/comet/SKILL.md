@@ -158,6 +158,18 @@ comet:
 
 ## 快速参考
 
+### 脚本定位
+
+Comet 阶段守卫脚本 `comet-guard.sh` 随 skill 包分发，位于 `comet/scripts/` 目录。
+**不硬编码平台路径**，运行时通过以下命令自定位：
+
+```bash
+COMET_GUARD=$(find . -path '*/comet/scripts/comet-guard.sh' -type f -print -quit)
+bash "$COMET_GUARD" <change-name> <phase>
+```
+
+后续文档中 `bash $COMET_GUARD <change> <phase>` 均指此命令。加载 comet 后，agent 应在 shell 环境中缓存 `COMET_GUARD` 路径，避免重复 `find`。
+
 ### 文件结构
 
 ```

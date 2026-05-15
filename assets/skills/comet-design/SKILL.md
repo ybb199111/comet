@@ -67,6 +67,7 @@ design.md（阶段 1，OpenSpec）      → 高层架构决策
 
 - Design Doc 已创建并保存
 - 如有新能力则 delta spec 已创建
+- **阶段守卫**：运行 `bash $COMET_GUARD <change-name> design`，全部 PASS 后才允许流转
 
 ## 自动流转
 

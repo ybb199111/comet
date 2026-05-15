@@ -106,6 +106,7 @@ comet:
 - 代码已提交
 - 测试通过
 - `.openspec.yaml` 中 `comet.phase` 已更新为 `verify`
+- **阶段守卫**：运行 `bash $COMET_GUARD <change-name> build`，全部 PASS 后才允许流转
 
 退出前合并更新：
 

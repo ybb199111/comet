@@ -128,3 +128,4 @@ Hotfix 流程为 **一次性连续执行**。调用 `/comet-hotfix` 后，agent 
 - Bug 已修复，测试通过
 - change 已归档
 - 如有 spec 变更，已同步到 main spec
+- **阶段守卫**：build → verify 前运行 `bash $COMET_GUARD <change-name> build`，verify → archive 前运行 `bash $COMET_GUARD <change-name> verify`

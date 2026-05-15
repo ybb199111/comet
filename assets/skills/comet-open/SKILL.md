@@ -78,6 +78,7 @@ comet:
 ## 退出条件
 
 - proposal.md、design.md、tasks.md 均已创建且内容完整
+- **阶段守卫**：运行 `bash $COMET_GUARD <change-name> open`，全部 PASS 后才允许流转
 
 ## 自动流转
 

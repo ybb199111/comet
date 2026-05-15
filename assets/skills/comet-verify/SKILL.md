@@ -114,6 +114,7 @@ comet:
 - 验证报告通过
 - 分支已处理
 - `.openspec.yaml` 中 `comet.verify_result` 已记录为 `pass`
+- **阶段守卫**：运行 `bash $COMET_GUARD <change-name> verify`，全部 PASS 后才允许流转
 
 退出前合并更新：
 
