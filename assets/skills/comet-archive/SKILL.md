@@ -9,13 +9,13 @@ description: "Comet 阶段 5：归档。用 /comet-archive 调用。同步 delta
 
 - 验证已通过（阶段 4 完成）
 - 分支已处理
-- `openspec/changes/<name>/.openspec.yaml` 中 `comet.verify_result: pass`
+- `openspec/changes/<name>/.comet.yaml` 中 `verify_result: pass`
 
 ## 步骤
 
 ### 1. 执行归档
 
-归档前如 `comet.verify_result` 不是 `pass`，停止归档并返回 `/comet-verify`。
+归档前如 `verify_result` 不是 `pass`，停止归档并返回 `/comet-verify`。
 
 **立即执行：** 使用 Skill 工具加载 `openspec-archive-change` 技能。禁止跳过此步骤。
 
@@ -23,6 +23,14 @@ description: "Comet 阶段 5：归档。用 /comet-archive 调用。同步 delta
 1. artifact 完成状态（proposal、design、specs、tasks）
 2. 所有任务已标记 `[x]`
 3. delta specs 同步状态
+
+### 1b. 移动 Comet 状态文件
+
+`openspec-archive-change` 不感知 `.comet.yaml`，因此 Comet 需要在 OpenSpec 归档完成后自行移动该文件：
+
+```bash
+mv openspec/changes/<name>/.comet.yaml openspec/changes/archive/YYYY-MM-DD-<name>/.comet.yaml
+```
 
 ### 2. Delta Spec 同步
 
@@ -73,6 +81,7 @@ change 移入归档目录：
 ```
 openspec/changes/archive/YYYY-MM-DD-<name>/
 ├── .openspec.yaml
+├── .comet.yaml
 ├── proposal.md
 ├── design.md
 ├── specs/<capability>/spec.md
@@ -92,15 +101,14 @@ brainstorming → delta spec → 实施（增量修改）→ 验证 → 主 spec
 - 主 specs 已更新（delta → main 同步完成）
 - 关联 design doc 已标注归档状态
 - 关联 plan 已标注归档状态
-- `.openspec.yaml` 中 `comet.archived` 已记录为 `true`
+- `.comet.yaml` 中 `archived` 已记录为 `true`
 - **阶段守卫**：运行 `bash $COMET_GUARD <change-name> archive`，全部 PASS 后确认归档完整
 
-归档完成后，在归档目录的 `.openspec.yaml` 中合并更新：
+归档完成后，在归档目录的 `.comet.yaml` 中更新：
 
 ```yaml
-comet:
-  phase: archive
-  archived: true
+phase: archive
+archived: true
 ```
 
 ## 完成
