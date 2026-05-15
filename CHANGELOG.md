@@ -2,7 +2,7 @@
 
 All notable changes to @rpamis/comet will be documented in this file.
 
-## [0.1.3] - 2026-05-15
+## What's Changed [0.1.3] - 2026-05-15
 
 ### Added
 
@@ -24,11 +24,3 @@ All notable changes to @rpamis/comet will be documented in this file.
 
 - Fixed path traversal vulnerability through unvalidated change name inputs
 - Schema validation now catches typos and invalid enum values at entry point
-
-## [0.1.2] - Unreleased
-
-### Added
-
-- Platform selection for 28 AI coding platforms
-- Comet skills: open, design, build, verify, archive, hotfix, tweak
-- Guard scripts for phase transition validation
