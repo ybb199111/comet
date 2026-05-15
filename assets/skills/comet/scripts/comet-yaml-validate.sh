@@ -49,7 +49,7 @@ warn_msg() { warn "  WARN: $1"; WARNINGS=$((WARNINGS + 1)); }
 echo "[VALIDATE] $YAML" >&2
 
 # --- Required fields ---
-REQUIRED_FIELDS="workflow phase design_doc plan build_mode verify_mode verify_result verified_at archived"
+REQUIRED_FIELDS="workflow phase design_doc plan build_mode isolation verify_mode verify_result verified_at archived"
 for field in $REQUIRED_FIELDS; do
   if ! grep -q "^${field}:" "$YAML" 2>/dev/null; then
     fail "missing required field '$field'"
@@ -78,6 +78,7 @@ validate_enum() {
 workflow=$(field_value "workflow")
 phase=$(field_value "phase")
 build_mode=$(field_value "build_mode")
+isolation=$(field_value "isolation")
 verify_mode=$(field_value "verify_mode")
 verify_result=$(field_value "verify_result")
 archived=$(field_value "archived")
@@ -87,6 +88,7 @@ plan=$(field_value "plan")
 validate_enum "workflow"      "$workflow"      "full hotfix tweak"
 validate_enum "phase"         "$phase"          "design build verify archive"
 validate_enum "build_mode"    "$build_mode"     "subagent-driven-development executing-plans direct"
+validate_enum "isolation"     "$isolation"      "branch worktree"
 validate_enum "verify_mode"   "$verify_mode"    "light full"
 validate_enum "verify_result" "$verify_result"  "pending pass fail"
 validate_enum "archived"      "$archived"       "true false"
@@ -106,7 +108,7 @@ if [ -n "$plan" ] && [ "$plan" != "null" ]; then
 fi
 
 # --- Unknown keys check ---
-KNOWN_KEYS="workflow phase design_doc plan build_mode verify_mode verify_result verified_at archived"
+KNOWN_KEYS="workflow phase design_doc plan build_mode isolation verify_mode verify_result verified_at archived"
 while IFS=: read -r key _; do
   key="${key// /}"
   [ -z "$key" ] && continue

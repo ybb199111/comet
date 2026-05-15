@@ -65,6 +65,7 @@ phase: build
 design_doc: null
 plan: null
 build_mode: direct
+isolation: branch
 verify_mode: light
 verify_result: pending
 verified_at: null
@@ -78,6 +79,7 @@ archived: false
   Confirm design_doc line value is "null"
   Confirm plan line value is "null"
   Confirm build_mode line value is "direct"
+  Confirm isolation line value is "branch"
   Confirm verify_mode line value is "light"
   Confirm verify_result line value is "pending"
   Confirm verified_at line value is "null"

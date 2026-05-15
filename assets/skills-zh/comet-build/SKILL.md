@@ -68,7 +68,49 @@ plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
   确认 plan 行的值为 "docs/superpowers/plans/YYYY-MM-DD-feature.md"
   如不匹配，重试写入后再次验证。最多重试 2 次，仍失败则报告错误并终止。
 
-### 3. 选择执行方式
+### 3. 工作区隔离
+
+计划已写入当前分支。在开始执行前，选择工作区隔离方式：
+
+| 选项 | 方式 | 说明 |
+|------|------|------|
+| A | 创建分支 | 在当前仓库创建新分支，简单快速 |
+| B | 创建 Worktree | 隔离工作区，完全独立，适合并行开发 |
+
+**推荐规则**：
+- 变更涉及 ≤ 3 个文件 → 推荐 A
+- 需要并行开发、当前分支有未提交工作 → 推荐 B
+
+用户选择后，在 `openspec/changes/<name>/.comet.yaml` 中合并更新 `isolation`（保留其他字段不变）。`isolation` 只允许以下值之一：
+
+- `branch`
+- `worktree`
+
+Few-shot 示例：
+
+```yaml
+# 用户选择创建分支 / A
+isolation: branch
+```
+
+```yaml
+# 用户选择创建 worktree / B
+isolation: worktree
+```
+
+【写入验证】更新完成后必须验证：
+  cat openspec/changes/<name>/.comet.yaml
+  确认 isolation 行的值为 "<branch 或 worktree>"
+  如不匹配，重试写入后再次验证。最多重试 2 次，仍失败则报告错误并终止。
+
+**执行隔离**：
+
+- **branch**：执行 `git checkout -b <change-name>`，后续工作在新分支上进行
+- **worktree**：调用 `superpowers:using-git-worktrees` 技能或使用原生 `EnterWorktree` 工具创建隔离工作区
+
+创建隔离后，确认计划文件可访问（分支方式天然可访问；worktree 方式需确认计划已提交）。
+
+### 4. 选择执行方式
 
 向用户展示计划摘要（任务数、涉及模块），然后询问执行方式：
 
@@ -114,7 +156,7 @@ build_mode: executing-plans
 - 完成 tasks.md 勾选（`- [ ]` → `- [x]`）
 - 每个任务完成后提交代码
 
-### 4. Spec 增量更新
+### 5. Spec 增量更新
 
 实施过程中发现初版 spec 不完整时，按变更规模分级处理：
 

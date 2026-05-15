@@ -68,7 +68,49 @@ plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
   Confirm plan line value is "docs/superpowers/plans/YYYY-MM-DD-feature.md"
   If not matching, retry write then verify again. Maximum 2 retries, report error and terminate if still fails.
 
-### 3. Select Execution Method
+### 3. Workspace Isolation
+
+Plan has been written to the current branch. Before starting execution, choose workspace isolation method:
+
+| Option | Method | Description |
+|--------|--------|-------------|
+| A | Create branch | Create a new branch in the current repo, simple and fast |
+| B | Create Worktree | Isolated workspace, fully independent, suitable for parallel development |
+
+**Recommendation rules**:
+- Change involves ≤ 3 files → Recommend A
+- Need parallel development, current branch has uncommitted work → Recommend B
+
+After user selection, merge and update `isolation` in `openspec/changes/<name>/.comet.yaml` (keep other fields unchanged). `isolation` only allows one of the following values:
+
+- `branch`
+- `worktree`
+
+Few-shot examples:
+
+```yaml
+# User selects create branch / A
+isolation: branch
+```
+
+```yaml
+# User selects create worktree / B
+isolation: worktree
+```
+
+【Write verification】After update completion, must verify:
+  cat openspec/changes/<name>/.comet.yaml
+  Confirm isolation line value is "<branch or worktree>"
+  If not matching, retry write then verify again. Maximum 2 retries, report error and terminate if still fails.
+
+**Execute isolation**:
+
+- **branch**: Run `git checkout -b <change-name>`, subsequent work on the new branch
+- **worktree**: Invoke `superpowers:using-git-worktrees` skill or use native `EnterWorktree` tool to create isolated workspace
+
+After creating isolation, confirm plan file is accessible (naturally accessible with branch method; for worktree method, confirm plan has been committed).
+
+### 4. Select Execution Method
 
 Present plan summary to user (task count, involved modules), then ask for execution method:
 
@@ -114,7 +156,7 @@ After the skill loads, follow its guidance to execute:
 - Complete tasks.md check (`- [ ]` → `- [x]`)
 - Commit code after each task completion
 
-### 4. Spec Incremental Updates
+### 5. Spec Incremental Updates
 
 When the initial spec is found incomplete during implementation, handle by scale:
 

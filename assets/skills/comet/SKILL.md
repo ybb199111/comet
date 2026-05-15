@@ -75,6 +75,7 @@ phase: build
 design_doc: docs/superpowers/specs/YYYY-MM-DD-topic-design.md
 plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
 build_mode: subagent-driven-development
+isolation: branch
 verify_mode: light
 verify_result: pending
 verified_at: null
@@ -90,6 +91,7 @@ Field meanings:
 | `design_doc` | Associated Superpowers Design Doc path, can be empty |
 | `plan` | Associated Superpowers Plan path, can be empty |
 | `build_mode` | Selected execution mode, can be empty |
+| `isolation` | `branch` or `worktree`, workspace isolation method, defaults to `branch` |
 | `verify_mode` | `light` or `full`, can be empty |
 | `verify_result` | `pending`, `pass`, or `fail` |
 | `verified_at` | Verification pass time, can be empty |

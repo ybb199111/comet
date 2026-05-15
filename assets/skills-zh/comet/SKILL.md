@@ -75,6 +75,7 @@ phase: build
 design_doc: docs/superpowers/specs/YYYY-MM-DD-topic-design.md
 plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
 build_mode: subagent-driven-development
+isolation: branch
 verify_mode: light
 verify_result: pending
 verified_at: null
@@ -90,6 +91,7 @@ archived: false
 | `design_doc` | 关联的 Superpowers Design Doc 路径，可为空 |
 | `plan` | 关联的 Superpowers Plan 路径，可为空 |
 | `build_mode` | 已选择的执行方式，可为空 |
+| `isolation` | `branch` 或 `worktree`，工作区隔离方式，默认 `branch` |
 | `verify_mode` | `light` 或 `full`，可为空 |
 | `verify_result` | `pending`、`pass` 或 `fail` |
 | `verified_at` | 验证通过时间，可为空 |

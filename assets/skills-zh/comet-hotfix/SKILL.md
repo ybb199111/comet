@@ -64,6 +64,7 @@ phase: build
 design_doc: null
 plan: null
 build_mode: direct
+isolation: branch
 verify_mode: light
 verify_result: pending
 verified_at: null
@@ -77,6 +78,7 @@ archived: false
   确认 design_doc 行的值为 "null"
   确认 plan 行的值为 "null"
   确认 build_mode 行的值为 "direct"
+  确认 isolation 行的值为 "branch"
   确认 verify_mode 行的值为 "light"
   确认 verify_result 行的值为 "pending"
   确认 verified_at 行的值为 "null"
