@@ -30,12 +30,11 @@ design-doc: docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md
 
 ### 2. 更新计划状态
 
-在 `openspec/changes/<name>/.openspec.yaml` 中合并更新：
+在 `openspec/changes/<name>/.comet.yaml` 中更新：
 
 ```yaml
-comet:
-  phase: build
-  plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
+phase: build
+plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
 ```
 
 ### 3. 选择执行方式
@@ -52,7 +51,7 @@ comet:
 - 任务数 ≤ 2 且无跨模块依赖 → 推荐 B
 - 来自 hotfix 路径 → 推荐 B
 
-用户选择后，在 `openspec/changes/<name>/.openspec.yaml` 中记录实际执行方式。`build_mode` 只允许以下值之一：
+用户选择后，在 `openspec/changes/<name>/.comet.yaml` 中记录实际执行方式。`build_mode` 只允许以下值之一：
 
 - `subagent-driven-development`
 - `executing-plans`
@@ -62,14 +61,12 @@ Few-shot 示例：
 
 ```yaml
 # 用户选择稳健模式 / A
-comet:
-  build_mode: subagent-driven-development
+build_mode: subagent-driven-development
 ```
 
 ```yaml
 # 用户选择快速模式 / B
-comet:
-  build_mode: executing-plans
+build_mode: executing-plans
 ```
 
 然后，**立即执行：** 使用 Skill 工具加载对应技能。禁止跳过此步骤。
@@ -105,15 +102,14 @@ comet:
 - tasks.md 全部勾选
 - 代码已提交
 - 测试通过
-- `.openspec.yaml` 中 `comet.phase` 已更新为 `verify`
+- `.comet.yaml` 中 `phase` 已更新为 `verify`
 - **阶段守卫**：运行 `bash $COMET_GUARD <change-name> build`，全部 PASS 后才允许流转
 
-退出前合并更新：
+退出前更新 `.comet.yaml`：
 
 ```yaml
-comet:
-  phase: verify
-  verify_result: pending
+phase: verify
+verify_result: pending
 ```
 
 ## 自动流转
