@@ -37,6 +37,8 @@ validate_change_name "$CHANGE"
 
 CHANGE_DIR="openspec/changes/$CHANGE"
 YAML="$CHANGE_DIR/.comet.yaml"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")" 2>/dev/null || dirname "$0")" && pwd)"
+STATE_SH="$SCRIPT_DIR/comet-state.sh"
 TODAY=$(date +%Y-%m-%d)
 ARCHIVE_NAME="${TODAY}-${CHANGE}"
 ARCHIVE_DIR="openspec/changes/archive/${ARCHIVE_NAME}"
@@ -61,8 +63,12 @@ echo "=== Comet Archive: $CHANGE ===" >&2
 
 yaml_field() {
   local field="$1"
-  if [ -f "$YAML" ]; then
-    grep "^${field}:" "$YAML" | sed "s/^${field}: *//" | tr -d '"' | tr -d "'"
+  if [ -f "$STATE_SH" ]; then
+    bash "$STATE_SH" get "$CHANGE" "$field" 2>/dev/null
+  else
+    if [ -f "$YAML" ]; then
+      grep "^${field}:" "$YAML" | sed "s/^${field}: *//" | tr -d '"' | tr -d "'"
+    fi
   fi
 }
 
