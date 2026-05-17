@@ -151,7 +151,7 @@ archived: false
 |------|---------|
 | `openspec list --json` 失败 | 检查 openspec 是否已安装，提示用户运行 `openspec init` |
 | 子 skill 不可用（如 `superpowers:brainstorming`） | 停止流程，提示安装或启用对应 skill |
-| `.comet.yaml` 格式异常或缺失 | 以文件状态为准（tasks.md、docs/superpowers/），修正元数据后继续 |
+| `.comet.yaml` 格式异常或缺失 | 以文件状态为准（tasks.md、docs/superpowers/），使用 `bash $COMET_STATE set <name> <field> <value>` 修正元数据后继续 |
 | Maven 编译/测试失败 | 返回 build 阶段修复，不进入 verify |
 | change 目录结构不完整 | 按 `comet-open` 的产物要求补齐缺失文件 |
 
@@ -167,6 +167,12 @@ Comet 阶段守卫脚本 `comet-guard.sh` 和归档脚本 `comet-archive.sh` 随
 ```bash
 COMET_GUARD=$(find . -path '*/comet/scripts/comet-guard.sh' -type f -print -quit)
 bash "$COMET_GUARD" <change-name> <phase>
+```
+
+**状态管理脚本**：`comet-state.sh` 提供 init/set/get/check/scale 五个子命令，统一管理状态文件字段：
+
+```bash
+COMET_STATE=$(find . -path '*/comet/scripts/comet-state.sh' -type f -print -quit)
 ```
 
 **自动状态更新**：guard 支持 `--apply` 参数，验证通过后自动更新 `.comet.yaml` 状态字段：
