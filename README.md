@@ -26,6 +26,7 @@
 ```
 
 > 中文版：[README-zh.md](README-zh.md)
+> [B站视频介绍 ](https://www.bilibili.com/video/BV1y4Gi6CEo1/?spm_id_from=333.1387.homepage.video_card.click&vd_source=d22726fe6b108647dbebf1c5d8817377)
 
 **OpenSpec + Superpowers dual-star development workflow** — one command from idea to archive.
 
