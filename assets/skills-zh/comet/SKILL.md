@@ -171,13 +171,27 @@ archived: false
 | `design_doc` | 关联的 Superpowers Design Doc 路径，可为空 |
 | `plan` | 关联的 Superpowers Plan 路径，可为空 |
 | `build_mode` | 已选择的执行方式，可为空 |
-| `isolation` | `branch` 或 `worktree`，工作区隔离方式，默认 `branch` |
+| `isolation` | `branch` 或 `worktree`，工作区隔离方式。full 初始化可为 `null`，但只允许持续到 `/comet-build` Step 3 前；hotfix/tweak 默认 `branch` |
 | `verify_mode` | `light` 或 `full`，可为空 |
 | `verify_result` | `pending`、`pass` 或 `fail` |
 | `verification_report` | 验证报告文件路径，verify 通过前必须指向已存在文件 |
 | `branch_status` | `pending` 或 `handled`，分支处理完成后设为 `handled` |
 | `verified_at` | 验证通过时间，可为空 |
 | `archived` | change 是否已归档 |
+
+可选字段：
+
+| 字段 | 含义 |
+|------|------|
+| `direct_override` | `true`/`false`。full workflow 如需使用 `build_mode: direct`，必须显式设为 `true` |
+| `build_command` | 项目构建命令。guard 优先运行该命令，失败时打印命令输出 |
+| `verify_command` | 项目验证命令。verify guard 优先运行该命令，未配置时回退到构建命令 |
+
+状态机硬约束：
+- `build → verify` 前，`isolation` 必须是 `branch` 或 `worktree`
+- `build → verify` 前，`build_mode` 必须已选择
+- `build_mode: direct` 默认只允许 `hotfix` / `tweak`；full workflow 需要 `direct_override: true`
+- 这些约束同时存在于 `comet-guard.sh build --apply` 和 `comet-state.sh transition <name> build-complete`
 
 ### 脚本定位
 

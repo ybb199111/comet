@@ -43,6 +43,9 @@ The script automatically executes:
 
 If script returns non-zero exit code, report error and stop.
 If script returns zero exit code, archive is complete.
+The summary `X/Y steps succeeded` counts real executed steps and does not double-count delta spec sync or document annotation.
+
+When a delta spec differs from an existing main spec, the script prints a unified diff before overwrite so the archive sync content is visible.
 
 Use `--dry-run` flag to preview without executing.
 

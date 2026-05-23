@@ -80,6 +80,11 @@ bash "$COMET_STATE" set <name> isolation <value>
 - `branch`
 - `worktree`
 
+<IMPORTANT>
+This is a script-enforced hard constraint, not a suggestion. Full workflow init may temporarily leave `isolation` as `null`, but only before this step.
+Before implementation starts, stop and ask the user, then write either `branch` or `worktree`. If it remains `null`, both the `build → verify` guard and `comet-state transition build-complete` will fail.
+</IMPORTANT>
+
 **Execute isolation**:
 
 - **branch**: Run `git checkout -b <change-name>`, subsequent work on the new branch
@@ -109,7 +114,16 @@ bash "$COMET_STATE" set <name> build_mode <value>
 
 - `subagent-driven-development`
 - `executing-plans`
-- `direct` (only for hotfix preset use)
+- `direct` (default only for hotfix/tweak preset use)
+
+Full workflow must not default to `direct`. Use it only when the user explicitly asks to bypass the plan execution skills and you record an explicit override:
+
+```bash
+bash "$COMET_STATE" set <name> direct_override true
+bash "$COMET_STATE" set <name> build_mode direct
+```
+
+Without `direct_override: true`, `build_mode=direct` in full workflow is blocked by both guard and state transition.
 
 Then, **immediately execute:** Use the Skill tool to load the corresponding skill. Skipping this step is prohibited.
 
@@ -151,7 +165,19 @@ Build is the longest phase and may span many tasks. To support resume after cont
 - All tasks.md checked
 - Code committed
 - Project-specific build/tests explicitly run and pass; do not rely only on guard auto-detection
+- `isolation` has been written as `branch` or `worktree`
+- `build_mode` has been written as `subagent-driven-development`, `executing-plans`, or `direct` with explicit override
 - **Phase guard**: Run `bash "$COMET_GUARD" <change-name> build --apply`; after all PASS, state advances to `phase: verify`
+
+Guard reads project command configuration first:
+
+```yaml
+build_command: <build command>
+verify_command: <verify command>
+```
+
+Configuration can live in the change `.comet.yaml`, or in repo-root `.comet.yaml` / `comet.yaml` / `.comet.yml` / `comet.yml`.
+Only when no command is configured does guard fall back to `npm run build`, Maven, or Cargo auto-detection. When a command fails, guard prints the command output as evidence for debugging.
 
 Before exit, run guard to auto-transition:
 

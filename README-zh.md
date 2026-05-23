@@ -234,6 +234,8 @@ verified_at: null
 archived: false
 ```
 
+full workflow 初始化时 `build_mode` 和 `isolation` 可以暂时为 `null`，但进入 `build → verify` 前必须完成用户决策并写入合法值。`direct` 默认只允许 hotfix/tweak；full workflow 使用 `direct` 时必须额外记录 `direct_override: true`。项目可在 change 或仓库根配置中设置 `build_command` / `verify_command`，guard 会优先运行并打印失败输出。
+
 其中所有的状态和运行阶段都采用脚本更新，且**能够检验每个阶段是否真实完成任务，达到条件之后才会退出当前阶段，执行更新状态动作**。相比于将复杂的状态管理机制记录在 Skill 中，脚本的方式强保障了核心状态扭转的可靠性、YAML 文件的正确性，以及断点恢复的便捷——Agent 只需要通过 Comet 内置命令进行状态读取就能知道当前 Spec 所处的情况。
 
 ### 可靠性特性
@@ -251,18 +253,23 @@ Comet 通过自动化状态转换确保 agent 执行可靠性：
    - Guard 和 archive 脚本内部使用 `comet-state.sh` 进行状态管理
 
 3. **模式校验** — `comet-yaml-validate.sh` 确保数据完整性
-   - 校验必填字段（12 个字段）
-   - 校验枚举值（8 种枚举类型）
+   - 校验必填字段和可选字段
+   - 校验枚举值（包括 `direct_override`）
    - 校验引用文件路径存在
    - 检测未知/拼写错误字段
 
-4. **验证证据强制** — Guard 在阶段流转前强制要求验证凭证
+4. **Build 决策强制** — Guard 和状态转换同时拦截跳过关键选择
+   - `isolation` 必须是 `branch` 或 `worktree`
+   - `build_mode` 必须已选择
+   - full workflow 的 `build_mode: direct` 必须有 `direct_override: true`
+
+5. **验证证据强制** — Guard 在阶段流转前强制要求验证凭证
    - `verify-pass` 转换要求 `verification_report` 指向已存在的验证报告文件
    - `branch_status` 必须为 `handled` 才能通过验证
    - Guard 检查 `verification_report exists` 和 `branch_status=handled` 作为硬性前提
    - 防止验证或分支处理被跳过时产生虚假的阶段推进
 
-5. **归档自动化** — `comet-archive.sh` 一键处理完整归档流程
+6. **归档自动化** — `comet-archive.sh` 一键处理完整归档流程
    - 验证入口状态、同步 delta specs 到 main specs
    - 标注设计文档和计划文档的 frontmatter
    - 将变更移至归档目录并更新 `archived: true`

@@ -3,7 +3,7 @@ import { promises as fs } from 'fs';
 
 describe('CI workflows', () => {
   it('defines PR title linting with Comet-specific semantic scopes', async () => {
-    const workflow = await fs.readFile('.github/workflows/pr-title-lint.yml', 'utf-8');
+    const workflow = (await fs.readFile('.github/workflows/pr-title-lint.yml', 'utf-8')).replace(/\r\n/g, '\n');
 
     expect(workflow).toContain('name: PR Title Lint');
     expect(workflow).toContain('pull-requests: read');

@@ -5,11 +5,16 @@ import os from 'os';
 import path from 'path';
 
 const scriptsDir = path.resolve('assets', 'skills', 'comet', 'scripts');
+const bashUname = (spawnSync('bash', ['-lc', 'uname -s'], { encoding: 'utf-8' }).stdout || '').trim();
+const isGitBash = /^(MINGW|MSYS|CYGWIN)/.test(bashUname);
 
 function toBashPath(filePath: string): string {
   const resolved = path.resolve(filePath).replace(/\\/g, '/');
   const driveMatch = resolved.match(/^([A-Za-z]):\/(.*)$/);
   if (!driveMatch) return resolved;
+  if (process.platform === 'win32' && isGitBash) {
+    return `/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`;
+  }
   return `/mnt/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`;
 }
 
@@ -45,7 +50,7 @@ describe('comet shell scripts', () => {
     await fs.mkdir(tmpDir, { recursive: true });
     const tmpScriptsDir = path.join(tmpDir, 'scripts');
     await fs.mkdir(tmpScriptsDir, { recursive: true });
-    for (const name of ['comet-guard.sh', 'comet-state.sh', 'comet-yaml-validate.sh']) {
+    for (const name of ['comet-archive.sh', 'comet-guard.sh', 'comet-state.sh', 'comet-yaml-validate.sh']) {
       const content = await fs.readFile(path.join(scriptsDir, name), 'utf-8');
       await fs.writeFile(path.join(tmpScriptsDir, name), content.replace(/\r\n/g, '\n'));
     }
@@ -100,6 +105,309 @@ describe('comet shell scripts', () => {
     expect(result.stderr).toContain('[FAIL] Build passes');
   }, 20_000);
 
+  it('blocks build completion until isolation and build mode are selected', async () => {
+    await createChange(
+      tmpDir,
+      'missing-build-decisions',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: null',
+        'isolation: null',
+        'verify_mode: null',
+        'design_doc: null',
+        'plan: null',
+        'verify_result: pending',
+        'verified_at: null',
+        'archived: false',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"' } }),
+    );
+
+    const guard = runBash(tmpDir, guardScript, ['missing-build-decisions', 'build']);
+    const transition = runBash(tmpDir, stateScript, ['transition', 'missing-build-decisions', 'build-complete']);
+
+    expect(guard.status).not.toBe(0);
+    expect(guard.stderr).toContain('[FAIL] isolation selected');
+    expect(guard.stderr).toContain('[FAIL] build_mode selected');
+    expect(guard.stderr).toContain('Next: ask the user to choose branch or worktree');
+    expect(guard.stderr).toContain('Next: ask the user to choose an implementation mode');
+    expect(transition.status).not.toBe(0);
+    expect(transition.stderr).toContain('isolation must be branch or worktree');
+  }, 20_000);
+
+  it('rejects direct build mode for full workflow without explicit override', async () => {
+    await createChange(
+      tmpDir,
+      'direct-full',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: direct',
+        'isolation: branch',
+        'verify_mode: null',
+        'design_doc: null',
+        'plan: null',
+        'verify_result: pending',
+        'verified_at: null',
+        'archived: false',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"' } }),
+    );
+
+    const result = runBash(tmpDir, guardScript, ['direct-full', 'build']);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('[FAIL] build_mode allowed for workflow');
+    expect(result.stderr).toContain('direct is only allowed for hotfix/tweak');
+    expect(result.stderr).toContain('Next: switch build_mode to executing-plans or subagent-driven-development');
+  }, 20_000);
+
+  it('prints actionable remediation for unfinished tasks', async () => {
+    await createChange(
+      tmpDir,
+      'unfinished-tasks',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: executing-plans',
+        'isolation: branch',
+        'verify_mode: null',
+        'design_doc: null',
+        'plan: null',
+        'verify_result: pending',
+        'verified_at: null',
+        'archived: false',
+        '',
+      ].join('\n'),
+      ['- [x] done', '- [ ] finish guard remediation'].join('\n'),
+    );
+    await writeFile(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"' } }),
+    );
+
+    const result = runBash(tmpDir, guardScript, ['unfinished-tasks', 'build']);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('[FAIL] tasks.md all tasks checked');
+    expect(result.stderr).toContain('Unfinished tasks:');
+    expect(result.stderr).toContain('finish guard remediation');
+    expect(result.stderr).toContain('Next: complete or explicitly remove unfinished tasks');
+  }, 20_000);
+
+  it('rejects direct build mode for full workflow during state transition', async () => {
+    await createChange(
+      tmpDir,
+      'direct-full-transition',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: direct',
+        'isolation: branch',
+        'verify_mode: null',
+        'design_doc: null',
+        'plan: null',
+        'verify_result: pending',
+        'verified_at: null',
+        'archived: false',
+        '',
+      ].join('\n'),
+    );
+
+    const result = runBash(tmpDir, stateScript, ['transition', 'direct-full-transition', 'build-complete']);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('build_mode=direct is only allowed for hotfix/tweak');
+  });
+
+  it('allows direct build mode for full workflow with explicit override', async () => {
+    await createChange(
+      tmpDir,
+      'direct-full-override',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: direct',
+        'direct_override: true',
+        'isolation: branch',
+        'verify_mode: null',
+        'design_doc: null',
+        'plan: null',
+        'verify_result: pending',
+        'verified_at: null',
+        'archived: false',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"' } }),
+    );
+
+    const result = runBash(tmpDir, guardScript, ['direct-full-override', 'build']);
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('[PASS] build_mode allowed for workflow');
+  }, 20_000);
+
+  it('runs configured build command and prints its failure output', async () => {
+    await createChange(
+      tmpDir,
+      'configured-build',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: executing-plans',
+        'isolation: branch',
+        'verify_mode: null',
+        'build_command: node build-check.js',
+        'design_doc: null',
+        'plan: null',
+        'verify_result: pending',
+        'verified_at: null',
+        'archived: false',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(path.join(tmpDir, 'build-check.js'), 'console.error("configured failure"); process.exit(1);\n');
+    await writeFile(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"' } }),
+    );
+
+    const result = runBash(tmpDir, guardScript, ['configured-build', 'build']);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('configured failure');
+  }, 20_000);
+
+  it('preserves configured command values with sed replacement metacharacters', async () => {
+    const command = 'node -e "console.log(\'a&b|c\')"';
+    await createChange(
+      tmpDir,
+      'command-metacharacters',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: executing-plans',
+        'isolation: branch',
+        'verify_mode: null',
+        'design_doc: null',
+        'plan: null',
+        'verify_result: pending',
+        'verified_at: null',
+        'archived: false',
+        '',
+      ].join('\n'),
+    );
+
+    const set = runBash(tmpDir, stateScript, ['set', 'command-metacharacters', 'build_command', command]);
+    const get = runBash(tmpDir, stateScript, ['get', 'command-metacharacters', 'build_command']);
+
+    expect(set.status).toBe(0);
+    expect(get.stdout.trim()).toBe(command);
+  });
+
+  it('keeps shell scripts portable across GNU and BSD sed', async () => {
+    for (const name of ['comet-state.sh', 'comet-archive.sh', 'comet-guard.sh', 'comet-yaml-validate.sh']) {
+      const content = await fs.readFile(path.join(tmpDir, 'scripts', name), 'utf-8');
+
+      expect(content).not.toMatch(/\bsed\s+-i(?:\s|$)/);
+    }
+  });
+
+  it('keeps optional YAML field reads safe under pipefail', async () => {
+    for (const name of ['comet-state.sh', 'comet-guard.sh']) {
+      const content = await fs.readFile(path.join(tmpDir, 'scripts', name), 'utf-8');
+
+      expect(content).toMatch(/grep "\^\$\{field\}:" "\$[a-z_]+".*\|\| true\)/);
+    }
+  });
+
+  it('guards bash uname detection when bash cannot be spawned', async () => {
+    const files = [path.resolve('scripts', 'run-bats.js'), path.resolve('test', 'ts', 'comet-scripts.test.ts')];
+
+    for (const file of files) {
+      const content = await fs.readFile(file, 'utf-8');
+
+      expect(content).toContain(".stdout || ''");
+    }
+  });
+
+  it('uses root-level build command config before inferred build commands', async () => {
+    await createChange(
+      tmpDir,
+      'root-configured-build',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: executing-plans',
+        'isolation: branch',
+        'verify_mode: null',
+        'design_doc: null',
+        'plan: null',
+        'verify_result: pending',
+        'verified_at: null',
+        'archived: false',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(path.join(tmpDir, 'comet.yaml'), 'build_command: node root-build-check.js\n');
+    await writeFile(path.join(tmpDir, 'root-build-check.js'), 'console.error("root configured failure"); process.exit(1);\n');
+    await writeFile(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"' } }),
+    );
+
+    const result = runBash(tmpDir, guardScript, ['root-configured-build', 'build']);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('root configured failure');
+  }, 20_000);
+
+  it('runs configured verify command before archiving', async () => {
+    await createChange(
+      tmpDir,
+      'configured-verify',
+      [
+        'workflow: full',
+        'phase: verify',
+        'build_mode: executing-plans',
+        'isolation: branch',
+        'verify_mode: full',
+        'verify_command: node verify-check.js',
+        'design_doc: null',
+        'plan: null',
+        'verify_result: pending',
+        'verification_report: docs/superpowers/reports/configured-verify.md',
+        'branch_status: handled',
+        'verified_at: null',
+        'archived: false',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(path.join(tmpDir, 'docs', 'superpowers', 'reports', 'configured-verify.md'), 'PASS\n');
+    await writeFile(path.join(tmpDir, 'verify-check.js'), 'console.error("verify configured failure"); process.exit(1);\n');
+    await writeFile(
+      path.join(tmpDir, 'package.json'),
+      JSON.stringify({ scripts: { build: 'node -e "process.exit(0)"' } }),
+    );
+
+    const result = runBash(tmpDir, guardScript, ['configured-verify', 'verify']);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('verify configured failure');
+  }, 20_000);
+
   it('validates archive completeness after the change has moved into archive', async () => {
     await createChange(
       tmpDir,
@@ -124,6 +432,41 @@ describe('comet shell scripts', () => {
     expect(result.status).toBe(0);
     expect(result.stderr).toContain('ALL CHECKS PASSED');
   });
+
+  it('reports accurate archive step counts when syncing and annotating', async () => {
+    const archiveScript = path.join(tmpDir, 'scripts', 'comet-archive.sh');
+    await createChange(
+      tmpDir,
+      'ready-to-archive',
+      [
+        'workflow: full',
+        'phase: archive',
+        'build_mode: executing-plans',
+        'isolation: branch',
+        'verify_mode: full',
+        'design_doc: docs/superpowers/specs/ready-design.md',
+        'plan: docs/superpowers/plans/ready-plan.md',
+        'verify_result: pass',
+        'verification_report: docs/superpowers/reports/ready.md',
+        'branch_status: handled',
+        'verified_at: 2026-05-21',
+        'archived: false',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(path.join(tmpDir, 'docs', 'superpowers', 'specs', 'ready-design.md'), 'design\n');
+    await writeFile(path.join(tmpDir, 'docs', 'superpowers', 'plans', 'ready-plan.md'), 'plan\n');
+    await writeFile(path.join(tmpDir, 'docs', 'superpowers', 'reports', 'ready.md'), 'PASS\n');
+    await writeFile(
+      path.join(tmpDir, 'openspec', 'changes', 'ready-to-archive', 'specs', 'capability', 'spec.md'),
+      'delta spec\n',
+    );
+
+    const result = runBash(tmpDir, archiveScript, ['ready-to-archive']);
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('Archive complete. 7/7 steps succeeded.');
+  }, 20_000);
 
   it('uses plan base-ref to scale verification after changes have been committed', async () => {
     execFileSync('git', ['init'], { cwd: tmpDir, stdio: 'ignore' });

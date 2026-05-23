@@ -70,8 +70,39 @@ yaml_field() {
   local field="$1"
   local yaml_file="$2"
   if [ -f "$yaml_file" ]; then
-    grep "^${field}:" "$yaml_file" | sed "s/^${field}: *//" | tr -d '"' | tr -d "'"
+    local value
+    value=$(grep "^${field}:" "$yaml_file" 2>/dev/null | sed "s/^${field}: *//" || true)
+    strip_wrapping_quotes "$value"
   fi
+}
+
+strip_wrapping_quotes() {
+  local value="$1"
+  case "$value" in
+    \"*\")
+      printf '%s\n' "${value:1:${#value}-2}"
+      ;;
+    \'*\')
+      printf '%s\n' "${value:1:${#value}-2}"
+      ;;
+    *)
+      printf '%s\n' "$value"
+      ;;
+  esac
+}
+
+replace_yaml_field() {
+  local yaml_file="$1"
+  local field="$2"
+  local value="$3"
+  local tmp_file
+
+  tmp_file=$(mktemp)
+  awk -v field="$field" -v value="$value" '
+    index($0, field ":") == 1 { print field ": " value; next }
+    { print }
+  ' "$yaml_file" > "$tmp_file"
+  mv "$tmp_file" "$yaml_file"
 }
 
 file_nonempty() {
@@ -193,12 +224,12 @@ cmd_set() {
 
   # Validate field name
   case "$field" in
-    workflow|phase|build_mode|isolation|verify_mode|verify_result|verification_report|branch_status|archived|design_doc|plan|verified_at)
+    workflow|phase|build_mode|isolation|verify_mode|verify_result|verification_report|branch_status|archived|design_doc|plan|verified_at|direct_override|build_command|verify_command)
       # Valid field
       ;;
     *)
       red "ERROR: Unknown field: '$field'" >&2
-      red "Valid fields: workflow, phase, design_doc, plan, build_mode, isolation, verify_mode, verify_result, verification_report, branch_status, verified_at, archived" >&2
+      red "Valid fields: workflow, phase, design_doc, plan, build_mode, isolation, verify_mode, verify_result, verification_report, branch_status, verified_at, archived, direct_override, build_command, verify_command" >&2
       exit 1
       ;;
   esac
@@ -229,15 +260,17 @@ cmd_set() {
     archived)
       validate_enum "$value" "true" "false"
       ;;
-    design_doc|plan|verification_report|verified_at)
-      # No validation for path fields and date fields
+    direct_override)
+      validate_enum "$value" "true" "false"
+      ;;
+    design_doc|plan|verification_report|verified_at|build_command|verify_command)
+      # No validation for path fields, date fields, or project command strings
       ;;
   esac
 
   # Write or update the field
   if grep -q "^${field}:" "$yaml_file"; then
-    # Field exists, replace it (use | delimiter to avoid / conflicts in paths)
-    sed -i "s|^${field}:.*|${field}: ${value}|" "$yaml_file"
+    replace_yaml_field "$yaml_file" "$field" "$value"
   else
     # Field doesn't exist, append it
     echo "${field}: ${value}" >> "$yaml_file"
@@ -274,6 +307,36 @@ require_verification_evidence() {
   fi
 }
 
+require_build_decisions() {
+  local change_name="$1"
+  local workflow build_mode isolation direct_override
+  workflow=$(cmd_get "$change_name" "workflow")
+  build_mode=$(cmd_get "$change_name" "build_mode")
+  isolation=$(cmd_get "$change_name" "isolation")
+  direct_override=$(cmd_get "$change_name" "direct_override" 2>/dev/null || true)
+
+  case "$isolation" in
+    branch|worktree) ;;
+    *)
+      red "ERROR: Cannot transition '$change_name': isolation must be branch or worktree, got '${isolation:-null}'" >&2
+      exit 1
+      ;;
+  esac
+
+  case "$build_mode" in
+    subagent-driven-development|executing-plans|direct) ;;
+    *)
+      red "ERROR: Cannot transition '$change_name': build_mode must be selected before leaving build, got '${build_mode:-null}'" >&2
+      exit 1
+      ;;
+  esac
+
+  if [ "$build_mode" = "direct" ] && [ "$workflow" != "hotfix" ] && [ "$workflow" != "tweak" ] && [ "$direct_override" != "true" ]; then
+    red "ERROR: Cannot transition '$change_name': build_mode=direct is only allowed for hotfix/tweak unless direct_override=true" >&2
+    exit 1
+  fi
+}
+
 cmd_transition() {
   local change_name="$1"
   local event="$2"
@@ -298,6 +361,7 @@ cmd_transition() {
       ;;
     build-complete)
       require_phase "$change_name" "build"
+      require_build_decisions "$change_name"
       cmd_set "$change_name" phase verify
       cmd_set "$change_name" verify_result pending
       cmd_set "$change_name" verification_report null
@@ -540,7 +604,7 @@ cmd_scale() {
   echo "  → Result: $result" >&2
 
   # Update verify_mode in .comet.yaml
-  sed -i "s/^verify_mode:.*/verify_mode: $result/" "$yaml_file"
+  replace_yaml_field "$yaml_file" "verify_mode" "$result"
 
   green "[SCALE] verify_mode=$result"
 }

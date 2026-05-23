@@ -8,10 +8,16 @@ function escapeRegExp(value) {
   return value.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const bashUname = (spawnSync('bash', ['-lc', 'uname -s'], { encoding: 'utf8' }).stdout || '').trim();
+const isGitBash = /^(MINGW|MSYS|CYGWIN)/.test(bashUname);
+
 function toBashPath(filePath) {
   const resolved = path.resolve(filePath).replace(/\\/g, '/');
   const driveMatch = resolved.match(/^([A-Za-z]):\/(.*)$/);
   if (!driveMatch) return resolved;
+  if (process.platform === 'win32' && isGitBash) {
+    return `/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`;
+  }
   return `/mnt/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`;
 }
 

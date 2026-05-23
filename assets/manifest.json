@@ -1,5 +1,5 @@
 {
-  "version": "0.2.5",
+  "version": "0.2.6",
   "skills": [
     "comet/SKILL.md",
     "comet/scripts/comet-guard.sh",

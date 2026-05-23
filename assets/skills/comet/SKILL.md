@@ -156,6 +156,8 @@ build_mode: subagent-driven-development
 isolation: branch
 verify_mode: light
 verify_result: pending
+verification_report: null
+branch_status: pending
 verified_at: null
 archived: false
 ```
@@ -167,11 +169,27 @@ archived: false
 | `design_doc` | Associated Superpowers Design Doc path, can be empty |
 | `plan` | Associated Superpowers Plan path, can be empty |
 | `build_mode` | Selected execution mode, can be empty |
-| `isolation` | `branch` or `worktree`, workspace isolation method, defaults to `branch` |
+| `isolation` | `branch` or `worktree`, workspace isolation method. Full workflow init may leave this as `null`, but only until `/comet-build` Step 3; hotfix/tweak default to `branch` |
 | `verify_mode` | `light` or `full`, can be empty |
 | `verify_result` | `pending`, `pass`, or `fail` |
+| `verification_report` | Verification report file path; must point to an existing file before verify can pass |
+| `branch_status` | `pending` or `handled`; set to `handled` after branch handling completes |
 | `verified_at` | Verification pass time, can be empty |
 | `archived` | Whether change is archived |
+
+Optional fields:
+
+| Field | Meaning |
+|-------|---------|
+| `direct_override` | `true`/`false`. Full workflow may use `build_mode: direct` only when this is explicitly `true` |
+| `build_command` | Project build command. Guard runs this first and prints failure output |
+| `verify_command` | Project verification command. Verify guard runs this first; if absent, it falls back to the build command |
+
+State-machine hard constraints:
+- Before `build → verify`, `isolation` must be `branch` or `worktree`
+- Before `build → verify`, `build_mode` must be selected
+- `build_mode: direct` is allowed by default only for `hotfix` / `tweak`; full workflow requires `direct_override: true`
+- These constraints are enforced by both `comet-guard.sh build --apply` and `comet-state.sh transition <name> build-complete`
 
 ### Script Location
 

@@ -57,6 +57,12 @@ step_fail() {
   STEPS_TOTAL=$((STEPS_TOTAL + 1))
 }
 
+step_dry_run() {
+  yellow "  [DRY-RUN] $1"
+  STEPS_OK=$((STEPS_OK + 1))
+  STEPS_TOTAL=$((STEPS_TOTAL + 1))
+}
+
 echo "=== Comet Archive: $CHANGE ===" >&2
 
 # --- Step 1: Read .comet.yaml, extract paths ---
@@ -131,16 +137,16 @@ sync_delta_specs() {
       continue
     fi
 
-    STEPS_TOTAL=$((STEPS_TOTAL + 1))
-
     if [ "$DRY_RUN" -eq 1 ]; then
-      yellow "  [DRY-RUN] Would sync: $capability → $main_spec"
-      STEPS_OK=$((STEPS_OK + 1))
+      step_dry_run "Would sync: $capability → $main_spec"
       continue
     fi
 
     if [ ! -f "$main_spec" ]; then
       mkdir -p "openspec/specs/$capability"
+    elif ! cmp -s "$main_spec" "$delta_spec"; then
+      yellow "  [DIFF] Delta spec differs from main spec before sync: $capability"
+      diff -u "$main_spec" "$delta_spec" >&2 || true
     fi
     cp "$delta_spec" "$main_spec"
 
@@ -160,11 +166,8 @@ annotate_frontmatter() {
     return 0
   fi
 
-  STEPS_TOTAL=$((STEPS_TOTAL + 1))
-
   if [ "$DRY_RUN" -eq 1 ]; then
-    yellow "  [DRY-RUN] Would annotate: $file"
-    STEPS_OK=$((STEPS_OK + 1))
+    step_dry_run "Would annotate: $file"
     return 0
   fi
 
@@ -213,11 +216,8 @@ fi
 
 # --- Step 7: Move change to archive ---
 
-STEPS_TOTAL=$((STEPS_TOTAL + 1))
-
 if [ "$DRY_RUN" -eq 1 ]; then
-  yellow "  [DRY-RUN] Would move: $CHANGE_DIR → $ARCHIVE_DIR"
-  STEPS_OK=$((STEPS_OK + 1))
+  step_dry_run "Would move: $CHANGE_DIR → $ARCHIVE_DIR"
 else
   mkdir -p "openspec/changes/archive"
   mv "$CHANGE_DIR" "$ARCHIVE_DIR"
@@ -226,13 +226,10 @@ fi
 
 # --- Step 8: Mark archived via comet-state transition ---
 
-STEPS_TOTAL=$((STEPS_TOTAL + 1))
-
 ARCHIVE_YAML="$ARCHIVE_DIR/.comet.yaml"
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  yellow "  [DRY-RUN] Would set archived: true in $ARCHIVE_YAML"
-  STEPS_OK=$((STEPS_OK + 1))
+  step_dry_run "Would set archived: true in $ARCHIVE_YAML"
 else
   if [ -f "$ARCHIVE_YAML" ]; then
     bash "$STATE_SH" transition "$ARCHIVE_NAME" archived >/dev/null

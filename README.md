@@ -235,6 +235,8 @@ verified_at: null
 archived: false
 ```
 
+In full workflow, `build_mode` and `isolation` may temporarily be `null` at init time, but they must be resolved before `build → verify`. `direct` is allowed by default only for hotfix/tweak; full workflow requires `direct_override: true`. Projects can configure `build_command` / `verify_command` in the change or repo root, and guard will run those commands first and print failure output.
+
 All states and execution phases are updated via scripts, and **each phase verifies that tasks are truly completed before exiting — conditions are met before the phase exits and state is updated**. Compared to recording complex state management mechanisms in Skills, the script approach strongly guarantees the reliability of core state transitions, correctness of YAML files, and convenience of breakpoint recovery — Agents only need to use Comet's built-in commands to read state and know the current Spec's situation.
 
 ### Reliability Features
@@ -252,18 +254,23 @@ Comet ensures agent execution reliability through automated state transitions:
    - Guard and archive scripts use `comet-state.sh` internally for state management
 
 3. **Schema Validation** — `comet-yaml-validate.sh` ensures data integrity
-   - Validates required fields (12 fields)
-   - Validates enum values (8 enum types)
+   - Validates required and optional fields
+   - Validates enum values, including `direct_override`
    - Validates referenced file paths exist
    - Detects unknown/typos fields
 
-4. **Verification Evidence** — Guard enforces proof before phase advance
+4. **Build Decision Enforcement** — Guard and state transitions both block skipped build choices
+   - `isolation` must be `branch` or `worktree`
+   - `build_mode` must be selected before leaving build
+   - Full workflow `build_mode: direct` requires `direct_override: true`
+
+5. **Verification Evidence** — Guard enforces proof before phase advance
    - `verify-pass` transition requires `verification_report` pointing to an existing report file
    - `branch_status` must be `handled` before verify can pass
    - Guard checks `verification_report exists` and `branch_status=handled` as hard prerequisites
    - Prevents false phase advances when verification or branch handling was skipped
 
-5. **Archive Automation** — `comet-archive.sh` handles the full archive flow in one command
+6. **Archive Automation** — `comet-archive.sh` handles the full archive flow in one command
    - Validates entry state, syncs delta specs to main specs
    - Annotates design doc and plan frontmatter
    - Moves change to archive directory and updates `archived: true`

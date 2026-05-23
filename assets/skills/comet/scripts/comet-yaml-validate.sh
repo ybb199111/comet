@@ -44,7 +44,24 @@ WARNINGS=0
 
 # Helper: get value of a top-level field (handles null, empty, quoted)
 field_value() {
-  grep "^${1}:" "$YAML" 2>/dev/null | sed "s/^${1}: *//" | tr -d '"' | tr -d "'" || true
+  local value
+  value=$(grep "^${1}:" "$YAML" 2>/dev/null | sed "s/^${1}: *//" || true)
+  strip_wrapping_quotes "$value"
+}
+
+strip_wrapping_quotes() {
+  local value="$1"
+  case "$value" in
+    \"*\")
+      printf '%s\n' "${value:1:${#value}-2}"
+      ;;
+    \'*\')
+      printf '%s\n' "${value:1:${#value}-2}"
+      ;;
+    *)
+      printf '%s\n' "$value"
+      ;;
+  esac
 }
 
 fail()  { red "  FAIL: $1"; ERRORS=$((ERRORS + 1)); }
@@ -87,6 +104,7 @@ verify_mode=$(field_value "verify_mode")
 verify_result=$(field_value "verify_result")
 branch_status=$(field_value "branch_status")
 archived=$(field_value "archived")
+direct_override=$(field_value "direct_override")
 design_doc=$(field_value "design_doc")
 plan=$(field_value "plan")
 
@@ -98,6 +116,7 @@ validate_enum "verify_mode"   "$verify_mode"    "light full"
 validate_enum "verify_result" "$verify_result"  "pending pass fail"
 validate_enum "branch_status" "$branch_status"  "pending handled"
 validate_enum "archived"      "$archived"       "true false"
+validate_enum "direct_override" "$direct_override" "true false"
 
 # --- Path validation ---
 
@@ -114,7 +133,7 @@ if [ -n "$plan" ] && [ "$plan" != "null" ]; then
 fi
 
 # --- Unknown keys check ---
-KNOWN_KEYS="workflow phase design_doc plan build_mode isolation verify_mode verify_result verification_report branch_status verified_at archived"
+KNOWN_KEYS="workflow phase design_doc plan build_mode isolation verify_mode verify_result verification_report branch_status verified_at archived direct_override build_command verify_command"
 while IFS=: read -r key _; do
   key="${key// /}"
   [ -z "$key" ] && continue

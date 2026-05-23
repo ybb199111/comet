@@ -50,10 +50,16 @@ BLOCK=0
 check() {
   local desc="$1"
   shift
-  if "$@" 2>/dev/null; then
+  local output
+  if output=$("$@" 2>&1); then
     green "  [PASS] $desc"
   else
     red "  [FAIL] $desc"
+    if [ -n "$output" ]; then
+      while IFS= read -r line; do
+        red "    $line"
+      done <<< "$output"
+    fi
     BLOCK=1
   fi
 }
@@ -62,9 +68,23 @@ check() {
 
 tasks_all_done() {
   local tasks="$CHANGE_DIR/tasks.md"
-  [ -f "$tasks" ] || return 1
-  grep -q '\- \[x\]' "$tasks" || return 1
-  ! grep -q '\- \[ \]' "$tasks"
+  if [ ! -f "$tasks" ]; then
+    echo "tasks.md is missing at $tasks" >&2
+    echo "Next: restore or create tasks.md for this change before leaving build." >&2
+    return 1
+  fi
+  if ! grep -q '\- \[x\]' "$tasks"; then
+    echo "tasks.md has no completed tasks." >&2
+    echo "Next: complete implementation tasks and mark them with '- [x]'." >&2
+    return 1
+  fi
+  if grep -q '\- \[ \]' "$tasks"; then
+    echo "Unfinished tasks:" >&2
+    grep -n '\- \[ \]' "$tasks" >&2 || true
+    echo "Next: complete or explicitly remove unfinished tasks, then mark tasks.md with '- [x]'." >&2
+    return 1
+  fi
+  return 0
 }
 
 tasks_has_any() {
@@ -76,12 +96,64 @@ yaml_field_value() {
   local field="$1"
   local yaml="$CHANGE_DIR/.comet.yaml"
   if [ -f "$yaml" ]; then
-    grep "^${field}:" "$yaml" | sed "s/^${field}: *//" | tr -d '"' | tr -d "'"
+    local value
+    value=$(grep "^${field}:" "$yaml" 2>/dev/null | sed "s/^${field}: *//" || true)
+    strip_wrapping_quotes "$value"
   fi
+}
+
+strip_wrapping_quotes() {
+  local value="$1"
+  case "$value" in
+    \"*\")
+      printf '%s\n' "${value:1:${#value}-2}"
+      ;;
+    \'*\')
+      printf '%s\n' "${value:1:${#value}-2}"
+      ;;
+    *)
+      printf '%s\n' "$value"
+      ;;
+  esac
+}
+
+project_config_value() {
+  local field="$1"
+  local value
+
+  value=$(yaml_field_value "$field" 2>/dev/null || true)
+  if [ -n "$value" ] && [ "$value" != "null" ]; then
+    echo "$value"
+    return 0
+  fi
+
+  for config in ".comet.yaml" "comet.yaml" ".comet.yml" "comet.yml"; do
+    if [ -f "$config" ]; then
+      value=$(grep "^${field}:" "$config" 2>/dev/null | sed "s/^${field}: *//" || true)
+      value=$(strip_wrapping_quotes "$value")
+      if [ -n "$value" ] && [ "$value" != "null" ]; then
+        echo "$value"
+        return 0
+      fi
+    fi
+  done
 }
 
 file_nonempty() {
   [ -f "$1" ] && [ -s "$1" ]
+}
+
+is_windows_bash() {
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+run_command_string() {
+  local command="$1"
+  echo "+ $command" >&2
+  bash -lc "$command"
 }
 
 preflight() {
@@ -111,19 +183,94 @@ build_passes() {
   if [ "${COMET_SKIP_BUILD:-0}" = "1" ]; then
     return 0
   fi
+  local configured_build
+  configured_build=$(project_config_value "build_command" 2>/dev/null || true)
+  if [ -n "$configured_build" ]; then
+    run_command_string "$configured_build"
+    return $?
+  fi
   if [ -f "package.json" ] && grep -q '"build"' "package.json"; then
-    npm run build >/dev/null
+    npm run build
     return $?
   fi
   if [ -f "pom.xml" ]; then
-    mvn compile -q >/dev/null
+    if [ -x "./mvnw" ]; then
+      ./mvnw compile -q
+    elif is_windows_bash && command -v mvn.cmd >/dev/null 2>&1; then
+      mvn.cmd compile -q
+    else
+      mvn compile -q
+    fi
     return $?
   fi
   if [ -f "Cargo.toml" ]; then
-    cargo build >/dev/null
+    cargo build
     return $?
   fi
   return 1
+}
+
+verification_command_passes() {
+  if [ "${COMET_SKIP_BUILD:-0}" = "1" ]; then
+    return 0
+  fi
+  local configured_verify
+  configured_verify=$(project_config_value "verify_command" 2>/dev/null || true)
+  if [ -n "$configured_verify" ]; then
+    run_command_string "$configured_verify"
+    return $?
+  fi
+  build_passes
+}
+
+isolation_selected() {
+  local isolation
+  isolation=$(yaml_field_value "isolation" 2>/dev/null || true)
+  case "$isolation" in
+    branch|worktree) return 0 ;;
+    *)
+      echo "isolation must be branch or worktree, got '${isolation:-null}'" >&2
+      echo "Next: ask the user to choose branch or worktree, create the chosen isolation, then run:" >&2
+      echo "  bash \"\$COMET_STATE\" set $CHANGE isolation <branch|worktree>" >&2
+      return 1
+      ;;
+  esac
+}
+
+build_mode_selected() {
+  local build_mode
+  build_mode=$(yaml_field_value "build_mode" 2>/dev/null || true)
+  case "$build_mode" in
+    subagent-driven-development|executing-plans|direct) return 0 ;;
+    *)
+      echo "build_mode must be selected before leaving build, got '${build_mode:-null}'" >&2
+      echo "Next: ask the user to choose an implementation mode, then run:" >&2
+      echo "  bash \"\$COMET_STATE\" set $CHANGE build_mode <subagent-driven-development|executing-plans>" >&2
+      return 1
+      ;;
+  esac
+}
+
+build_mode_allowed_for_workflow() {
+  local workflow build_mode direct_override
+  workflow=$(yaml_field_value "workflow" 2>/dev/null || true)
+  build_mode=$(yaml_field_value "build_mode" 2>/dev/null || true)
+  direct_override=$(yaml_field_value "direct_override" 2>/dev/null || true)
+
+  if [ "$build_mode" != "direct" ]; then
+    return 0
+  fi
+  case "$workflow" in
+    hotfix|tweak) return 0 ;;
+    *)
+      if [ "$direct_override" = "true" ]; then
+        return 0
+      fi
+      echo "build_mode=direct is only allowed for hotfix/tweak unless direct_override: true is recorded" >&2
+      echo "Next: switch build_mode to executing-plans or subagent-driven-development, or stop and ask the user for an explicit direct override." >&2
+      return 1
+      ;;
+  esac
 }
 
 verify_result_is_pass() {
@@ -180,6 +327,9 @@ guard_design() {
 guard_build() {
   echo "=== Guard: build → verify ===" >&2
 
+  check "isolation selected" isolation_selected
+  check "build_mode selected" build_mode_selected
+  check "build_mode allowed for workflow" build_mode_allowed_for_workflow
   check "tasks.md all tasks checked" tasks_all_done
   check "proposal.md exists" file_nonempty "$CHANGE_DIR/proposal.md"
   check "Build passes" build_passes
@@ -189,7 +339,7 @@ guard_verify() {
   echo "=== Guard: verify → archive ===" >&2
 
   check "tasks.md all tasks checked" tasks_all_done
-  check "Build passes" build_passes
+  check "Build passes" verification_command_passes
   check "verification_report exists" verification_report_exists
   check "branch_status=handled" branch_status_handled
 }

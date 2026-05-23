@@ -43,6 +43,9 @@ bash "$COMET_ARCHIVE" "<change-name>"
 
 如脚本返回非零退出码，报告错误并停止。
 如脚本返回零退出码，归档完成。
+脚本摘要中的 `X/Y steps succeeded` 以真实执行步骤计数，不会因 delta spec 同步或文档标注重复累计。
+
+当待同步的 delta spec 与已有主 spec 不一致时，脚本会在覆盖前打印 unified diff 预览，帮助确认归档同步内容。
 
 如需预览而不实际执行，使用 `--dry-run` 参数。
 
