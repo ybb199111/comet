@@ -73,12 +73,12 @@ describe('openspec', () => {
       mockedExecSync.mockReturnValueOnce(Buffer.from('/usr/bin/openspec'));
       mockedExecSync.mockReturnValueOnce(Buffer.from('ok'));
 
-      const { installOpenSpec } = await import('../../src/core/openspec.js');
+      const { installOpenSpec, quoteShellArg } = await import('../../src/core/openspec.js');
       await installOpenSpec('/tmp/test', ['claude'], 'global');
 
       const initCall = mockedExecSync.mock.calls[1][0] as string;
       expect(initCall).not.toContain('--global');
-      expect(initCall).toContain('--tools "claude"');
+      expect(initCall).toContain(`--tools ${quoteShellArg('claude')}`);
     });
 
     it('uses the home directory as the OpenSpec init target for global scope', async () => {

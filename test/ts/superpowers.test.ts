@@ -103,6 +103,7 @@ describe('superpowers', () => {
     it('installs superpowers for valid platform ids', async () => {
       mockedExecSync.mockReturnValueOnce(Buffer.from('installed'));
 
+      const { quoteShellArg } = await import('../../src/core/openspec.js');
       const { installSuperpowersForPlatforms } = await import('../../src/core/superpowers.js');
       const result = await installSuperpowersForPlatforms('/tmp/test', 'project', [
         'claude',
@@ -112,7 +113,9 @@ describe('superpowers', () => {
       expect(result).toBe('installed');
       const cmd = mockedExecSync.mock.calls[0][0] as string;
       expect(cmd).toContain('npx skills add obra/superpowers');
-      expect(cmd).toContain('--agent "claude-code" --agent "cursor"');
+      expect(cmd).toContain(
+        `--agent ${quoteShellArg('claude-code')} --agent ${quoteShellArg('cursor')}`,
+      );
       expect(cmd).not.toContain('--agent claude-code,cursor');
       expect(cmd).toContain('-y');
     });
