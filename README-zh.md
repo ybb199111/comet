@@ -63,7 +63,7 @@ comet init
 4. 安装 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 技能
 5. 安装 [Superpowers](https://github.com/obra/superpowers) 技能
 6. 将 Comet 技能（你选择的语言）部署到所选平台
-7. 创建 `docs/superpowers/specs/` 和 `docs/superpowers/plans/` 工作目录
+7. 在项目级安装时创建 `docs/superpowers/specs/` 和 `docs/superpowers/plans/` 工作目录
 
 > [!TIP]
 > 更新版本号
@@ -225,19 +225,24 @@ Comet 使用解耦状态架构，YAML 文件独立管理：
 ```yaml
 workflow: full
 phase: build
-design_doc: docs/superpowers/specs/YYYY-MM-DD-topic-design.md
-plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
 build_mode: subagent-driven-development
 isolation: branch
-verify_mode: light
+verify_mode: null
+design_doc: docs/superpowers/specs/YYYY-MM-DD-topic-design.md
+plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
 verify_result: pending
-verification_report: docs/superpowers/reports/YYYY-MM-DD-change-verify.md
+verification_report: null
 branch_status: pending
 verified_at: null
 archived: false
+direct_override: false
+build_command: null
+verify_command: null
+handoff_context: openspec/changes/<name>/.comet/handoff/design-context.json
+handoff_hash: <sha256>
 ```
 
-full workflow 初始化时 `build_mode` 和 `isolation` 可以暂时为 `null`，但进入 `build → verify` 前必须完成用户决策并写入合法值。`direct` 默认只允许 hotfix/tweak；full workflow 使用 `direct` 时必须额外记录 `direct_override: true`。项目可在 change 或仓库根配置中设置 `build_command` / `verify_command`，guard 会优先运行并打印失败输出。
+full workflow 初始化时 `build_mode`、`isolation` 和 `verify_mode` 可以暂时为 `null`；进入 `build → verify` 前必须完成 `build_mode` 与 `isolation` 决策并写入合法值。`verification_report` 在验证报告生成前保持 `null`，`verify-pass` 要求该报告文件存在且 `branch_status: handled`。示例中 `archived` 之后的字段是可选字段或脚本派生字段：`direct_override` 只在 full workflow 直接构建时需要，项目命令未配置时可以不存在，`handoff_context` 和 `handoff_hash` 由 `comet-handoff.sh` 在离开 design 阶段前写入。项目可在 change 或仓库根配置中设置 `build_command` / `verify_command`，guard 会优先运行并打印失败输出。
 
 其中所有的状态和运行阶段都采用脚本更新，且**能够检验每个阶段是否真实完成任务，达到条件之后才会退出当前阶段，执行更新状态动作**。相比于将复杂的状态管理机制记录在 Skill 中，脚本的方式强保障了核心状态扭转的可靠性、YAML 文件的正确性，以及断点恢复的便捷——Agent 只需要通过 Comet 内置命令进行状态读取就能知道当前 Spec 所处的情况。
 
@@ -250,7 +255,7 @@ Comet 通过自动化状态转换确保 agent 执行可靠性：
    - 验证失败时输出 `[HARD STOP]` 及可操作建议
 
 2. **自动化状态转换** — `comet-guard.sh --apply` 自动更新 `.comet.yaml`
-   - 所有阶段转换（design → build → verify → archive）使用 `guard --apply`
+   - 所有阶段转换（open → design/build → verify → archive）使用 `guard --apply`
    - 无需手动状态编辑 — 消除写入验证错误
    - `comet-state.sh` 是 agent 对状态操作的专属接口
    - Guard 和 archive 脚本内部使用 `comet-state.sh` 进行状态管理
@@ -258,7 +263,7 @@ Comet 通过自动化状态转换确保 agent 执行可靠性：
 3. **模式校验** — `comet-yaml-validate.sh` 确保数据完整性
    - 校验必填字段和可选字段
    - 校验枚举值（包括 `direct_override`）
-   - 校验引用文件路径存在
+   - 校验 `design_doc`、`plan`、`handoff_context` 路径存在，并校验 `handoff_hash` 格式
    - 检测未知/拼写错误字段
 
 4. **Build 决策强制** — Guard 和状态转换同时拦截跳过关键选择

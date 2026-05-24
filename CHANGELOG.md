@@ -24,6 +24,7 @@ All notable changes to @rpamis/comet will be documented in this file.
 - **YAML and frontmatter parsing**: Comet scripts now ignore unquoted trailing comments in `.comet.yaml` field values and accept Design Doc frontmatter after a UTF-8 BOM or leading blank lines, preventing false guard and handoff failures
 - **Init E2E install checks**: CI now verifies Comet-owned skill artifacts in every supported platform directory and checks OpenSpec/Superpowers installer status from `comet init --json` for both project and global installs, avoiding false failures from external CLI-specific directory layouts
 - **Windows global init E2E home directory**: CI now sets `USERPROFILE` alongside `HOME` for global-scope init checks on Windows, matching Node's `os.homedir()` resolution and preventing false missing-skill failures
+- **README state documentation**: README examples now show accurate `.comet.yaml` build-state defaults, verification evidence timing, handoff fields, and project-only working directory creation
 
 ### Tests
 

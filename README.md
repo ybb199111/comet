@@ -63,7 +63,7 @@ comet init
 4. Install [OpenSpec](https://github.com/Fission-AI/OpenSpec) skills
 5. Install [Superpowers](https://github.com/obra/superpowers) skills
 6. Deploy Comet skills (in your chosen language) to selected platforms
-7. Create `docs/superpowers/specs/` and `docs/superpowers/plans/` working directories
+7. Create `docs/superpowers/specs/` and `docs/superpowers/plans/` working directories for project-scope installs
 
 > [!TIP]
 > update version
@@ -226,19 +226,24 @@ Comet uses a decoupled state architecture with separate YAML files:
 ```yaml
 workflow: full
 phase: build
-design_doc: docs/superpowers/specs/YYYY-MM-DD-topic-design.md
-plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
 build_mode: subagent-driven-development
 isolation: branch
-verify_mode: light
+verify_mode: null
+design_doc: docs/superpowers/specs/YYYY-MM-DD-topic-design.md
+plan: docs/superpowers/plans/YYYY-MM-DD-feature.md
 verify_result: pending
-verification_report: docs/superpowers/reports/YYYY-MM-DD-change-verify.md
+verification_report: null
 branch_status: pending
 verified_at: null
 archived: false
+direct_override: false
+build_command: null
+verify_command: null
+handoff_context: openspec/changes/<name>/.comet/handoff/design-context.json
+handoff_hash: <sha256>
 ```
 
-In full workflow, `build_mode` and `isolation` may temporarily be `null` at init time, but they must be resolved before `build → verify`. `direct` is allowed by default only for hotfix/tweak; full workflow requires `direct_override: true`. Projects can configure `build_command` / `verify_command` in the change or repo root, and guard will run those commands first and print failure output.
+In full workflow, `build_mode`, `isolation`, and `verify_mode` may temporarily be `null`; `build_mode` and `isolation` must be resolved before `build → verify`. `verification_report` stays `null` until verification writes a report, and `verify-pass` requires that report to exist plus `branch_status: handled`. Fields after `archived` in the example are optional or script-derived: `direct_override` is only needed for full-workflow direct builds, project commands may be absent unless configured, and `handoff_context` / `handoff_hash` are recorded by `comet-handoff.sh` before leaving design. Projects can configure `build_command` / `verify_command` in the change or repo root, and guard will run those commands first and print failure output.
 
 All states and execution phases are updated via scripts, and **each phase verifies that tasks are truly completed before exiting — conditions are met before the phase exits and state is updated**. Compared to recording complex state management mechanisms in Skills, the script approach strongly guarantees the reliability of core state transitions, correctness of YAML files, and convenience of breakpoint recovery — Agents only need to use Comet's built-in commands to read state and know the current Spec's situation.
 
@@ -251,7 +256,7 @@ Comet ensures agent execution reliability through automated state transitions:
    - Outputs `[HARD STOP]` with actionable suggestions if validation fails
 
 2. **Automated State Transitions** — `comet-guard.sh --apply` updates `.comet.yaml` automatically
-   - All phase transitions (design → build → verify → archive) use `guard --apply`
+   - All phase transitions (open → design/build → verify → archive) use `guard --apply`
    - No manual state editing required — eliminates write-verification errors
    - `comet-state.sh` is the agents' exclusive interface for state operations
    - Guard and archive scripts use `comet-state.sh` internally for state management
@@ -259,7 +264,7 @@ Comet ensures agent execution reliability through automated state transitions:
 3. **Schema Validation** — `comet-yaml-validate.sh` ensures data integrity
    - Validates required and optional fields
    - Validates enum values, including `direct_override`
-   - Validates referenced file paths exist
+   - Validates `design_doc`, `plan`, and `handoff_context` paths exist, plus `handoff_hash` format
    - Detects unknown/typos fields
 
 4. **Build Decision Enforcement** — Guard and state transitions both block skipped build choices
