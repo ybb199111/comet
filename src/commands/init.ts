@@ -16,6 +16,7 @@ type InitOptions = {
   skipExisting?: boolean;
   overwrite?: boolean;
   json?: boolean;
+  scope?: InstallScope;
 };
 
 type InstallStatus = 'installed' | 'skipped' | 'failed';
@@ -51,6 +52,7 @@ const COMET_BANNER = [
 ].join('\n');
 
 async function selectScope(options: InitOptions): Promise<InstallScope> {
+  if (options.scope) return options.scope;
   if (options.yes) return 'project';
 
   return select({

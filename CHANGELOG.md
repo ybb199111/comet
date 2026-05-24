@@ -9,6 +9,8 @@ All notable changes to @rpamis/comet will be documented in this file.
 - **Design handoff script**: New `comet-handoff.sh` generates deterministic, source-traceable context packages (compact or full mode) from OpenSpec artifacts into `.comet/handoff/`, recording `handoff_context` and `handoff_hash` in `.comet.yaml`
 - **Handoff guard checks**: Design phase guard now validates handoff context existence, hash freshness (detects post-handoff OpenSpec mutations), markdown traceability markers, and design doc frontmatter fields (`comet_change`, `role: technical-design`, `canonical_spec: openspec`)
 - **`handoff_context` and `handoff_hash` fields**: New `.comet.yaml` fields for tracking script-generated handoff packages, with schema validation (path existence, sha256 hex digest format)
+- **`comet init --scope`**: New `--scope <global|project>` CLI flag for non-interactive scope selection
+- **CI init E2E job**: GitHub Actions now runs real `comet init` on Ubuntu, macOS, and Windows, verifying Comet skills, Superpowers, OpenSpec, and working directories land in correct filesystem locations for both project and global scope
 
 ### Changed
 

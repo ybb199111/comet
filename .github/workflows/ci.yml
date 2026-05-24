@@ -79,3 +79,94 @@ jobs:
 
       - name: Run portable shell tests
         run: pnpm test:shell
+
+  init-e2e:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Install OpenSpec CLI
+        run: npm install -g @fission-ai/openspec@latest
+
+      - name: Create temp project directory
+        run: mkdir -p "$RUNNER_TEMP/comet-e2e-project/.claude"
+        shell: bash
+
+      - name: Run comet init (project scope)
+        run: node bin/comet.js init "$RUNNER_TEMP/comet-e2e-project" --yes --json
+        shell: bash
+
+      - name: Verify Comet skills (project)
+        run: |
+          SKILLS_DIR="$RUNNER_TEMP/comet-e2e-project/.claude/skills"
+          test -f "$SKILLS_DIR/comet/SKILL.md"
+          test -f "$SKILLS_DIR/comet/scripts/comet-guard.sh"
+          test -f "$SKILLS_DIR/comet/scripts/comet-state.sh"
+          test -f "$SKILLS_DIR/comet/scripts/comet-handoff.sh"
+          test -f "$SKILLS_DIR/comet/scripts/comet-yaml-validate.sh"
+          test -f "$SKILLS_DIR/comet/scripts/comet-archive.sh"
+          echo "Comet skills: OK"
+        shell: bash
+
+      - name: Verify Superpowers (project)
+        run: |
+          SKILLS_DIR="$RUNNER_TEMP/comet-e2e-project/.claude/skills"
+          test -d "$SKILLS_DIR/brainstorming"
+          test -d "$SKILLS_DIR/using-superpowers"
+          echo "Superpowers: OK"
+        shell: bash
+
+      - name: Verify OpenSpec (project)
+        run: |
+          test -d "$RUNNER_TEMP/comet-e2e-project/openspec"
+          echo "OpenSpec: OK"
+        shell: bash
+
+      - name: Verify working directories (project)
+        run: |
+          test -d "$RUNNER_TEMP/comet-e2e-project/docs/superpowers/specs"
+          test -d "$RUNNER_TEMP/comet-e2e-project/docs/superpowers/plans"
+          echo "Working dirs: OK"
+        shell: bash
+
+      - name: Create temp global home
+        run: mkdir -p "$RUNNER_TEMP/comet-e2e-global/.claude"
+        shell: bash
+
+      - name: Run comet init (global scope)
+        run: |
+          export HOME="$RUNNER_TEMP/comet-e2e-global"
+          node bin/comet.js init "$RUNNER_TEMP/comet-e2e-global" --yes --scope global --json
+        shell: bash
+
+      - name: Verify Comet skills (global)
+        run: |
+          SKILLS_DIR="$RUNNER_TEMP/comet-e2e-global/.claude/skills"
+          test -f "$SKILLS_DIR/comet/SKILL.md"
+          test -f "$SKILLS_DIR/comet/scripts/comet-guard.sh"
+          test -f "$SKILLS_DIR/comet/scripts/comet-state.sh"
+          test -f "$SKILLS_DIR/comet/scripts/comet-handoff.sh"
+          echo "Global Comet skills: OK"
+        shell: bash
+
+      - name: Verify no working directories (global)
+        run: |
+          test ! -d "$RUNNER_TEMP/comet-e2e-global/docs/superpowers/specs"
+          echo "Global scope has no working dirs: OK"
+        shell: bash

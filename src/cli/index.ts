@@ -22,6 +22,7 @@ program
   .option('--skip-existing', 'Never overwrite existing components')
   .option('--overwrite', 'Overwrite manifest-managed files')
   .option('--json', 'Output as JSON')
+  .addOption(new Option('--scope <scope>', 'Install scope').choices(['global', 'project']))
   .action(async (targetPath = '.', options) => {
     try {
       await initCommand(targetPath, options);

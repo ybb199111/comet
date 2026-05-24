@@ -47,7 +47,10 @@ describe('comet init E2E', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
-    tmpDir = path.join(os.tmpdir(), `comet-init-e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    tmpDir = path.join(
+      os.tmpdir(),
+      `comet-init-e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
     await fs.mkdir(tmpDir, { recursive: true });
     vi.resetAllMocks();
     vi.resetModules();
@@ -88,19 +91,6 @@ describe('comet init E2E', () => {
   it('installs Comet skills at global scope', async () => {
     mockExternalSuccess();
 
-    const { select, checkbox } = await import('@inquirer/prompts');
-    const mockedSelect = vi.mocked(select);
-    const mockedCheckbox = vi.mocked(checkbox);
-
-    let selectCall = 0;
-    mockedSelect.mockImplementation((() => {
-      selectCall++;
-      if (selectCall === 1) return Promise.resolve('global');
-      return Promise.resolve('en');
-    }) as unknown as typeof select);
-
-    mockedCheckbox.mockResolvedValue(['claude']);
-
     await fs.mkdir(path.join(tmpDir, '.claude'), { recursive: true });
     const fakeHome = path.join(tmpDir, 'fake-home');
     await fs.mkdir(fakeHome, { recursive: true });
@@ -108,7 +98,12 @@ describe('comet init E2E', () => {
     vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
 
     const { initCommand } = await import('../../src/commands/init.js');
-    await initCommand(tmpDir);
+    const result = await captureJsonOutput(() =>
+      initCommand(tmpDir, { yes: true, scope: 'global', json: true }),
+    );
+
+    expect(result.scope).toBe('global');
+    expect(result.workingDirsCreated).toBe(false);
 
     const manifest = await readManifest();
     for (const skillPath of manifest.skills) {
@@ -154,7 +149,9 @@ describe('comet init E2E', () => {
     mockExternalSuccess();
 
     const { initCommand: init2 } = await import('../../src/commands/init.js');
-    const result = await captureJsonOutput(() => init2(tmpDir, { yes: true, overwrite: true, json: true }));
+    const result = await captureJsonOutput(() =>
+      init2(tmpDir, { yes: true, overwrite: true, json: true }),
+    );
     const claude = (result.results as { platform: string; comet: string }[]).find(
       (r) => r.platform === 'claude',
     );
