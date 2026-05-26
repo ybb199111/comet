@@ -35,6 +35,7 @@ const SKILLS_AGENT_MAP: Record<string, string> = {
 };
 
 const VALID_PLATFORM_IDS = new Set(Object.keys(SKILLS_AGENT_MAP));
+const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[a-zA-Z]`, 'g');
 
 function buildSuperpowersInstallCommand(
   _projectPath: string,
@@ -78,7 +79,7 @@ async function installSuperpowersForPlatforms(
     const stderr = execError.stderr?.toString().trim();
     if (stderr) {
       const cleaned = stderr
-        .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '')
+        .replace(ANSI_ESCAPE_PATTERN, '')
         .replace(/\[999D\[J/g, '')
         .replace(/\[\?25[hl]/g, '')
         .split('\n')
