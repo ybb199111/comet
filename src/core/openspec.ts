@@ -146,7 +146,7 @@ function restoreDefaultConfig(backup: ConfigBackup | null): void {
 function isCommandAvailable(command: string): boolean {
   try {
     const checker = process.platform === 'win32' ? 'where' : 'which';
-    execFileSync(checker, [command], { stdio: 'inherit', timeout: 10_000 });
+    execFileSync(checker, [command], { stdio: 'ignore', timeout: 10_000 });
     return true;
   } catch {
     return false;
