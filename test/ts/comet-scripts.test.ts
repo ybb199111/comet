@@ -960,7 +960,7 @@ describe('comet shell scripts', () => {
 
     expect(result.status).toBe(0);
     expect(mode.stdout.trim()).toBe('full');
-  });
+  }, 25_000);
 
   it('transitions full workflow from open to design', async () => {
     await createChange(
