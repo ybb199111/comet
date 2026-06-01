@@ -63,7 +63,7 @@ Comet 当前是 **OpenSpec + Superpowers 专用编排器**：
 |---|---|---|
 | 状态机 | 状态图 + 状态文件记 current_node/history | `nodes:` / `transitions:` |
 | 退出机制 | 每个 node 的 `exit:` guard，不满足拒绝 `advance` | `exit: state.verify_result == 'pass'` |
-| 意图识别 | `router` 节点 / 入口分类器：声明式意图规则 → 选工作流或分支 | `router:` + `intents:` |
+| 意图识别 | `router` 节点：声明候选意图（自然语言判据）→ **引擎请 Agent 做语义分类** → 按结果路由 | `router:` + `intents:`（`when` 为自然语言） |
 | HITL | node/transition 上 `hitl:` 块，引擎返回"必须问用户" | `hitl: { question, options }` |
 | 断点恢复 | 状态文件持久化 current_node+artifacts；`next` 为状态纯函数 → 恢复=重算 | 引擎内建 |
 
@@ -108,14 +108,19 @@ defaults:
   auto_invoke: true         # 节点级默认：到节点自动触发 skill
 
 entry:
-  router:                   # 意图识别：选入口/工作流
+  router:                   # 意图识别：引擎给候选，Agent 做语义分类
+    classify_by: agent      # 默认由 Agent 语义判断（而非字面 match）
     intents:
-      - match: "hotfix | bug fix"   # 声明式意图规则（可带 shell 逃生口）
+      - id: hotfix
+        when: "用户在描述一个 bug 修复/紧急修复，且范围小（单函数或单模块）"
         to: hotfix_build
-      - match: "copy | config | docs tweak"
+      - id: tweak
+        when: "用户在描述文案/配置/文档/提示词的小调整"
         to: tweak_build
-      - default: true
+      - id: full
+        default: true         # 兜底：无明显意图走完整流程
         to: open
+    # match: 仍可作为确定性快路径/逃生口（可选），但默认走 agent 语义分类
 
 nodes:
   open:
@@ -130,6 +135,9 @@ nodes:
     skill: superpowers/brainstorming
     entry: artifacts.proposal exists
     auto_invoke: false      # 节点级覆盖：先问"现在触发设计 skill 吗"
+    prompt: |               # 用户自定义提示词：注入到该 skill 触发时的上下文
+      重点关注与现有 OpenSpec 提案的一致性；
+      设计必须给出 2-3 个方案对比并显式推荐其一。
     exit: artifacts.design_doc exists
     hitl: { when: before_advance, question: "确认设计方案？", options: [继续, 调整] }
     produces: [design_doc]
@@ -206,6 +214,34 @@ adapters:                   # skill 适配描述符（外部 skill 零侵入）
 
 > 跨工作流**复用同一段 skill 序列**的子图/嵌套能力（原方案 C）当前不做，留作未来扩展（YAGNI）。
 
+### 6.2 用户自定义提示词（`prompt`）
+
+编排者不只是"绑定一个 skill"，还应能**为该节点写自己的提示词**，叠加在 skill 触发之上：
+
+- 节点级 `prompt:` 字段（多行文本），引擎返回 `invoke_skill` 动作时作为 `handoff.prompt` 一并交给 Agent，Agent 触发 skill 时将其作为附加指令。
+- 用于：约束该阶段关注点、注入项目特定约定、调整通用 skill 的默认行为，而**无需修改 skill 本身**。
+- 可选工作流级 `preamble:`（全局前置提示）作为所有节点的公共上下文。
+- 与 adapter 的 `invoke` 正交：adapter 管"怎么触发"，`prompt` 管"触发时额外说什么"。
+
+### 6.3 意图识别（Agent 语义分类，非字面 match）
+
+意图识别**不用字面 `match`/正则**，而是交给 **Agent 做语义判断**——这正是 LLM 擅长的事，也精准契合"引擎决策框架 + Agent 执行判断"的分工：
+
+- `router` 节点声明候选 `intents`，每个带一个**自然语言判据** `when` 和目标节点 `to`。
+- 引擎 `next` 遇到 router 节点时返回动作 `classify_intent`，携带候选列表（`{id, when, to}`）+ 用户输入/上下文。
+- **Agent 做语义分类**，选出最匹配的 `intent id`，通过 `comet flow classify <id>` 回报。
+- 引擎校验 `id ∈ 候选`后路由到对应 `to`，并推进状态。**判断由 Agent，路由控制权仍在引擎**。
+- 同机制可用于**流中意图**：某条 transition 用 `classify:`（而非 DSL `on:`）让 Agent 判断升级条件（如 hotfix→full）是否满足。
+- 可选逃生口：仍允许 `match:` 正则作为确定性快路径，但默认走 agent 分类。
+
+```yaml
+transitions:
+  - from: hotfix_build
+    to: design                # 升级跳转：补设计后回完整流程
+    classify: "本次修复是否越出单函数/模块、涉及 3+ 文件、架构变更或新公开 API？"
+    hitl: { question: "达到升级条件，转完整流程？", options: [升级, 维持 hotfix] }
+```
+
 ### 条件 DSL
 
 - 基本：`state.X == 'v'`、`artifacts.Y exists`、`vars.n >= 3`、布尔 `&& || !`。
@@ -232,7 +268,9 @@ SKILL.md 核心伪代码，**永不随工作流变化**：
   action = comet flow next
   switch action.type:
     "invoke_skill":  用 Skill 工具真正触发 action.skill，
-                     以 action.handoff 为上下文；完成后 → comet flow advance
+                     以 action.handoff（含用户自定义 prompt）为上下文；完成后 → comet flow advance
+    "classify_intent": 对 action.candidates 做语义意图识别，选出最匹配 id
+                     → comet flow classify <id>
     "ask_user":      用 AskUserQuestion 呈现 action.hitl；
                      得到选择 → comet flow answer <choice>
     "await_confirm": 暂停，等用户"继续" → comet flow advance
@@ -252,6 +290,7 @@ SKILL.md 核心伪代码，**永不随工作流变化**：
 | `comet flow next` | 返回下一步动作 JSON |
 | `comet flow advance [--set k=v]` | 校验 exit guard 并转换状态 |
 | `comet flow answer <choice>` | 记录 HITL 决策 |
+| `comet flow classify <intent-id>` | 记录 Agent 语义意图分类结果并路由 |
 | `comet flow status` / `comet flow resume` | 查看 / 恢复 |
 
 ### 编排时（用户用 CLI 编排）
