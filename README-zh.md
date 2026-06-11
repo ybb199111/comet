@@ -219,13 +219,14 @@ npx skills add rpamis/comet
 | GitHub Copilot     | `.github/`   | Gemini CLI | `.gemini/`    |
 | Amazon Q Developer | `.amazonq/`  | Qwen Code  | `.qwen/`      |
 | Kilo Code          | `.kilocode/` | Auggie     | `.augment/`   |
-| Kiro               | `.kiro/`     | Lingma     | `.lingma/`    |
-| Junie              | `.junie/`    | CodeBuddy  | `.codebuddy/` |
-| CoStrict           | `.cospec/`   | Crush      | `.crush/`     |
-| Factory Droid      | `.factory/`  | iFlow      | `.iflow/`     |
-| Pi                 | `.pi/`       | Qoder      | `.qoder/`     |
-| Antigravity        | `.agents/`   | Bob Shell  | `.bob/`       |
-| ForgeCode          | `.forge/`    | Trae       | `.trae/`      |
+| Kimi Code          | `.kimi-code/`| Kiro       | `.kiro/`      |
+| Lingma             | `.lingma/`   | Junie      | `.junie/`     |
+| CodeBuddy          | `.codebuddy/`| CoStrict   | `.cospec/`    |
+| Crush              | `.crush/`    | Factory Droid | `.factory/` |
+| iFlow              | `.iflow/`    | Pi         | `.pi/`        |
+| Qoder              | `.qoder/`    | Antigravity | `.agents/`   |
+| Bob Shell          | `.bob/`      | ForgeCode  | `.forge/`     |
+| Trae               | `.trae/`     |            |               |
 
 </details>
 
