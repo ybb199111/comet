@@ -60,6 +60,7 @@ ehthumbs.db
 
 # Claude Code
 .claude/
+.mcp.json
 
 # OpenCode
 .opencode/
