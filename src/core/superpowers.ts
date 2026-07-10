@@ -34,6 +34,8 @@ const SKILLS_AGENT_MAP: Record<string, string | null> = {
   pi: 'pi',
   qoder: 'qoder',
   antigravity: 'antigravity',
+  // antigravity2 reuses the antigravity skills CLI agent (OpenSpec tool id is shared)
+  antigravity2: 'antigravity',
   bob: 'bob',
   forgecode: 'forgecode',
   trae: 'trae',
@@ -139,7 +141,12 @@ async function installSuperpowersForPlatforms(
   projectPath: string,
   scope: InstallScope,
   platformIds: string[],
+  shouldInstall = true,
 ): Promise<'installed' | 'failed' | 'skipped'> {
+  if (!shouldInstall) {
+    return 'skipped';
+  }
+
   const unknownIds = platformIds.filter((id) => !VALID_PLATFORM_IDS.has(id));
   if (unknownIds.length > 0) {
     throw new Error(`Unknown platform IDs: ${unknownIds.join(', ')}`);

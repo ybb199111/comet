@@ -747,7 +747,19 @@ async function createWorkingDirs(projectPath: string): Promise<void> {
 
   const configPath = path.join(projectPath, '.comet', 'config.yaml');
   if (!(await fileExists(configPath))) {
-    await writeFile(configPath, 'context_compression: off\nauto_transition: true\n', 'utf-8');
+    await writeFile(
+      configPath,
+      [
+        '# context_compression: off | beta',
+        'context_compression: off',
+        '# review_mode: off | standard | thorough',
+        'review_mode: off',
+        '# auto_transition: true | false',
+        'auto_transition: true',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
   }
 }
 

@@ -50,41 +50,6 @@ fi
 # Normalize to forward slashes, collapse doubles from JSON escaping (\\ → //)
 TARGET=$(printf '%s' "$TARGET" | sed 's|\\|/|g' | sed 's|///*|/|g')
 
-# ── Find active Comet change ─────────────────────────────────────
-
-YAML_FILE=""
-if [ -d "openspec/changes" ]; then
-  for dir in openspec/changes/*/; do
-    [ -d "$dir" ] || continue
-    # Skip archived changes
-    case "$dir" in
-      */archive/*) continue ;;
-    esac
-    if [ -f "${dir}.comet.yaml" ]; then
-      YAML_FILE="${dir}.comet.yaml"
-      break
-    fi
-  done
-fi
-
-# No active change — allow all writes
-if [ -z "$YAML_FILE" ]; then
-  echo "[COMET-HOOK] allowed: no active comet change" >&2
-  exit 0
-fi
-
-# ── Read current phase ───────────────────────────────────────────
-
-PHASE=$(grep "^phase:" "$YAML_FILE" 2>/dev/null \
-  | awk '{print $2}' \
-  | tr -d '[:space:][:cntrl:]' \
-  || true)
-
-if [ -z "$PHASE" ]; then
-  echo "[COMET-HOOK] allowed: no phase in .comet.yaml" >&2
-  exit 0
-fi
-
 # ── Resolve to project-relative path ─────────────────────────────
 
 # Normalize helper: forward slashes only
@@ -119,6 +84,95 @@ case "$RELPATH" in
     fi
     ;;
 esac
+
+# ── Helpers to read .comet.yaml fields ───────────────────────────
+
+is_archived() {
+  grep "^archived:" "$1" 2>/dev/null \
+    | awk '{print $2}' | tr -d '[:space:][:cntrl:]' || true
+}
+
+read_phase() {
+  grep "^phase:" "$1" 2>/dev/null \
+    | awk '{print $2}' | tr -d '[:space:][:cntrl:]' || true
+}
+
+read_field() {
+  grep "^$1:" "$2" 2>/dev/null \
+    | head -1 | awk '{print $2}' | tr -d '[:space:][:cntrl:]' || true
+}
+
+# ── Determine the governing Comet change + phase ─────────────────
+#
+# A write targeting a specific change directory (openspec/changes/<name>/...)
+# must be governed by THAT change's own phase — never by an unrelated
+# active change. Otherwise a change left in the `archive` phase would
+# wrongly block artifact writes for a brand-new change created alongside it.
+
+PHASE=""
+# Path to the .comet.yaml that governs this write (used for deeper invariant checks)
+GOV_YAML=""
+
+case "$RELPATH" in
+  openspec/changes/*/*)
+    _rest="${RELPATH#openspec/changes/}"
+    _own_change="${_rest%%/*}"
+    if [ -n "$_own_change" ] && [ "$_own_change" != "archive" ]; then
+      _own_yaml="openspec/changes/${_own_change}/.comet.yaml"
+      if [ -f "$_own_yaml" ]; then
+        if [ "$(is_archived "$_own_yaml")" = "true" ]; then
+          # This change is already archived — its own writes are unrestricted
+          echo "[COMET-HOOK] allowed: $RELPATH (own change archived)" >&2
+          exit 0
+        fi
+        PHASE=$(read_phase "$_own_yaml")
+        GOV_YAML="$_own_yaml"
+      else
+        # Change directory exists but state file not yet written
+        # (artifacts are created before .comet.yaml during /comet-open).
+        # Treat as `open` so proposal/design/tasks/specs are allowed.
+        PHASE="open"
+      fi
+    fi
+    ;;
+esac
+
+# Fallback: writes outside a specific change directory are governed by
+# the first active (non-archived) change.
+if [ -z "$PHASE" ]; then
+  YAML_FILE=""
+  if [ -d "openspec/changes" ]; then
+    for dir in openspec/changes/*/; do
+      [ -d "$dir" ] || continue
+      # Skip archived changes directory
+      case "$dir" in
+        */archive/*) continue ;;
+      esac
+      if [ -f "${dir}.comet.yaml" ]; then
+        # Skip changes already marked as archived
+        if [ "$(is_archived "${dir}.comet.yaml")" = "true" ]; then
+          continue
+        fi
+        YAML_FILE="${dir}.comet.yaml"
+        break
+      fi
+    done
+  fi
+
+  # No active change — allow all writes
+  if [ -z "$YAML_FILE" ]; then
+    echo "[COMET-HOOK] allowed: no active comet change" >&2
+    exit 0
+  fi
+
+  PHASE=$(read_phase "$YAML_FILE")
+  GOV_YAML="$YAML_FILE"
+fi
+
+if [ -z "$PHASE" ]; then
+  echo "[COMET-HOOK] allowed: no phase in .comet.yaml" >&2
+  exit 0
+fi
 
 # ── Whitelist: phase-aware allowed paths ─────────────────────────
 
@@ -222,6 +276,28 @@ esac
 
 case "$PHASE" in
   build|verify)
+    # Full workflow must have a Design Doc before any source write in build/verify.
+    # Catches illegal open→build / design→build jumps that skipped the design phase
+    # (e.g. misclassified preset, direct `set phase`, or bare transition).
+    if [ -n "$GOV_YAML" ]; then
+      _wf=$(read_field "workflow" "$GOV_YAML")
+      _dd=$(read_field "design_doc" "$GOV_YAML")
+      if [ "$_wf" = "full" ] && { [ -z "$_dd" ] || [ "$_dd" = "null" ]; }; then
+        echo "" >&2
+        echo "╔══════════════════════════════════════════╗" >&2
+        echo "║     COMET PHASE GUARD — WRITE BLOCKED    ║" >&2
+        echo "╚══════════════════════════════════════════╝" >&2
+        echo "" >&2
+        echo "  Current phase: $PHASE (workflow: full), but design_doc is empty" >&2
+        echo "  Target file: $RELPATH" >&2
+        echo "" >&2
+        echo "  ❌ Illegal phase jump detected: full workflow entered $PHASE without a Design Doc" >&2
+        echo "  ✅ Correct flow: create the Design Doc in design phase, then run comet-guard design --apply" >&2
+        echo "  💡 Run /comet-design to fill the missing design; for repair, set design_doc with comet-state" >&2
+        echo "" >&2
+        exit 2
+      fi
+    fi
     # Code writes allowed in build and verify
     echo "[COMET-HOOK] allowed: $RELPATH (phase: $PHASE)" >&2
     exit 0
@@ -232,23 +308,23 @@ case "$PHASE" in
     echo "║     COMET PHASE GUARD — WRITE BLOCKED    ║" >&2
     echo "╚══════════════════════════════════════════╝" >&2
     echo "" >&2
-    echo "  当前阶段: $PHASE" >&2
-    echo "  目标文件: $RELPATH" >&2
+    echo "  Current phase: $PHASE" >&2
+    echo "  Target file: $RELPATH" >&2
     echo "" >&2
     case "$PHASE" in
       open)
-        echo "  ❌ open 阶段不允许写源代码" >&2
-        echo "  ✅ 允许: 创建 proposal/design/tasks, 运行 guard" >&2
-        echo "  💡 完成需求澄清和 artifact 创建后运行 guard --apply" >&2
+        echo "  ❌ open phase does not allow source code writes" >&2
+        echo "  ✅ Allowed: create proposal/design/tasks and run guard" >&2
+        echo "  💡 After clarification and artifact creation, run guard --apply" >&2
         ;;
       design)
-        echo "  ❌ design 阶段不允许写源代码" >&2
-        echo "  ✅ 允许: brainstorming, 创建 Design Doc, 运行 guard" >&2
-        echo "  💡 完成 Design Doc 后运行 comet-guard design --apply 进入 build" >&2
+        echo "  ❌ design phase does not allow source code writes" >&2
+        echo "  ✅ Allowed: brainstorming, create the Design Doc, and run guard" >&2
+        echo "  💡 After the Design Doc is ready, run comet-guard design --apply to enter build" >&2
         ;;
       archive)
-        echo "  ❌ archive 阶段不允许写源代码" >&2
-        echo "  ✅ 允许: 确认归档, 运行归档脚本" >&2
+        echo "  ❌ archive phase does not allow source code writes" >&2
+        echo "  ✅ Allowed: confirm archive intent and run the archive script" >&2
         ;;
     esac
     echo "" >&2

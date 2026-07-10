@@ -117,9 +117,9 @@ CURRENT_HASH=$("$COMET_BASH" "$COMET_HANDOFF" <change-name> --hash-only 2>/dev/n
 3. 编译通过（执行项目对应的构建命令，如 `npm run build`、`mvn compile`、`cargo build` 等）
 4. 相关测试通过
 5. 无明显安全问题（无硬编码密钥、无新增 unsafe 操作）
-6. 简化代码审查通过：必须使用 Skill 工具加载 Superpowers `requesting-code-review` 技能，请求只检查正确性、安全、边界条件的轻量代码审查
+6. 代码审查策略：当 `review_mode: standard` 或 `thorough` 时，必须使用 Skill 工具加载 Superpowers `requesting-code-review` 技能，请求只检查正确性、安全、边界条件的轻量代码审查；当 `review_mode: off` 时跳过自动代码审查，并在验证报告中记录跳过原因
 
-简化代码审查的输入应限定为本次改动 diff、tasks.md 和必要的测试结果；审查范围只覆盖实现正确性、安全风险和边界条件，不执行 spec 覆盖率、Design Doc 一致性或漂移检查。若审查发现 CRITICAL 或 IMPORTANT 问题，按验证失败处理并进入 Step 1b。
+简化代码审查的输入应限定为本次改动 diff、tasks.md 和必要的测试结果；审查范围只覆盖实现正确性、安全风险和边界条件，不执行 spec 覆盖率、Design Doc 一致性或漂移检查。若审查发现 CRITICAL 或 IMPORTANT 问题，按验证失败处理并进入 Step 1b。`review_mode: off` 只跳过自动 code review，不跳过构建、测试、安全检查或异常调试协议。
 
 **通过标准**：6 项全部 OK，无 CRITICAL 或 IMPORTANT 问题。
 

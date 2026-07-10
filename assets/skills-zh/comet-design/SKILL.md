@@ -184,9 +184,9 @@ mkdir -p openspec/changes/<name>/.comet/handoff
 - `openspec/changes/<name>/.comet/handoff/design-context.md`（或 beta 模式的 `spec-context.md`）
 - `openspec/changes/<name>/.comet/handoff/design-context.json`（或 beta 模式的 `spec-context.json`）
 
-### 1e. 主动上下文压缩门
+### 1e. 主动式上下文压缩
 
-完成 Step 1d 并确认 `brainstorm-summary.md` 已写入后，进入 Design Doc 创建前的主动压缩门。此时 OpenSpec 交接包、brainstorming 决策和待确认项都已落盘，应主动释放前面读取 Spec 和 brainstorming 消耗的上下文，为 Step 2 及后续 Build 阶段保留窗口。
+完成 Step 1d 并确认 `brainstorm-summary.md` 已写入后，进入 Design Doc 创建前的主动式上下文压缩。此时 OpenSpec 交接包、brainstorming 决策和待确认项都已落盘，应主动释放前面读取 Spec 和 brainstorming 消耗的上下文，为 Step 2 及后续 Build 阶段保留窗口。
 
 执行规则：
 - 如果当前平台提供原生上下文压缩/清理机制（例如宿主 Agent 的 compact/compaction 命令、工具或 UI 操作），必须在这里触发一次主动压缩；不要尝试用 shell 脚本伪造压缩命令。

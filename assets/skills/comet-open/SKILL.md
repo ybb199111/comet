@@ -71,6 +71,23 @@ When pausing, present the clarification summary: goals, non-goals, scope boundar
 
 Must not create proposal.md, design.md, or tasks.md before the user confirms requirements clarification is complete, and must not use the Skill tool to load the `openspec-propose` skill to generate all artifacts in one pass.
 
+### 1c. Change Name Confirmation (Blocking Point)
+
+Before creating the change directory (`openspec new change`), must follow the `comet/reference/decision-point.md` protocol to pause and let the user decide the change name. Must not auto-generate or silently infer the change name.
+
+OpenSpec change names must be **kebab-case English** (lowercase letters, digits, hyphens; e.g. `refine-requirements-doc`). Chinese or other non-conforming names are invalid.
+
+When pausing, present:
+- **2-3 recommended kebab-case English names** derived from the confirmed clarification summary, each with a one-line description of the scope it implies
+- An explicit option for the user to **enter their own name**
+- A note that **if the user enters Chinese (or any non-kebab-case text), it will be converted into a compliant kebab-case English name**, and the converted result must be shown back to the user for confirmation before use
+
+The decision options must include:
+- Pick one of the recommended names
+- "Enter a custom name" — accept the user's input; if it is already valid kebab-case English, use it directly; if it is Chinese or otherwise non-conforming, convert it to compliant kebab-case English and show the converted name for confirmation before continuing
+
+Must not run `openspec new change` or create `.comet.yaml` before the user confirms the final change name. If the chosen/converted name collides with an existing change, report the collision and ask the user to choose another name.
+
 ### 2. Create Change Structure + Initialize State
 
 **Immediately execute:** Use the Skill tool to load the `openspec-new-change` skill. Skipping this step is prohibited.
@@ -105,7 +122,7 @@ After the change skeleton is created, generate `proposal`, `design`, and `tasks`
 
 **Failure handling**: If `openspec instructions` fails, returns invalid JSON, reports unmet `dependencies`, or does not provide a usable `resolvedOutputPath`, must immediately stop artifact creation and report the OpenSpec error. Must not fall back to hard-coded artifact prose because that would silently bypass project rules.
 
-**Naming and scope guard**: Change name must use a user-specified name or a name confirmed through the current platform's available user input/confirmation mechanism — must not auto-generate or infer. Change scope must match the user's description — must not expand or narrow it independently.
+**Naming and scope guard**: Change name must be the kebab-case English name confirmed by the user in Step 1c — must not auto-generate, infer, or use a non-kebab-case (e.g. Chinese) name. Change scope must match the user's description — must not expand or narrow it independently.
 
 Confirm the following artifacts have been created:
 

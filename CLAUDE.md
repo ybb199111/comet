@@ -51,6 +51,14 @@ comet-hook-guard.sh ← (独立脚本，由 .claude/settings.local.json 的 PreT
 
 skill 优化时先写中文版本（`assets/skills-zh/`），用户确认后再修改英文版本（`assets/skills/`）。
 
+## 中文术语翻译规范
+
+中文文档不得把英文 “gate” 直译为“门”（如“压缩门”“调试门”“确认门”），这种译法在中文语境下不自然。应按实际含义翻译：
+
+- `gate`（阶段性检查/阻塞点）→ 根据语境用“协议”“阶段”“检查”“阻塞点”等，如 `debug gate` → “异常调试协议”
+- 修饰词性质的 `proactive/active` → “主动式”，如 `proactive context compression` → “主动式上下文压缩”，不写作“主动压缩门”
+- 英文版保持原术语（如 Debug Gate），仅中文版需要遵循本规范
+
 ## Skill 触发表述规范
 
 修改 skill 时，新增或调整依赖 skill 的触发方式必须和既有写法保持一致：

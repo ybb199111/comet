@@ -110,7 +110,9 @@ describe('skills', () => {
       const manifest = await readManifest();
       for (const skillRelPath of manifest.skills) {
         const copiedPath = path.join(tmpDir, '.claude', 'skills', skillRelPath);
-        expect(await fileExists(copiedPath), `zh install should include ${skillRelPath}`).toBe(true);
+        expect(await fileExists(copiedPath), `zh install should include ${skillRelPath}`).toBe(
+          true,
+        );
       }
     });
 
@@ -446,15 +448,9 @@ describe('skills', () => {
         'utf-8',
       );
 
-      expect(zhOpen).toContain(
-        'openspec instructions proposal --change "<name>" --json',
-      );
-      expect(zhOpen).toContain(
-        'openspec instructions design --change "<name>" --json',
-      );
-      expect(zhOpen).toContain(
-        'openspec instructions tasks --change "<name>" --json',
-      );
+      expect(zhOpen).toContain('openspec instructions proposal --change "<name>" --json');
+      expect(zhOpen).toContain('openspec instructions design --change "<name>" --json');
+      expect(zhOpen).toContain('openspec instructions tasks --change "<name>" --json');
       for (const field of [
         '`context`',
         '`rules`',
@@ -478,15 +474,9 @@ describe('skills', () => {
         'utf-8',
       );
 
-      expect(enOpen).toContain(
-        'openspec instructions proposal --change "<name>" --json',
-      );
-      expect(enOpen).toContain(
-        'openspec instructions design --change "<name>" --json',
-      );
-      expect(enOpen).toContain(
-        'openspec instructions tasks --change "<name>" --json',
-      );
+      expect(enOpen).toContain('openspec instructions proposal --change "<name>" --json');
+      expect(enOpen).toContain('openspec instructions design --change "<name>" --json');
+      expect(enOpen).toContain('openspec instructions tasks --change "<name>" --json');
       for (const field of [
         '`context`',
         '`rules`',
@@ -552,7 +542,9 @@ describe('skills', () => {
 
       expect(zhComet).toContain('决策点是阻塞点');
       expect(zhComet).toContain('`comet/reference/decision-point.md`');
-      expect(zhDecisionPoint).toContain('若当前平台没有结构化提问工具，则必须在对话中提出明确选项并停止流程');
+      expect(zhDecisionPoint).toContain(
+        '若当前平台没有结构化提问工具，则必须在对话中提出明确选项并停止流程',
+      );
       expect(zhDecisionPoint).toContain('不得用推荐规则、默认值、历史偏好');
       expect(zhOpen).toContain('### 1b. 需求澄清完成确认（阻塞点）');
       expect(zhOpen).toContain(
@@ -631,7 +623,7 @@ describe('skills', () => {
       // MEDIUM: comet-design brainstorming does not write Design Doc before confirmation
       expect(zhDesign).toContain('brainstorming 阶段不写入 Design Doc 文件');
       expect(zhDesign).toContain('增量更新 `brainstorm-summary.md`');
-      expect(zhDesign).toContain('### 1e. 主动上下文压缩门');
+      expect(zhDesign).toContain('### 1e. 主动式上下文压缩');
 
       // MEDIUM: comet-verify Spec drift requires user choice
       expect(zhVerify).toContain(
@@ -648,10 +640,12 @@ describe('skills', () => {
       expect(zhBuild).toContain('提供 plan-ready 暂停点');
       expect(zhBuild).toContain('不得自动继续，也不得把暂停写入 `build_mode`');
       expect(zhBuild).toContain('`build_mode` 为 `executing-plans`');
+      expect(zhBuild).toContain('review_mode');
+      expect(zhBuild).toContain('| `off` | 不自动派发代码审查 |');
+      expect(zhBuild).toContain('| `standard` | 只在任务完成后运行一次最终轻量代码审查');
       expect(zhBuild).toContain(
-        '必须使用 Skill 工具加载 Superpowers `requesting-code-review` 技能',
+        '| `thorough` | 按批次或风险边界运行合并审查，最后再运行一次完整审查 |',
       );
-      expect(zhBuild).toContain('至少请求一次代码审查');
       expect(zhBuild).toContain('build → verify');
       expect(zhBuild).toContain(
         'CRITICAL review 发现（安全漏洞、数据丢失风险、构建/测试失败）必须先修复',
@@ -660,13 +654,13 @@ describe('skills', () => {
       // MEDIUM: comet-verify Step 1b treats CRITICAL/IMPORTANT as blocking
       expect(zhVerify).toContain('CRITICAL 或 IMPORTANT 失败项必须修复');
       expect(zhVerify).toContain('不允许跳过修复直接全部接受');
-      expect(zhVerify).toContain('简化代码审查');
-      expect(zhVerify).toContain('必须使用 Skill 工具加载 Superpowers `requesting-code-review` 技能');
+      expect(zhVerify).toContain('当 `review_mode: standard` 或 `thorough` 时');
+      expect(zhVerify).toContain('当 `review_mode: off` 时跳过自动代码审查');
       expect(zhVerify).toContain('只检查正确性、安全、边界条件');
       expect(zhVerify).toContain('无 CRITICAL 或 IMPORTANT 问题');
       expect(zhVerify).toContain('不影响正确性、安全、边界条件的 code pattern consistency 建议');
       expect(zhVerify).toContain('不执行 spec 覆盖率、Design Doc 一致性或漂移检查');
-      expect(zhHotfix).toContain('6 项快速检查，包含简化代码审查');
+      expect(zhHotfix).toContain('默认 `review_mode: off`');
 
       // MEDIUM: hotfix IMPORTANT covers >3-tasks comet-build decision points
       expect(zhHotfix).toContain('任务超过 3 个转入 `/comet-build` 时的工作区隔离和执行方式选择');
@@ -772,7 +766,9 @@ describe('skills', () => {
       expect(zhCometRule).toContain(
         '使用 Skill 工具重新加载 Superpowers `subagent-driven-development` 技能',
       );
-      expect(zhCometRule).toContain('读取 `comet/reference/subagent-dispatch.md` 获取 Comet 专属扩展');
+      expect(zhCometRule).toContain(
+        '读取 `comet/reference/subagent-dispatch.md` 获取 Comet 专属扩展',
+      );
       expect(zhCometRule).toContain('禁止在主会话中直接执行 task');
       for (const [content] of [
         [zhOpen, '/comet-design'],
@@ -849,8 +845,12 @@ describe('skills', () => {
       );
 
       expect(enComet).toContain('Decision points are blocking points');
-      expect(enDecisionPoint).toContain('If the current platform has no structured question tool, ask clear options in the conversation and stop until the user replies');
-      expect(enDecisionPoint).toContain('Never substitute recommendation rules, defaults, historical preferences');
+      expect(enDecisionPoint).toContain(
+        'If the current platform has no structured question tool, ask clear options in the conversation and stop until the user replies',
+      );
+      expect(enDecisionPoint).toContain(
+        'Never substitute recommendation rules, defaults, historical preferences',
+      );
       expect(enOpen).toContain(
         '### 1b. Requirements Clarification Completion Confirmation (Blocking Point)',
       );
@@ -937,7 +937,7 @@ describe('skills', () => {
       expect(enTweak).toContain('Final archive confirmation');
       expect(enDesign).toContain('The brainstorming phase does not write to the Design Doc file');
       expect(enVerify).toContain(
-        'must use the current platform\'s available user input/confirmation mechanism as a single-select question to pause and wait for the user to choose the handling method',
+        "must use the current platform's available user input/confirmation mechanism as a single-select question to pause and wait for the user to choose the handling method",
       );
       expect(enComet).toContain('first check `build_pause`, `plan`, `build_mode`, and `isolation`');
       expect(enComet).toContain('`build_pause: plan-ready` and the plan file exists');
@@ -1216,15 +1216,19 @@ describe('skills', () => {
       expect(zhDispatch).toContain('implementer 不得勾选 plan 或 OpenSpec task');
       expect(zhDispatch).toContain('协调者唯一允许的文件修改');
       expect(zhDispatch).toContain('plan、OpenSpec task 和 subagent 进度检查点');
-      expect(zhDispatch).toContain(
-        'openspec/changes/<name>/.comet/subagent-progress.md',
-      );
+      expect(zhDispatch).toContain('openspec/changes/<name>/.comet/subagent-progress.md');
       expect(zhDispatch).toContain('final-review | final-fix');
       expect(zhDispatch).toContain('当前审查-修复轮次');
       expect(zhDispatch).toContain('已通过的审查阶段');
       expect(zhDispatch).toContain('所有 task 已勾选且检查点处于 `final-review` 或 `final-fix`');
-      expect(zhDispatch).toContain('使用 Skill 工具加载 Superpowers `test-driven-development` 技能');
-      expect(zhDispatch).toContain('两个审查都通过后');
+      expect(zhDispatch).toContain(
+        '使用 Skill 工具加载 Superpowers `test-driven-development` 技能',
+      );
+      expect(zhDispatch).toContain(
+        '当 `review_mode: standard` 时，每个 task 不自动派发 per-task reviewer',
+      );
+      expect(zhDispatch).toContain('当 `review_mode: thorough` 时，不执行每 task 双审查');
+      expect(zhDispatch).toContain('当 `review_mode: off` 时');
       expect(zhDispatch).toContain(
         '"$COMET_BASH" "$COMET_STATE" task-checkoff "$PLAN_FILE" "$PLAN_TASK_TEXT"',
       );
@@ -1239,14 +1243,10 @@ describe('skills', () => {
       expect(zhDispatch).toContain('返回 `comet-build` 继续执行退出条件、阶段守卫和后续阶段衔接');
       expect(zhRecovery).toContain('重新加载 Superpowers `subagent-driven-development` 技能');
       expect(zhRecovery).toContain('重新阅读 `comet/reference/subagent-dispatch.md`');
-      expect(zhRecovery).toContain(
-        '读取 `openspec/changes/<name>/.comet/subagent-progress.md`',
-      );
+      expect(zhRecovery).toContain('读取 `openspec/changes/<name>/.comet/subagent-progress.md`');
       expect(zhGuard).toContain('重新加载 Superpowers `subagent-driven-development` 技能');
       expect(zhGuard).toContain('读取 `comet/reference/subagent-dispatch.md` 获取 Comet 专属扩展');
-      expect(zhGuard).toContain(
-        '读取 `openspec/changes/<name>/.comet/subagent-progress.md`',
-      );
+      expect(zhGuard).toContain('读取 `openspec/changes/<name>/.comet/subagent-progress.md`');
     });
 
     it('keeps the English dispatch contract behaviorally aligned', async () => {
@@ -1292,9 +1292,7 @@ describe('skills', () => {
       expect(enDispatch).toContain('implementation commit or diff and the RED/GREEN evidence');
       expect(enDispatch).toContain('The coordinator may modify only');
       expect(enDispatch).toContain('plan, OpenSpec task, and subagent progress checkpoint');
-      expect(enDispatch).toContain(
-        'openspec/changes/<name>/.comet/subagent-progress.md',
-      );
+      expect(enDispatch).toContain('openspec/changes/<name>/.comet/subagent-progress.md');
       expect(enDispatch).toContain('final-review | final-fix');
       expect(enDispatch).toContain('current review-fix round');
       expect(enDispatch).toContain('review stages already passed');
@@ -1313,16 +1311,12 @@ describe('skills', () => {
       );
       expect(enRecovery).toContain('reload the Superpowers `subagent-driven-development` skill');
       expect(enRecovery).toContain('Re-read `comet/reference/subagent-dispatch.md`');
-      expect(enRecovery).toContain(
-        'Read `openspec/changes/<name>/.comet/subagent-progress.md`',
-      );
+      expect(enRecovery).toContain('Read `openspec/changes/<name>/.comet/subagent-progress.md`');
       expect(enGuard).toContain('reload the Superpowers `subagent-driven-development` skill');
       expect(enGuard).toContain(
         'Re-read `comet/reference/subagent-dispatch.md` for Comet-specific extensions',
       );
-      expect(enGuard).toContain(
-        'Read `openspec/changes/<name>/.comet/subagent-progress.md`',
-      );
+      expect(enGuard).toContain('Read `openspec/changes/<name>/.comet/subagent-progress.md`');
     });
 
     it('does not install a Stop hook for task continuity', async () => {
@@ -1332,6 +1326,43 @@ describe('skills', () => {
       expect(hooks.length).toBeGreaterThan(0);
       expect(hooks.every((hook) => hook.matcher === 'Write|Edit')).toBe(true);
       expect(hooks.some((hook) => /stop/i.test(hook.matcher))).toBe(false);
+    });
+  });
+
+  describe('Comet phase guard rules', () => {
+    const section = (content: string, heading: string) => {
+      const start = content.indexOf(heading);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const rest = content.slice(start + heading.length);
+      const nextHeading = rest.search(/\n## /u);
+      return nextHeading === -1 ? rest : rest.slice(0, nextHeading);
+    };
+
+    it('delegates post-guard handoff to comet-state next so auto_transition is honored', async () => {
+      const zhGuard = await fs.readFile(
+        path.resolve('assets', 'skills', 'comet', 'rules', 'comet-phase-guard.md'),
+        'utf-8',
+      );
+      const enGuard = await fs.readFile(
+        path.resolve('assets', 'skills', 'comet', 'rules', 'comet-phase-guard.en.md'),
+        'utf-8',
+      );
+
+      const zhSection = section(zhGuard, '## 阶段退出后自动过渡');
+      expect(zhSection).toContain('comet-state next <change-name>');
+      expect(zhSection).toContain('NEXT: auto');
+      expect(zhSection).toContain('NEXT: manual');
+      expect(zhSection).toContain('NEXT: done');
+      expect(zhSection).not.toContain('必须调用下一阶段的 skill');
+      expect(zhSection).not.toContain('open → `comet-design`');
+
+      const enSection = section(enGuard, '## Automatic Transition After Phase Exit');
+      expect(enSection).toContain('comet-state next <change-name>');
+      expect(enSection).toContain('NEXT: auto');
+      expect(enSection).toContain('NEXT: manual');
+      expect(enSection).toContain('NEXT: done');
+      expect(enSection).not.toContain("must invoke the next phase's skill");
+      expect(enSection).not.toContain('open → `comet-design`');
     });
   });
 
@@ -1356,6 +1387,33 @@ describe('skills', () => {
     it('ships a shared script locator helper', async () => {
       const manifest = await readManifest();
       expect(manifest.skills).toContain('comet/scripts/comet-env.sh');
+    });
+
+    it('keeps review_mode wired through state and schema scripts', async () => {
+      const stateScript = await fs.readFile(
+        path.resolve('assets', 'skills', 'comet', 'scripts', 'comet-state.sh'),
+        'utf-8',
+      );
+      const guardScript = await fs.readFile(
+        path.resolve('assets', 'skills', 'comet', 'scripts', 'comet-guard.sh'),
+        'utf-8',
+      );
+      const validateScript = await fs.readFile(
+        path.resolve('assets', 'skills', 'comet', 'scripts', 'comet-yaml-validate.sh'),
+        'utf-8',
+      );
+
+      expect(stateScript).toContain('review_mode: $review_mode');
+      expect(stateScript).toContain('review_mode)');
+      expect(stateScript).toContain('validate_enum "$value" "off" "standard" "thorough"');
+      expect(stateScript).toContain('review_mode must be selected before leaving build');
+      expect(guardScript).toContain('review_mode_selected()');
+      expect(guardScript).toContain('check "review_mode selected" review_mode_selected');
+      expect(validateScript).toContain('review_mode=$(field_value "review_mode")');
+      expect(validateScript).toContain(
+        'validate_enum "review_mode"   "$review_mode"    "off standard thorough"',
+      );
+      expect(validateScript).toContain('tdd_mode review_mode isolation');
     });
 
     it('keeps platform search roots out of English and Chinese skill prose', async () => {
@@ -1452,9 +1510,10 @@ describe('skills', () => {
             continue;
           }
 
-          expect(locatorBlock, `${languageDir}/${skillPath} should reuse the shared locator block`).toBe(
-            baseline,
-          );
+          expect(
+            locatorBlock,
+            `${languageDir}/${skillPath} should reuse the shared locator block`,
+          ).toBe(baseline);
         }
       }
     });

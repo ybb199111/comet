@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import { select } from '@inquirer/prompts';
 import { PLATFORMS, type Platform } from '../../src/core/platforms.js';
 import {
   buildNpmUpdateArgs,
@@ -18,6 +19,8 @@ vi.mock('@inquirer/prompts', () => ({
   select: vi.fn().mockResolvedValue(false),
 }));
 
+const mockedSelect = vi.mocked(select);
+
 const claudePlatform: Platform = {
   id: 'claude',
   name: 'Claude Code',
@@ -29,6 +32,7 @@ describe('update command helpers', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
+    mockedSelect.mockClear();
     tmpDir = path.join(
       os.tmpdir(),
       `comet-update-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -252,5 +256,29 @@ describe('update command helpers', () => {
       language: 'en',
       source: 'skills',
     });
+  });
+
+  it('does not prompt to install CodeGraph when the project already has an index', async () => {
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n\nUse this skill.',
+      'utf-8',
+    );
+    await fs.mkdir(path.join(tmpDir, '.codegraph'), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, '.codegraph', 'codegraph.db'), '');
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(tmpDir, { skipNpm: true });
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(mockedSelect).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('CodeGraph'),
+      }),
+    );
   });
 });

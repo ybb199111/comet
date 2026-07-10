@@ -40,12 +40,11 @@ Superpowers 处理 **HOW**（技术设计、规划、执行、收尾）。
 Comet 将二者串联为五阶段自动化流水线。
 
 > [!IMPORTANT]
-> **0.3.7 亮点** — 一键接入 [CodeGraph](https://github.com/colbymchenry/codegraph) 语义代码索引（官方：成本 **↓16%**、工具调用 **↓58%**）；
+> **0.3.9** — `review_mode: off|standard|thorough` 控制 Build/Verify 自动代码审查并支持项目级默认；init/update 改为可选依赖安装，补齐 CLI 国际化、阶段守护加固和 macOS 可执行权限。
 >
-> 新增 Beta 上下文压缩，Build 阶段输入 token 降低 **25–30%**； 新增主动上下文压缩机制，释放读取 Spec 和 brainstorming 消耗的上下文，为后续 Build 阶段保留窗口
-> 新增 6 项 Token 工作流优化默认开启； 新增 `auto_transition` 配置，支持自动流转或手动推进阶段切换；
-> 基于 Hook 和 Rule 的防漂移阶段守护； 可选 TDD 模式与子代理调度确认；
-> 支持大型 PRD 拆分为多个 change； 归档前确认与回退、验证重试限制、系统化调试拦截和验证完成检查等流程加固。
+> **0.3.8** — 新增 Kimi Code 支持、安全的多平台 `comet uninstall`、子代理调度扩展、按需加载共享参考、版本更新检查和 pre-commit 格式化。
+>
+> **0.3.7** — 新增 CodeGraph 语义索引、Beta 上下文压缩、主动式上下文压缩、Token 优化、`auto_transition`、阶段守护、可选 TDD 和更稳的归档/验证流程。
 >
 > 详见 [NEWS.md](NEWS.md)。
 
@@ -117,15 +116,14 @@ comet init
 1. 提示你选择 AI 平台（自动检测已有配置）
 2. 选择安装范围：项目级（当前目录）或全局（用户主目录）
 3. 选择 Comet 技能语言：English 或 中文
-4. 安装 [OpenSpec](https://github.com/Fission-AI/OpenSpec) 技能
-5. 安装 [Superpowers](https://github.com/obra/superpowers) 技能
+4. 选择要安装/升级的 npm 依赖 —— [OpenSpec](https://github.com/Fission-AI/OpenSpec) CLI、[Superpowers](https://github.com/obra/superpowers)（通过 `npx skills add`）、[CodeGraph](https://github.com/colbymchenry/codegraph) CLI。未检测到的依赖默认勾选；已存在的默认不勾，可自主选择是否升级。
+5. 安装选中的依赖并部署对应技能
 6. 将 Comet 技能（你选择的语言）部署到所选平台
 7. 在项目级安装时创建 `docs/superpowers/specs/` 和 `docs/superpowers/plans/` 工作目录
 
 > [!TIP]
-> 更新版本号
->
-> 执行 `comet update` 或者 `npm install -g @rpamis/comet@latest` 即可更新到最新版本。
+> 推荐安装 Superpowers v6.0.0+ —— 相比旧版速度快约 2 倍，节省约 50% token。
+> 后续升级 Comet 本身：执行 `comet update` 或 `npm install -g @rpamis/comet@latest`。
 
 ## 对OpenClaw和Hermes、或其他AI平台的支持
 
@@ -154,6 +152,7 @@ npx skills add rpamis/comet
 |-------------------|----------------------------|
 | `--yes`           | 非交互模式，自动选择已检测平台（未检测到则选择全部） |
 | `--scope <scope>` | 安装范围：`project` 或 `global`  |
+| `--language <lang>` | 技能语言：`en` 或 `zh`（跳过交互式语言选择） |
 | `--skip-existing` | 跳过已安装的组件                   |
 | `--overwrite`     | 覆盖已安装的组件                   |
 | `--json`          | 输出结构化 JSON                 |
@@ -170,6 +169,24 @@ npx skills add rpamis/comet
 | 选项       | 描述                       |
 |----------|--------------------------|
 | `--json` | 输出活跃更改，并包含 `nextCommand` |
+
+</details>
+
+<details>
+<summary><code>comet dashboard [path]</code> — 启动本地只读仪表盘服务</summary>
+
+启动本地 HTTP 服务器，展示包含活跃更改、阶段状态、任务进度和归档历史的可视化仪表盘。默认自动在浏览器中打开。
+
+<p align="center">
+  <img src="https://github.com/rpamis/comet/blob/master/img/dashboard.png" alt="Comet 仪表盘" width="800">
+</p>
+<p align="center">活跃更改概览，包含阶段指示器、任务进度和归档历史</p>
+
+| 选项         | 描述                                             |
+|------------|------------------------------------------------|
+| `--port`   | 服务器端口（默认：自动选择可用端口）                       |
+| `--no-open`| 不自动在浏览器中打开仪表盘                               |
+| `--json`   | 收集单次快照并以 JSON 格式输出到标准输出（用于脚本编写/检查）       |
 
 </details>
 
@@ -224,7 +241,7 @@ comet uninstall --scope project  # 仅移除项目级安装
 
 ## 支持平台
 
-`comet init` 支持 29 个 AI 编码平台：
+`comet init` 支持 30 个 AI 编码平台：
 
 <details>
 <summary>查看完整平台列表</summary>
@@ -245,12 +262,14 @@ comet uninstall --scope project  # 仅移除项目级安装
 | iFlow              | `.iflow/`    | Pi         | `.pi/`        |
 | Qoder              | `.qoder/`    | Antigravity | `.agents/`   |
 | Bob Shell          | `.bob/`      | ForgeCode  | `.forge/`     |
-| Trae               | `.trae/`     |            |               |
+| Trae               | `.trae/`     | Antigravity 2.0 | `.agents/` |
 
 </details>
 
-部分平台的项目级目录和全局目录不同。例如 OpenCode 全局安装使用 `.config/opencode`，Lingma 全局安装使用 `.lingma`
-，Antigravity 全局安装使用 `.gemini/antigravity`。
+部分平台的项目级目录和全局目录不同。例如 OpenCode 全局安装使用 `.config/opencode`，Lingma 全局安装使用 `.lingma`，Antigravity 全局安装使用 `.gemini/antigravity`，以及 Antigravity 2.0 全局安装使用 `.gemini/config`。
+
+> [!NOTE]
+> 由于 Antigravity 与 Antigravity 2.0 共享项目级的 `.agents/` 技能目录，`comet init` 自动检测时会同时选中两者。如果只想为其中一个安装，可在非交互式（即不加 `--yes`）的安装流程中手动取消勾选另一个。
 
 ## 技能
 

@@ -1,6 +1,7 @@
 import path from 'path';
 import os from 'os';
 import { checkbox, select } from '@inquirer/prompts';
+import { platformSelectPrompt } from './platform-select-prompt.js';
 import { PLATFORMS, getPlatformSkillsDir, type Platform } from '../core/platforms.js';
 import { detectPlatforms, hasSkills, getBaseDir, type InstallScope } from '../core/detect.js';
 import {
@@ -10,10 +11,15 @@ import {
   createWorkingDirs,
   type LanguageConfig,
 } from '../core/skills.js';
-import { installOpenSpec } from '../core/openspec.js';
+import { installOpenSpec, isCommandAvailable } from '../core/openspec.js';
 import { installSuperpowersForPlatforms } from '../core/superpowers.js';
-import { installCodegraph } from '../core/codegraph.js';
+import {
+  hasCodegraphProjectIndex,
+  installCodegraph,
+  resolveCodegraphCommand,
+} from '../core/codegraph.js';
 import { printVersionInfo } from '../core/version.js';
+import { t, type TranslationKey } from './i18n.js';
 
 type InitOptions = {
   yes?: boolean;
@@ -47,130 +53,6 @@ const LANGUAGES: LanguageConfig[] = [
   { id: 'zh', name: '中文', skillsDir: 'skills-zh' },
 ];
 
-type TranslationKey =
-  | 'settingUp'
-  | 'installScope'
-  | 'scopeProject'
-  | 'scopeGlobal'
-  | 'languagePrompt'
-  | 'selectPlatforms'
-  | 'detected'
-  | 'noPlatforms'
-  | 'overwriteChoice'
-  | 'overwrite'
-  | 'skip'
-  | 'bulkOverwrite'
-  | 'overwriteAll'
-  | 'skipAll'
-  | 'choosePer'
-  | 'installingOS'
-  | 'allSkipped'
-  | 'installingSP'
-  | 'alreadyExists'
-  | 'rulesInstalled'
-  | 'hooksInstalled'
-  | 'hooksSkipped'
-  | 'installCodegraph'
-  | 'codegraphYes'
-  | 'codegraphNo'
-  | 'installingCG'
-  | 'setupComplete'
-  | 'installed'
-  | 'skippedLabel'
-  | 'failedLabel'
-  | 'workingDirs'
-  | 'getStarted'
-  | 'getStartedComet'
-  | 'getStartedHotfix'
-  | 'getStartedTweak';
-
-const TRANSLATIONS: Record<string, Record<TranslationKey, string>> = {
-  en: {
-    settingUp: 'Setting up Comet in',
-    installScope: 'Install scope:',
-    scopeProject: 'Project (current directory)',
-    scopeGlobal: 'Global (home directory)',
-    languagePrompt: 'Language for Comet skills:',
-    selectPlatforms: 'Select platforms to set up:',
-    detected: 'detected',
-    noPlatforms: 'No platforms selected. Exiting.',
-    overwriteChoice: 'What to do?',
-    overwrite: 'Overwrite',
-    skip: 'Skip',
-    bulkOverwrite: 'already has',
-    overwriteAll: 'Overwrite all existing components',
-    skipAll: 'Skip all existing components',
-    choosePer: 'Choose per component',
-    installingOS: 'Installing OpenSpec for:',
-    allSkipped: 'all skipped',
-    installingSP: 'Installing Superpowers for:',
-    alreadyExists: 'already exists',
-    rulesInstalled: 'rule(s) installed',
-    hooksInstalled: 'phase guard hook installed',
-    hooksSkipped: 'skipped',
-    installCodegraph: 'Install CodeGraph for semantic code intelligence?',
-    codegraphYes: 'Yes (recommended — saves ~16% cost · cuts ~58% tool calls)',
-    codegraphNo: 'No',
-    installingCG: 'Installing CodeGraph...',
-    setupComplete: 'Comet setup complete!',
-    installed: 'Installed:',
-    skippedLabel: 'Skipped:',
-    failedLabel: 'Failed:',
-    workingDirs: 'Working directories: docs/superpowers/specs/, docs/superpowers/plans/',
-    getStarted: 'Get started:',
-    getStartedComet: '/comet "your idea"  — Start a new change with full workflow',
-    getStartedHotfix: '/comet-hotfix       — Quick bug fix (skip brainstorming)',
-    getStartedTweak: '/comet-tweak        — Small change (skip brainstorming and plan)',
-  },
-  zh: {
-    settingUp: '正在设置 Comet：',
-    installScope: '安装范围：',
-    scopeProject: '项目（当前目录）',
-    scopeGlobal: '全局（主目录）',
-    languagePrompt: 'Comet 技能语言：',
-    selectPlatforms: '选择要配置的平台：',
-    detected: '已检测到',
-    noPlatforms: '未选择任何平台，退出。',
-    overwriteChoice: '如何处理？',
-    overwrite: '覆盖',
-    skip: '跳过',
-    bulkOverwrite: '已安装',
-    overwriteAll: '覆盖所有已有组件',
-    skipAll: '跳过所有已有组件',
-    choosePer: '逐个选择',
-    installingOS: '正在安装 OpenSpec：',
-    allSkipped: '全部跳过',
-    installingSP: '正在安装 Superpowers：',
-    alreadyExists: '已存在',
-    rulesInstalled: '个规则已安装',
-    hooksInstalled: '阶段守卫钩子已安装',
-    hooksSkipped: '已跳过',
-    installCodegraph: '是否安装 CodeGraph（语义代码智能）？',
-    codegraphYes: '是（推荐 — 节省约 16% 成本，减少约 58% 工具调用）',
-    codegraphNo: '否',
-    installingCG: '正在安装 CodeGraph...',
-    setupComplete: 'Comet 设置完成！',
-    installed: '已安装：',
-    skippedLabel: '已跳过：',
-    failedLabel: '失败：',
-    workingDirs: '工作目录：docs/superpowers/specs/, docs/superpowers/plans/',
-    getStarted: '开始使用：',
-    getStartedComet: '/comet "你的想法"  — 启动完整工作流',
-    getStartedHotfix: '/comet-hotfix       — 快速修复（跳过 brainstorming）',
-    getStartedTweak: '/comet-tweak        — 小改动（跳过 brainstorming 和完整 plan）',
-  },
-};
-
-/**
- * 根据语言获取对应的翻译文本
- * @param lang - 语言代码（'en' | 'zh'）
- * @param key - 翻译键
- * @returns 对应语言的翻译文本，找不到时回退到英文
- */
-function t(lang: string, key: TranslationKey): string {
-  return TRANSLATIONS[lang]?.[key] ?? TRANSLATIONS.en[key];
-}
-
 const COMET_BANNER = [
   `   ██████╗ ██████╗ ███╗   ███╗███████╗████████╗`,
   `  ██╔════╝██╔═══██╗████╗ ████║██╔════╝╚══██╔══╝`,
@@ -178,15 +60,10 @@ const COMET_BANNER = [
   `  ██║     ██║   ██║██║╚██╔╝██║██╔══╝     ██║   `,
   `  ╚██████╗╚██████╔╝██║ ╚═╝ ██║███████╗   ██║   `,
   `   ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝   ╚═╝   `,
-  `            OpenSpec + Superpowers Workflow       `,
+  `       Agent Skill Harness Phase-Guarded Automation`,
+  `               From Idea To Archive                `,
 ].join('\n');
 
-/**
- * 交互式选择安装范围（项目级或全局）
- * @param options - 初始化选项
- * @param lang - 当前语言
- * @returns 选中的安装范围
- */
 async function selectScope(options: InitOptions, lang: string): Promise<InstallScope> {
   if (options.scope) return options.scope;
   if (options.yes) return 'project';
@@ -200,11 +77,6 @@ async function selectScope(options: InitOptions, lang: string): Promise<InstallS
   });
 }
 
-/**
- * 交互式选择语言
- * @param options - 初始化选项
- * @returns 选中的语言配置
- */
 async function selectLanguage(options: InitOptions): Promise<LanguageConfig> {
   if (options.language) {
     return LANGUAGES.find((l) => l.id === options.language) ?? LANGUAGES[0];
@@ -219,13 +91,6 @@ async function selectLanguage(options: InitOptions): Promise<LanguageConfig> {
   return LANGUAGES.find((l) => l.id === langId) ?? LANGUAGES[0];
 }
 
-/**
- * 交互式选择要安装的平台
- * @param detected - 已检测到的平台集合
- * @param options - 初始化选项
- * @param lang - 当前语言
- * @returns 选中的平台 ID 列表
- */
 async function selectPlatforms(
   detected: Set<string>,
   options: InitOptions,
@@ -233,6 +98,7 @@ async function selectPlatforms(
 ): Promise<string[]> {
   const choices = PLATFORMS.map((p) => ({
     name: `${p.name}${detected.has(p.id) ? ` (${t(lang, 'detected')})` : ''}`,
+    summaryName: p.name,
     value: p.id,
     checked: detected.has(p.id),
   }));
@@ -242,16 +108,16 @@ async function selectPlatforms(
     return selected.length > 0 ? selected : PLATFORMS.map((p) => p.id);
   }
 
-  return checkbox({ message: t(lang, 'selectPlatforms'), choices, required: true });
+  return platformSelectPrompt({
+    message: t(lang, 'selectPlatforms'),
+    choices,
+    selectedLabel: t(lang, 'selectedPlatforms'),
+    emptyLabel: t(lang, 'noneSelected'),
+    requiredErrorLabel: t(lang, 'selectPlatformsRequired'),
+    required: true,
+  });
 }
 
-/**
- * 单个组件已存在时，询问用户是否覆盖
- * @param componentName - 组件名称
- * @param platformName - 平台名称
- * @param lang - 当前语言
- * @returns 用户选择：覆盖或跳过
- */
 async function promptOverwriteChoice(
   componentName: string,
   platformName: string,
@@ -265,13 +131,7 @@ async function promptOverwriteChoice(
     ],
   });
 }
-/**
- * 批量组件已存在时，询问用户批量覆盖、跳过或逐个选择
- * @param platformName - 平台名称
- * @param components - 已存在的组件列表
- * @param lang - 当前语言
- * @returns 用户选择：全部覆盖 / 全部跳过 / 逐个选择
- */
+
 async function promptBulkOverwriteChoice(
   platformName: string,
   components: string[],
@@ -287,13 +147,6 @@ async function promptBulkOverwriteChoice(
   });
 }
 
-/**
- * 根据批量覆盖选择结果应用 action 到组件计划
- * @param plan - 原始组件计划
- * @param choice - 批量选择结果（排除 'choose'）
- * @param hasExisting - 各组件是否已存在
- * @returns 更新后的组件计划
- */
 function applyBulkOverwriteChoice<T extends ComponentPlan>(
   plan: T,
   choice: Exclude<BulkOverwriteChoice, 'choose'>,
@@ -310,12 +163,6 @@ function applyBulkOverwriteChoice<T extends ComponentPlan>(
   };
 }
 
-/**
- * 根据现有状态和选项解析安装动作
- * @param hasExisting - 目标是否已存在
- * @param options - 初始化选项
- * @returns 解析后的动作：install / overwrite / skip
- */
 function resolveAction(
   hasExisting: boolean,
   options: InitOptions,
@@ -327,38 +174,94 @@ function resolveAction(
   return 'install';
 }
 
-/**
- * 显示安装结果摘要
- * @param results - 各平台的安装结果
- * @param scope - 安装范围
- * @param lang - 当前语言
- */
+type NpmDepId = 'openspec' | 'superpowers' | 'codegraph';
+
+interface NpmDepState {
+  id: NpmDepId;
+  installed: boolean;
+}
+
+async function selectNpmDeps(
+  projectPath: string,
+  spPlatformIds: string[],
+  options: InitOptions,
+  lang: string,
+): Promise<Set<NpmDepId>> {
+  const openSpecInstalled = isCommandAvailable('openspec');
+  const codegraphInstalled =
+    hasCodegraphProjectIndex(projectPath) || resolveCodegraphCommand() !== null;
+  const superpowersInstalled = spPlatformIds.length === 0 ? true : undefined;
+
+  const states: NpmDepState[] = [
+    { id: 'openspec', installed: openSpecInstalled },
+    { id: 'superpowers', installed: Boolean(superpowersInstalled) },
+    { id: 'codegraph', installed: codegraphInstalled },
+  ];
+
+  const depLabel: Record<NpmDepId, (installed: boolean) => string> = {
+    openspec: (installed) =>
+      installed ? t(lang, 'npmDepOpenSpecInstalled') : t(lang, 'npmDepOpenSpec'),
+    superpowers: (installed) =>
+      installed ? t(lang, 'npmDepSuperpowersInstalled') : t(lang, 'npmDepSuperpowers'),
+    codegraph: (installed) =>
+      installed ? t(lang, 'npmDepCodegraphInstalled') : t(lang, 'npmDepCodegraph'),
+  };
+
+  const depHint: Partial<Record<NpmDepId, string>> = {
+    superpowers: t(lang, 'npmDepSuperpowersHint'),
+  };
+
+  const choices = states.map(({ id, installed }) => {
+    const choice: {
+      name: string;
+      value: NpmDepId;
+      checked: boolean;
+      description?: string;
+    } = {
+      name: depLabel[id](installed),
+      value: id,
+      checked: !installed,
+    };
+    if (depHint[id]) {
+      choice.description = depHint[id];
+    }
+    return choice;
+  });
+
+  if (options.yes) {
+    return new Set(states.filter((s) => !s.installed).map((s) => s.id));
+  }
+
+  const selected = await checkbox({
+    message: t(lang, 'selectNpmDeps'),
+    choices,
+  });
+  return new Set(selected as NpmDepId[]);
+}
+
 function displaySummary(results: PlatformResult[], scope: InstallScope, lang: string): void {
   const scopeLabel = scope === 'global' ? os.homedir() : 'project';
+  const componentStatuses: Array<[keyof Omit<PlatformResult, 'platform'>, string]> = [
+    ['openspec', 'OpenSpec'],
+    ['superpowers', 'Superpowers'],
+    ['comet', 'Comet'],
+    ['codegraph', 'CodeGraph'],
+  ];
+  const hasFailure = (result: PlatformResult) =>
+    componentStatuses.some(([key]) => result[key] === 'failed');
+  const hasInstall = (result: PlatformResult) =>
+    componentStatuses.some(([key]) => result[key] === 'installed');
+  const failedDetails = (result: PlatformResult) =>
+    componentStatuses
+      .filter(([key]) => result[key] === 'failed')
+      .map(([, label]) => `${label} ${t(lang, 'failedStatus')}`)
+      .join(', ');
 
   console.log(`\n  ${t(lang, 'setupComplete')} (scope: ${scopeLabel})\n`);
 
-  const installed = results.filter(
-    (r) =>
-      r.openspec === 'installed' ||
-      r.superpowers === 'installed' ||
-      r.comet === 'installed' ||
-      r.codegraph === 'installed',
-  );
-  const skipped = results.filter(
-    (r) =>
-      r.openspec === 'skipped' &&
-      r.superpowers === 'skipped' &&
-      r.comet === 'skipped' &&
-      r.codegraph === 'skipped',
-  );
-  const failed = results.filter(
-    (r) =>
-      r.openspec === 'failed' ||
-      r.superpowers === 'failed' ||
-      r.comet === 'failed' ||
-      r.codegraph === 'failed',
-  );
+  const failed = results.filter(hasFailure);
+  const installed = results.filter((r) => !hasFailure(r) && hasInstall(r));
+  const skipped = results.filter((r) => componentStatuses.every(([key]) => r[key] === 'skipped'));
 
   if (installed.length > 0) {
     console.log(`  ${t(lang, 'installed')}`);
@@ -370,7 +273,10 @@ function displaySummary(results: PlatformResult[], scope: InstallScope, lang: st
     console.log(`  ${t(lang, 'skippedLabel')} ${skipped.map((r) => r.platform.name).join(', ')}`);
   }
   if (failed.length > 0) {
-    console.log(`  ${t(lang, 'failedLabel')} ${failed.map((r) => r.platform.name).join(', ')}`);
+    console.log(`  ${t(lang, 'failedLabel')}`);
+    for (const r of failed) {
+      console.log(`    ${r.platform.name} (${failedDetails(r)})`);
+    }
   }
 
   if (scope === 'project') {
@@ -383,11 +289,6 @@ function displaySummary(results: PlatformResult[], scope: InstallScope, lang: st
   console.log(`    ${t(lang, 'getStartedTweak')}\n`);
 }
 
-/**
- * 执行 Comet 初始化命令：选择语言、范围、平台并安装各组件
- * @param targetPath - 目标路径
- * @param options - 初始化选项
- */
 export async function initCommand(targetPath: string, options: InitOptions = {}): Promise<void> {
   const projectPath = path.resolve(targetPath);
   const log = options.json ? () => undefined : console.log;
@@ -397,7 +298,6 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
     await printVersionInfo(log);
   }
 
-  // Select language first so all subsequent prompts can be localized
   const language = await selectLanguage(options);
   const lang = language.id;
 
@@ -481,26 +381,45 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
     plans.push({ platform, osAction, spAction, cmAction, hasOS, hasSP, hasCM });
   }
 
-  const osToolIds = plans
-    .filter((p) => p.osAction !== 'skip')
-    .map((p) => p.platform.openspecToolId);
+  const osToolIds = Array.from(
+    new Set(plans.filter((p) => p.osAction !== 'skip').map((p) => p.platform.openspecToolId)),
+  );
+
+  const spPlatformIds = plans.filter((p) => p.spAction !== 'skip').map((p) => p.platform.id);
+
+  const selectedNpmDeps = await selectNpmDeps(projectPath, spPlatformIds, options, lang);
+  const shouldInstallOpenSpecCli = selectedNpmDeps.has('openspec');
+  const shouldInstallSuperpowers = selectedNpmDeps.has('superpowers');
+  const shouldInstallCodegraphCli = selectedNpmDeps.has('codegraph');
 
   let osGlobalStatus: InstallStatus = 'skipped';
   if (osToolIds.length > 0) {
     log(`\n  ${t(lang, 'installingOS')} ${osToolIds.join(', ')}`);
-    osGlobalStatus = await installOpenSpec(projectPath, osToolIds, scope);
-    log(`  OpenSpec: ${osGlobalStatus}`);
+    osGlobalStatus = await installOpenSpec(projectPath, osToolIds, scope, shouldInstallOpenSpecCli);
+    if (osGlobalStatus === 'skipped' && !shouldInstallOpenSpecCli) {
+      log(`  OpenSpec: ${t(lang, 'osSkippedNoCli')}`);
+    } else {
+      log(`  OpenSpec: ${osGlobalStatus}`);
+    }
   } else {
     log(`\n  OpenSpec: ${t(lang, 'allSkipped')}`);
   }
 
-  const spPlatformIds = plans.filter((p) => p.spAction !== 'skip').map((p) => p.platform.id);
   let spGlobalStatus: InstallStatus = 'skipped';
 
   if (spPlatformIds.length > 0) {
-    log(`\n  ${t(lang, 'installingSP')} ${spPlatformIds.join(', ')}`);
-    spGlobalStatus = await installSuperpowersForPlatforms(projectPath, scope, spPlatformIds);
-    log(`  Superpowers: ${spGlobalStatus}`);
+    if (!shouldInstallSuperpowers) {
+      log(`\n  Superpowers: ${t(lang, 'spSkippedByUser')}`);
+    } else {
+      log(`\n  ${t(lang, 'installingSP')} ${spPlatformIds.join(', ')}`);
+      spGlobalStatus = await installSuperpowersForPlatforms(
+        projectPath,
+        scope,
+        spPlatformIds,
+        true,
+      );
+      log(`  Superpowers: ${spGlobalStatus}`);
+    }
   } else {
     log(`\n  Superpowers: ${t(lang, 'allSkipped')}`);
   }
@@ -527,7 +446,6 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
       log(`  Comet -> ${platform.name}: skipped (${t(lang, 'alreadyExists')})`);
     }
 
-    // Distribute anti-drift rules to platforms that support them
     if (cmAction !== 'skip') {
       const { copied: ruleCopied } = await copyCometRulesForPlatform(
         baseDir,
@@ -540,7 +458,6 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
       }
     }
 
-    // Install hooks for platforms that support them
     if (cmAction !== 'skip' && platform.supportsHooks) {
       const { installed, reason } = await installCometHooksForPlatform(baseDir, platform, scope);
       if (installed) {
@@ -559,27 +476,25 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
     });
   }
 
-  let cgGlobalStatus: InstallStatus;
+  const codegraphAlreadyIndexed = hasCodegraphProjectIndex(projectPath);
+
+  // JSON mode never installs CodeGraph interactively (matches pre-i18n behavior).
+  // If the project already has a .codegraph/ index, skip.
+  // Otherwise, only install when the user selected codegraph in the npm-deps prompt.
   const shouldInstallCodegraph =
-    !options.json &&
-    (options.yes ||
-      (await select({
-        message: t(lang, 'installCodegraph'),
-        choices: [
-          { name: t(lang, 'codegraphYes'), value: true },
-          { name: t(lang, 'codegraphNo'), value: false },
-        ],
-      })));
+    !options.json && !codegraphAlreadyIndexed && shouldInstallCodegraphCli;
 
   if (shouldInstallCodegraph) {
     log(`\n  ${t(lang, 'installingCG')}`);
-    cgGlobalStatus = await installCodegraph(projectPath, scope);
+    const cgGlobalStatus = await installCodegraph(projectPath, scope, true);
     log(`  CodeGraph: ${cgGlobalStatus}`);
     for (const r of results) {
       r.codegraph = cgGlobalStatus;
     }
-  } else {
-    log('\n  CodeGraph: skipped');
+  } else if (!options.json && codegraphAlreadyIndexed) {
+    log('\n  CodeGraph: skipped (existing .codegraph index detected)');
+  } else if (!options.json) {
+    log(`\n  CodeGraph: ${t(lang, 'cgSkippedByUser')}`);
   }
 
   if (scope === 'project') {
@@ -615,3 +530,4 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
 }
 
 export { applyBulkOverwriteChoice };
+export type { TranslationKey };

@@ -67,7 +67,12 @@ describe('init command helpers', () => {
       await createWorkingDirs(tmpDir);
 
       const config = await fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf-8');
+      expect(config).toContain('# context_compression: off | beta');
       expect(config).toContain('context_compression: off');
+      expect(config).toContain('# review_mode: off | standard | thorough');
+      expect(config).toContain('review_mode: off');
+      expect(config).toContain('# auto_transition: true | false');
+      expect(config).toContain('auto_transition: true');
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }

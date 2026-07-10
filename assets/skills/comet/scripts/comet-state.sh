@@ -235,6 +235,33 @@ project_auto_transition_default() {
   esac
 }
 
+project_review_mode_default() {
+  local value="null"
+  local source="default"
+  if [ -n "${COMET_REVIEW_MODE:-}" ]; then
+    value="$COMET_REVIEW_MODE"
+    source="COMET_REVIEW_MODE"
+  elif [ -f ".comet/config.yaml" ]; then
+    local raw
+    raw=$(yaml_field "review_mode" ".comet/config.yaml" 2>/dev/null || true)
+    if [ -n "$raw" ]; then
+      value="$raw"
+      source=".comet/config.yaml"
+    fi
+  fi
+
+  case "$value" in
+    null|off|standard|thorough)
+      printf '%s\n' "$value"
+      ;;
+    *)
+      red "ERROR: Invalid review_mode from ${source}: '$value'" >&2
+      red "Valid values: off, standard, thorough" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # --- Subcommands ---
 
 cmd_init() {
@@ -258,7 +285,7 @@ cmd_init() {
   mkdir -p "$change_dir"
 
   # Set workflow-appropriate defaults
-  local phase build_mode isolation verify_mode context_compression auto_transition
+  local phase build_mode isolation verify_mode context_compression auto_transition review_mode
   phase="open"
   context_compression=$(project_context_compression)
   auto_transition="$(project_auto_transition_default)"
@@ -267,12 +294,14 @@ cmd_init() {
     full)
       build_mode="null"
       tdd_mode="null"
+      review_mode="$(project_review_mode_default)"
       isolation="null"
       verify_mode="null"
       ;;
     hotfix|tweak)
       build_mode="direct"
       tdd_mode="direct"
+      review_mode="off"
       isolation="branch"
       verify_mode="light"
       ;;
@@ -293,6 +322,7 @@ build_mode: $build_mode
 build_pause: null
 subagent_dispatch: null
 tdd_mode: $tdd_mode
+review_mode: $review_mode
 isolation: $isolation
 verify_mode: $verify_mode
 auto_transition: $auto_transition
@@ -353,16 +383,25 @@ cmd_set() {
   # Validate field name
   case "$field" in
     phase)
-      yellow "WARNING: Setting 'phase' directly bypasses state machine constraints." >&2
-      yellow "  Consider using: comet-state.sh transition <change-name> <event>" >&2
+      # Direct phase writes bypass state-machine evidence checks (open artifacts,
+      # design_doc, build decisions, verification evidence). Block them unless the
+      # call originates from cmd_transition (dynamic-scope flag) or the operator
+      # explicitly opts into the repair escape hatch.
+      if [ "${_COMET_IN_TRANSITION:-}" != "1" ] && [ "${COMET_FORCE_PHASE:-}" != "1" ]; then
+        red "ERROR: Setting 'phase' directly is not allowed; it bypasses state machine evidence checks." >&2
+        red "  Use: comet-state.sh transition <change-name> <event>" >&2
+        red "  Repair-only escape hatch: COMET_FORCE_PHASE=1 comet-state.sh set <change-name> phase <value>" >&2
+        exit 1
+      fi
+      validate_enum "$value" "open" "design" "build" "verify" "archive"
       ;;
-    workflow|context_compression|build_mode|build_pause|subagent_dispatch|tdd_mode|isolation|verify_mode|auto_transition|verify_result|verification_report|branch_status|archived|design_doc|plan|verified_at|created_at|direct_override|build_command|verify_command|handoff_context|handoff_hash|base_ref)
+    workflow|context_compression|build_mode|build_pause|subagent_dispatch|tdd_mode|review_mode|isolation|verify_mode|auto_transition|verify_result|verification_report|branch_status|archived|design_doc|plan|verified_at|created_at|direct_override|build_command|verify_command|handoff_context|handoff_hash|base_ref)
       # Valid field
       ;;
     *)
       red "ERROR: Unknown field: '$field'" >&2
       red "Valid fields:" >&2
-      red "  workflow, phase, context_compression, design_doc, plan, build_mode, build_pause, subagent_dispatch, tdd_mode, isolation," >&2
+      red "  workflow, phase, context_compression, design_doc, plan, build_mode, build_pause, subagent_dispatch, tdd_mode, review_mode, isolation," >&2
       red "  verify_mode, auto_transition, verify_result, verification_report, branch_status," >&2
       red "  verified_at, created_at, archived, base_ref, direct_override," >&2
       red "  build_command, verify_command, handoff_context, handoff_hash" >&2
@@ -392,6 +431,9 @@ cmd_set() {
       ;;
     tdd_mode)
       validate_enum "$value" "tdd" "direct"
+      ;;
+    review_mode)
+      validate_enum "$value" "off" "standard" "thorough"
       ;;
     isolation)
       validate_enum "$value" "branch" "worktree"
@@ -444,6 +486,33 @@ require_phase() {
   fi
 }
 
+require_open_artifacts() {
+  local change_name="$1"
+  local change_dir workflow f
+  change_dir=$(change_dir_for "$change_name")
+  workflow=$(cmd_get "$change_name" "workflow")
+  for f in proposal.md tasks.md; do
+    if [ ! -s "$change_dir/$f" ]; then
+      red "ERROR: Cannot transition '$change_name': $f must exist and be non-empty before leaving open" >&2
+      exit 1
+    fi
+  done
+  if [ "$workflow" = "full" ] && [ ! -s "$change_dir/design.md" ]; then
+    red "ERROR: Cannot transition '$change_name': design.md must exist and be non-empty before leaving open" >&2
+    exit 1
+  fi
+}
+
+require_design_evidence() {
+  local change_name="$1"
+  local design_doc
+  design_doc=$(cmd_get "$change_name" "design_doc")
+  if [ -z "$design_doc" ] || [ "$design_doc" = "null" ] || [ ! -s "$design_doc" ]; then
+    red "ERROR: Cannot transition '$change_name': design_doc must point to an existing Design Doc before leaving design" >&2
+    exit 1
+  fi
+}
+
 require_verification_evidence() {
   local change_name="$1"
   local report branch_status
@@ -463,13 +532,14 @@ require_verification_evidence() {
 
 require_build_decisions() {
   local change_name="$1"
-  local workflow build_mode isolation direct_override subagent_dispatch tdd_mode
+  local workflow build_mode isolation direct_override subagent_dispatch tdd_mode review_mode
   workflow=$(cmd_get "$change_name" "workflow")
   build_mode=$(cmd_get "$change_name" "build_mode")
   isolation=$(cmd_get "$change_name" "isolation")
   direct_override=$(cmd_get "$change_name" "direct_override" 2>/dev/null || true)
   subagent_dispatch=$(cmd_get "$change_name" "subagent_dispatch" 2>/dev/null || true)
   tdd_mode=$(cmd_get "$change_name" "tdd_mode" 2>/dev/null || true)
+  review_mode=$(cmd_get "$change_name" "review_mode" 2>/dev/null || true)
 
   case "$isolation" in
     branch|worktree) ;;
@@ -501,11 +571,24 @@ require_build_decisions() {
     red "ERROR: Cannot transition '$change_name': tdd_mode must be selected before leaving build (full workflow)" >&2
     exit 1
   fi
+
+  if [ "$workflow" = "full" ]; then
+    case "$review_mode" in
+      off|standard|thorough) ;;
+      *)
+        red "ERROR: Cannot transition '$change_name': review_mode must be selected before leaving build (full workflow); review_mode must be off, standard, or thorough, got '${review_mode:-null}'" >&2
+        exit 1
+        ;;
+    esac
+  fi
 }
 
 cmd_transition() {
   local change_name="$1"
   local event="$2"
+  # Dynamic-scope flag: authorizes the internal cmd_set phase writes below while
+  # still blocking direct `set <name> phase` from the CLI.
+  local _COMET_IN_TRANSITION=1
 
   validate_change_name "$change_name"
   validate_enum "$event" "open-complete" "design-complete" "build-complete" "verify-pass" "verify-fail" "archive-reopen" "archived"
@@ -513,6 +596,7 @@ cmd_transition() {
   case "$event" in
     open-complete)
       require_phase "$change_name" "open"
+      require_open_artifacts "$change_name"
       local workflow
       workflow=$(cmd_get "$change_name" "workflow")
       if [ "$workflow" = "full" ]; then
@@ -523,6 +607,7 @@ cmd_transition() {
       ;;
     design-complete)
       require_phase "$change_name" "design"
+      require_design_evidence "$change_name"
       cmd_set "$change_name" phase build
       ;;
     build-complete)
@@ -566,6 +651,12 @@ cmd_transition() {
       ;;
     archived)
       require_phase "$change_name" "archive"
+      local archived_verify_result
+      archived_verify_result=$(cmd_get "$change_name" "verify_result")
+      if [ "$archived_verify_result" != "pass" ]; then
+        red "ERROR: Cannot transition '$change_name': verify_result must be pass before archiving" >&2
+        exit 1
+      fi
       cmd_set "$change_name" archived true
       ;;
   esac
@@ -772,7 +863,7 @@ cmd_recover() {
 
   # Read all relevant fields
   local design_doc plan verify_result verify_mode verification_report
-  local branch_status handoff_context handoff_hash isolation build_mode build_pause subagent_dispatch tdd_mode direct_override
+  local branch_status handoff_context handoff_hash isolation build_mode build_pause subagent_dispatch tdd_mode review_mode direct_override
   design_doc=$(cmd_get "$change_name" "design_doc")
   plan=$(cmd_get "$change_name" "plan")
   verify_result=$(cmd_get "$change_name" "verify_result")
@@ -786,6 +877,7 @@ cmd_recover() {
   build_pause=$(cmd_get "$change_name" "build_pause" 2>/dev/null || true)
   subagent_dispatch=$(cmd_get "$change_name" "subagent_dispatch" 2>/dev/null || true)
   tdd_mode=$(cmd_get "$change_name" "tdd_mode" 2>/dev/null || true)
+  review_mode=$(cmd_get "$change_name" "review_mode" 2>/dev/null || true)
   direct_override=$(cmd_get "$change_name" "direct_override" 2>/dev/null || true)
 
   echo "State fields:"
@@ -841,6 +933,7 @@ cmd_recover() {
       field_status "build_mode" "$build_mode"
       field_status "build_pause" "$build_pause"
       field_status "tdd_mode" "$tdd_mode"
+      field_status "review_mode" "$review_mode"
       if [ "$build_mode" = "subagent-driven-development" ] || { [ -n "$subagent_dispatch" ] && [ "$subagent_dispatch" != "null" ]; }; then
         field_status "subagent_dispatch" "$subagent_dispatch"
       fi

@@ -20,6 +20,18 @@
 | `verify` | 验证、branch handling | 跳过失败处理 |
 | `archive` | 确认归档、运行归档脚本 | 写源代码 |
 
+### 阶段进入自洽性校验（写源代码前必查）
+
+仅看 `phase` 字段不够——还必须确认"是如何到达这个阶段的"。每次准备写源代码前，先用下表自检 `.comet.yaml` 是否处于**非法空跳**状态（绕过了前置阶段）。命中任一行，立即停止写源代码，按动作回到对应阶段补齐产物，不得信任 `phase` 字段直接续跑。
+
+| 检测到 | 判定 | 动作 |
+|--------|------|------|
+| `phase: build` + `workflow: full` + `design_doc` 为空/null | 绕过 design 空跳 | 停止写源代码，运行 `/comet-design` 补 Design Doc 并过 guard |
+| `phase: build/verify` + proposal/design/tasks 任一缺失或为空 | 绕过 open 空跳 | 回 `/comet-open` 补齐三件套 |
+| `phase: archive` + `verify_result` ≠ `pass` | 绕过 verify 空跳 | 回 `/comet-verify` 完成验证 |
+
+预设例外：`workflow: hotfix/tweak` 本就跳过 design，`design_doc` 为空属正常，不算非法。
+
 ### Skill 调用（不可用普通对话替代）
 
 以下操作必须通过 Skill 工具加载，Skill 不可用时应停止流程并提示安装：
@@ -37,6 +49,7 @@
 - **阶段退出**: `comet-guard <name> <phase> --apply`（必须看到 ALL CHECKS PASSED）
 - **压缩恢复**: `comet-state check <name> <phase> --recover`
 - **状态更新**: 关键操作后通过 `comet-state set` 更新字段，禁止手工编辑 .comet.yaml
+- **阶段推进只能经 guard/transition**: 禁止用 `comet-state set <name> phase <值>` 手动跳阶段（会绕过证据校验，脚本已硬拦截）；确需修复畸形状态时才用 `COMET_FORCE_PHASE=1` 逃生阀
 - **handoff 生成**: `comet-handoff <name> design --write`（禁止手写摘要）
 
 ### 用户确认（不可自动跳过）
@@ -80,6 +93,8 @@
 
 按脚本输出的 **Recovery action** 决定下一步。
 
+恢复后必须先用「阶段进入自洽性校验」表复查一遍：若发现 `phase` 与产物不自洽（design_doc/三件套/verify_result 任一不匹配），按非法空跳处理，回对应阶段补齐，不得信任 `phase` 字段直接续跑。
+
 **特别注意 `build_mode`**：若恢复脚本输出 `build_mode: subagent-driven-development`，你是协调者，不是执行者。必须：
 1. 使用 Skill 工具重新加载 Superpowers `subagent-driven-development` 技能 (Use the Skill tool to reload the Superpowers `subagent-driven-development` skill)
 2. 读取 `comet/reference/subagent-dispatch.md` 获取 Comet 专属扩展 (re-read `comet/reference/subagent-dispatch.md` for Comet-specific extensions)
@@ -91,9 +106,20 @@
 
 ## 阶段退出后自动过渡
 
-guard `--apply` 成功后，必须调用下一阶段的 skill：
+guard `--apply` 成功后，不得在本规则中硬编码下一阶段 skill。必须先运行：
 
-- open → `comet-design`（full）/ `comet-build`（hotfix/tweak）
-- design → `comet-build`
-- build → `comet-verify`
-- verify → `comet-archive`
+```bash
+comet-state next <change-name>
+```
+
+若已通过 `comet-env.sh` 定位脚本，等价运行：
+
+```bash
+"$COMET_BASH" "$COMET_STATE" next <change-name>
+```
+
+按脚本输出决定下一步：
+
+- `NEXT: auto` → 使用 Skill 工具加载 `SKILL` 指向的 skill
+- `NEXT: manual` → 不加载下一 skill，按 `HINT` 提示用户手动继续
+- `NEXT: done` → 流程已完成，无需继续

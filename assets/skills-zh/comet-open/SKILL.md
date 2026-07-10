@@ -71,6 +71,23 @@ description: "Comet 阶段 1：开启。用 /comet-open 调用。通过 OpenSpec
 
 不得在用户确认需求澄清完成前创建 proposal.md、design.md 或 tasks.md，也不得使用 Skill 工具加载 `openspec-propose` 技能一次性生成全部 artifacts。
 
+### 1c. Change 名称确认（阻塞点）
+
+创建 change 目录（`openspec new change`）前，必须按 `comet/reference/decision-point.md` 的协议暂停，让用户决定 change 名称。不得自动生成或静默推断 change 名称。
+
+OpenSpec change 名称必须是 **kebab-case 英文**（小写字母、数字、连字符；如 `refine-requirements-doc`）。中文或其他不合规名称无效。
+
+暂停时必须展示：
+- 基于已确认澄清摘要派生的 **2-3 个推荐 kebab-case 英文名**，每个附一行说明其隐含范围
+- 一个让用户 **自行输入名称** 的明确选项
+- 提示：**若用户输入中文（或任何非 kebab-case 文本），会被转换为合规的 kebab-case 英文名**，转换结果必须回显给用户确认后才能使用
+
+决策选项必须包含：
+- 选择某个推荐名称
+- 「自行输入名称」——接收用户输入；若已是合规 kebab-case 英文则直接使用；若为中文或其他不合规形式，则转换为合规 kebab-case 英文并回显转换后的名称，确认后再继续
+
+不得在用户确认最终 change 名称前运行 `openspec new change` 或创建 `.comet.yaml`。若选定/转换后的名称与已有 change 冲突，必须报告冲突并请用户另选名称。
+
 ### 2. 创建 Change 结构 + 初始化状态
 
 **立即执行：** 使用 Skill 工具加载 `openspec-new-change` 技能。禁止跳过此步骤。
@@ -105,7 +122,7 @@ change 骨架创建后，按以下标准产物循环逐个生成 `proposal`、`d
 
 **失败处理**：如果 `openspec instructions` 失败、返回无效 JSON、报告未满足的 `dependencies`、或未提供可用的 `resolvedOutputPath`，必须立即停止 artifact 创建并报告 OpenSpec 错误。不得回退为硬编码文档结构，因为那样会绕过项目规则。
 
-**命名与范围守卫**：change name 必须使用用户指定或通过当前平台可用的用户输入/确认机制确认的名称，不得自动生成或推断。变更范围必须与用户描述一致，不得自行扩大或缩小。
+**命名与范围守卫**：change name 必须使用 Step 1c 中用户确认的 kebab-case 英文名，不得自动生成、推断或使用非 kebab-case（如中文）名称。变更范围必须与用户描述一致，不得自行扩大或缩小。
 
 确认以下产物已创建：
 

@@ -427,6 +427,26 @@ tdd_mode_selected() {
   esac
 }
 
+review_mode_selected() {
+  local workflow review_mode
+  workflow=$(yaml_field_value "workflow" 2>/dev/null || true)
+  review_mode=$(yaml_field_value "review_mode" 2>/dev/null || true)
+
+  case "$workflow" in
+    hotfix|tweak) return 0 ;;
+  esac
+
+  case "$review_mode" in
+    off|standard|thorough) return 0 ;;
+    *)
+      echo "review_mode must be off, standard, or thorough before leaving build, got '${review_mode:-null}'" >&2
+      echo "Next: ask the user to choose code review mode, then run:" >&2
+      echo "  \"\$COMET_BASH\" \"\$COMET_STATE\" set $CHANGE review_mode <off|standard|thorough>" >&2
+      return 1
+      ;;
+  esac
+}
+
 verify_result_is_pass() {
   local result
   result=$(yaml_field_value "verify_result" 2>/dev/null || true)
@@ -609,8 +629,13 @@ archived_is_true() {
 guard_open() {
   echo "=== Guard: open → next ===" >&2
 
+  local workflow
+  workflow=$(yaml_field_value "workflow" 2>/dev/null || true)
+
   check "proposal.md exists and non-empty" file_nonempty "$CHANGE_DIR/proposal.md"
-  check "design.md exists and non-empty" file_nonempty "$CHANGE_DIR/design.md"
+  if [ "$workflow" = "full" ]; then
+    check "design.md exists and non-empty" file_nonempty "$CHANGE_DIR/design.md"
+  fi
   check "tasks.md exists and non-empty" file_nonempty "$CHANGE_DIR/tasks.md"
   check "tasks.md has at least one task" tasks_has_any
 }
@@ -665,6 +690,7 @@ guard_build() {
   check "build_mode allowed for workflow" build_mode_allowed_for_workflow
   check "subagent dispatch confirmed" subagent_dispatch_confirmed
   check "tdd_mode selected" tdd_mode_selected
+  check "review_mode selected" review_mode_selected
   check "tasks.md all tasks checked" tasks_all_done
   check "Superpowers plan all tasks checked" plan_tasks_all_done
   check "proposal.md exists" file_nonempty "$CHANGE_DIR/proposal.md"

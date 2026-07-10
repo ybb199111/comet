@@ -16,6 +16,7 @@ build_mode: subagent-driven-development
 build_pause: null
 subagent_dispatch: confirmed
 tdd_mode: tdd
+review_mode: standard
 isolation: branch
 verify_mode: light
 verify_result: pending
@@ -39,6 +40,7 @@ archived: false
 | `build_pause` | build 阶段内部暂停点。`null` 表示无暂停，`plan-ready` 表示 plan 已生成，用户选择切换模型后暂停 |
 | `subagent_dispatch` | `null` 或 `confirmed`。仅当已确认当前平台存在真实后台 subagent / Task / multi-agent 调度能力时，`build_mode: subagent-driven-development` 才能写入并用于离开 build 阶段 |
 | `tdd_mode` | `tdd` 或 `direct`。full workflow 离开 build 阶段前必须已选择。`tdd` 强制每个任务先写失败测试再实现；`direct` 不强制 TDD。hotfix/tweak 默认 `direct` |
+| `review_mode` | `off`、`standard` 或 `thorough`。full workflow 离开 build 阶段前必须已选择；hotfix/tweak 默认 `off` |
 | `isolation` | `branch` 或 `worktree`，工作区隔离方式。full 初始化可为 `null`，但只允许持续到 `/comet-build` Step 3 前；hotfix/tweak 默认 `branch` |
 | `verify_mode` | `light` 或 `full`，可为空 |
 | `auto_transition` | `true` 或 `false`。只控制阶段守卫推进 phase 后是否自动调用下一个 skill；`false` 时由 `comet-state next` 输出 `manual`，暂停下一 skill 调用，但不阻止 phase 字段更新 |
@@ -63,6 +65,7 @@ archived: false
 - `build → verify` 前，`build_mode` 必须已选择
 - `build_mode: subagent-driven-development` 必须同时有 `subagent_dispatch: confirmed`
 - full workflow 离开 build 阶段前 `tdd_mode` 必须已选择为 `tdd` 或 `direct`
+- full workflow 离开 build 阶段前 `review_mode` 必须已选择为 `off`、`standard` 或 `thorough`
 - `build_mode: direct` 默认只允许 `hotfix` / `tweak`；full workflow 需要 `direct_override: true`
 - `build_pause` 不是执行方式，不得写入 `build_mode`
 - 这些约束同时存在于 `comet-guard.sh build --apply` 和 `comet-state.sh transition <name> build-complete`

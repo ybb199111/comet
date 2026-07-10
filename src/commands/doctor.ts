@@ -4,6 +4,7 @@ import { execSync } from 'child_process';
 import { promises as fs } from 'fs';
 import { fileExists, readDir } from '../utils/file-system.js';
 import { isCommandAvailable } from '../core/openspec.js';
+import { hasCodegraphProjectIndex, resolveCodegraphCommand } from '../core/codegraph.js';
 import { readManifest, getAssetsDir } from '../core/skills.js';
 import { PLATFORMS, getPlatformSkillsDirs } from '../core/platforms.js';
 import type { InstallScope } from '../core/types.js';
@@ -216,7 +217,11 @@ async function checkCometYamlValidity(projectPath: string): Promise<CheckResult[
 }
 
 async function checkCodegraph(projectPath: string, scope: DoctorScope): Promise<CheckResult> {
-  if (!isCommandAvailable('codegraph')) {
+  if (scope !== 'global' && hasCodegraphProjectIndex(projectPath)) {
+    return { check: 'CodeGraph', status: 'pass', message: 'initialized (.codegraph/ present)' };
+  }
+
+  if (!resolveCodegraphCommand()) {
     return {
       check: 'CodeGraph CLI',
       status: 'warn',

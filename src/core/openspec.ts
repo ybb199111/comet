@@ -155,8 +155,15 @@ function isCommandAvailable(command: string): boolean {
   }
 }
 
-async function ensureOpenSpecCli(scope: InstallScope, projectPath: string): Promise<boolean> {
+async function ensureOpenSpecCli(
+  scope: InstallScope,
+  projectPath: string,
+  shouldInstall = true,
+): Promise<'ready' | 'missing' | 'failed'> {
   const alreadyInstalled = isCommandAvailable('openspec');
+  if (!shouldInstall) {
+    return alreadyInstalled ? 'ready' : 'missing';
+  }
   const label = alreadyInstalled ? 'Upgrading' : 'Installing';
   console.warn(`    ${label} OpenSpec CLI...`);
   try {
@@ -170,17 +177,17 @@ async function ensureOpenSpecCli(scope: InstallScope, projectPath: string): Prom
       timeout: 120_000,
       shell: process.platform === 'win32',
     });
-    return isCommandAvailable('openspec');
+    return isCommandAvailable('openspec') ? 'ready' : 'failed';
   } catch (error) {
     if (alreadyInstalled) {
       console.warn(
         `    OpenSpec upgrade failed, using existing version: ${(error as Error).message}`,
       );
-      return true;
+      return 'ready';
     }
     console.error(`    Failed to install OpenSpec CLI: ${(error as Error).message}`);
     printCommandErrorDetails(error);
-    return false;
+    return 'failed';
   }
 }
 
@@ -237,13 +244,17 @@ async function installOpenSpec(
   projectPath: string,
   toolIds: string[],
   scope: InstallScope,
+  shouldInstallCli = true,
 ): Promise<'installed' | 'failed' | 'skipped'> {
-  const cliReady = await ensureOpenSpecCli(scope, projectPath);
-  if (!cliReady) {
+  const cliStatus = await ensureOpenSpecCli(scope, projectPath, shouldInstallCli);
+  if (cliStatus === 'failed') {
     console.error(
       `    OpenSpec CLI not available. Install manually: npm install -g @fission-ai/openspec@latest`,
     );
     return 'failed';
+  }
+  if (cliStatus === 'missing') {
+    return 'skipped';
   }
 
   const unknownIds = toolIds.filter((id) => !VALID_TOOL_IDS.has(id));

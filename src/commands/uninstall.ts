@@ -1,5 +1,5 @@
 import path from 'path';
-import { select } from '@inquirer/prompts';
+import { checkbox, select } from '@inquirer/prompts';
 
 import { getBaseDir, type InstallScope } from '../core/detect.js';
 import { getPlatformSkillsDir } from '../core/platforms.js';
@@ -62,30 +62,47 @@ export async function uninstallCommand(
     log(`      Path: ${prefix}${skillsDir}/skills/`);
   }
 
-  // 3. Confirm with user (unless --force)
+  // 3. Let user select which targets to uninstall (unless --force)
+  let selectedTargets = targets;
   if (!options.force && !options.json) {
-    const confirmed = await select({
-      message: 'Remove all Comet skills, rules, and hooks from these targets?',
-      choices: [
-        { name: 'Yes, uninstall all', value: true },
-        { name: 'No, cancel', value: false },
-      ],
-    });
-
-    if (!confirmed) {
-      log('\n  Cancelled.\n');
-      return;
+    if (targets.length === 1) {
+      const confirmed = await select({
+        message: `Uninstall Comet from ${targets[0].platform.name} (${targets[0].scope})?`,
+        choices: [
+          { name: 'Yes, uninstall', value: true },
+          { name: 'No, cancel', value: false },
+        ],
+      });
+      if (!confirmed) {
+        log('\n  Cancelled.\n');
+        return;
+      }
+    } else {
+      const selected = await checkbox({
+        message: 'Select targets to uninstall:',
+        choices: targets.map((t) => ({
+          name: `${t.platform.name} (${t.scope})`,
+          value: `${t.platform.id}:${t.scope}`,
+          checked: true,
+        })),
+        required: true,
+      });
+      selectedTargets = targets.filter((t) => selected.includes(`${t.platform.id}:${t.scope}`));
+      if (selectedTargets.length === 0) {
+        log('\n  No targets selected. Cancelled.\n');
+        return;
+      }
     }
   }
 
-  // 4. Execute removal for each target
+  // 4. Execute removal for each selected target
   log('');
   const results: TargetUninstallResult[] = [];
   let totalSkills = 0;
   let totalRules = 0;
   let totalHooks = 0;
 
-  for (const target of targets) {
+  for (const target of selectedTargets) {
     const baseDir = getBaseDir(target.scope, projectPath);
 
     const skillsResult = await removeCometSkillsForPlatform(baseDir, target.platform, target.scope);
@@ -118,7 +135,7 @@ export async function uninstallCommand(
 
   // 5. Working directories (project scope only)
   let workingDirsRemoved = 0;
-  const hasProjectScope = targets.some((t) => t.scope === 'project');
+  const hasProjectScope = selectedTargets.some((t) => t.scope === 'project');
   if (hasProjectScope) {
     const dirsResult = await removeWorkingDirs(projectPath);
     workingDirsRemoved = dirsResult.removed;

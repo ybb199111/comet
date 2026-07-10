@@ -1,7 +1,7 @@
 {
   "name": "@rpamis/comet",
-  "version": "0.3.8",
-  "description": "OpenSpec + Superpowers dual-star development workflow",
+  "version": "0.3.11",
+  "description": "Agent Skill Harness Phase-Guarded Automation From Idea To Archive",
   "keywords": [
     "comet",
     "openspec",
@@ -63,7 +63,11 @@
     "vitest": "^4.1.6"
   },
   "dependencies": {
+    "@inquirer/ansi": "^2.0.5",
+    "@inquirer/core": "^11.1.10",
+    "@inquirer/figures": "^2.0.5",
     "@inquirer/prompts": "^8.4.3",
+    "@inquirer/type": "^4.0.5",
     "commander": "^14.0.0"
   }
 }

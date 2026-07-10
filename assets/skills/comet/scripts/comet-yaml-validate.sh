@@ -143,6 +143,7 @@ build_mode=$(field_value "build_mode")
 build_pause=$(field_value "build_pause")
 subagent_dispatch=$(field_value "subagent_dispatch")
 tdd_mode=$(field_value "tdd_mode")
+review_mode=$(field_value "review_mode")
 isolation=$(field_value "isolation")
 verify_mode=$(field_value "verify_mode")
 auto_transition=$(field_value "auto_transition")
@@ -162,6 +163,7 @@ validate_enum "build_mode"    "$build_mode"     "subagent-driven-development exe
 validate_enum "build_pause"   "$build_pause"     "null plan-ready"
 validate_enum "subagent_dispatch" "$subagent_dispatch" "null confirmed"
 validate_enum "tdd_mode"      "$tdd_mode"       "tdd direct null"
+validate_enum "review_mode"   "$review_mode"    "off standard thorough"
 validate_enum "isolation"     "$isolation"      "branch worktree"
 validate_enum "verify_mode"   "$verify_mode"    "light full"
 if grep -q "^auto_transition:" "$YAML" 2>/dev/null; then
@@ -199,7 +201,7 @@ if [ -n "$handoff_hash" ] && [ "$handoff_hash" != "null" ]; then
 fi
 
 # --- Unknown keys check ---
-KNOWN_KEYS="workflow phase context_compression design_doc plan build_mode build_pause subagent_dispatch tdd_mode isolation verify_mode auto_transition verify_result verification_report branch_status verified_at created_at archived direct_override build_command verify_command handoff_context handoff_hash base_ref"
+KNOWN_KEYS="workflow phase context_compression design_doc plan build_mode build_pause subagent_dispatch tdd_mode review_mode isolation verify_mode auto_transition verify_result verification_report branch_status verified_at created_at archived direct_override build_command verify_command handoff_context handoff_hash base_ref"
 while IFS=: read -r key _; do
   key="${key// /}"
   [ -z "$key" ] && continue
