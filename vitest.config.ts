@@ -2,18 +2,22 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    include: ['test/ts/**/*.test.ts'],
+    testTimeout: 30000,
+    include: ['test/**/*.test.ts'],
     exclude: [
       // Benchmark tests are developer-only tools, not part of CI validation
-      'test/ts/context-compression-benchmark.test.ts',
-      'test/ts/context-execution-benchmark.test.ts',
+      'test/**/context-compression-benchmark.test.ts',
+      'test/**/context-execution-benchmark.test.ts',
     ],
     coverage: {
-      include: ['src/**/*.ts'],
+      reporter: ['text', 'lcov'],
+      include: ['app/**/*.ts', 'domains/**/*.ts', 'platform/**/*.ts'],
       exclude: [
-        'src/cli/**',
+        'app/cli/**',
         // Commands are interactive orchestrators best tested via E2E
-        'src/commands/**',
+        'app/commands/**',
+        // Classic runtime behavior is generated to .mjs and exercised through subprocess smoke tests.
+        'domains/comet-classic/**',
       ],
       thresholds: {
         branches: 70,

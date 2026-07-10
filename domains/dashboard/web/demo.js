@@ -1,0 +1,939 @@
+// Demo snapshot for `?demo` mode — mirrors the DashboardSnapshot contract
+// (domains/dashboard/types.ts) exactly. Used when a reviewer wants to see the
+// dashboard populated without a real openspec/changes layout. Field names are
+// stable; see types.ts before renaming anything.
+
+function addCometArtifacts(change) {
+  const dir = change.path;
+  const phase = change.phase;
+  const hasDesignDoc = phase !== 'open' && phase !== 'unknown';
+  const superpowers = [];
+  if (hasDesignDoc && !change.artifacts?.grouped?.some((a) => a.key === 'designDoc')) {
+    superpowers.push({
+      key: 'designDoc',
+      label: '技术设计',
+      source: 'superpowers',
+      exists: true,
+      path: `docs/superpowers/specs/${change.name}-design.md`,
+    });
+  }
+  const comet = [
+    {
+      key: 'cometYaml',
+      label: '.comet.yaml',
+      source: 'comet',
+      exists: change.artifacts?.cometYaml ?? true,
+      path: `${dir}/.comet.yaml`,
+    },
+    {
+      key: 'handoff',
+      label: 'Handoff 上下文',
+      source: 'comet',
+      exists: false,
+      path: `${dir}/.comet/handoff/design-context.json`,
+    },
+    {
+      key: 'checkpoint',
+      label: 'Checkpoint',
+      source: 'comet',
+      exists: false,
+      path: `${dir}/.comet/checkpoint.json`,
+    },
+    {
+      key: 'brainstorm',
+      label: 'Brainstorm 摘要',
+      source: 'comet',
+      exists: false,
+      path: `${dir}/.comet/handoff/brainstorm-summary.md`,
+    },
+    {
+      key: 'subagentProgress',
+      label: 'Subagent 进度',
+      source: 'comet',
+      exists: false,
+      path: `${dir}/.comet/subagent-progress.md`,
+    },
+  ];
+  if (change.artifacts?.grouped) {
+    change.artifacts.grouped.push(...superpowers, ...comet);
+  }
+  return change;
+}
+
+/** @type {import('./types.js').DashboardSnapshot} */
+export const DEMO_SNAPSHOT = {
+  project: {
+    name: 'Comet',
+    path: '~/projects/comet',
+    generatedAt: '2026-06-25T14:32:00.000Z',
+  },
+  summary: {
+    activeChanges: 4,
+    archivedChanges: 3,
+    verifyFailed: 1,
+    tasksIncomplete: 15,
+    dirtyFiles: 3,
+  },
+  git: {
+    branch: 'feat/dashboard-redesign',
+    head: '8f3a2c1',
+    dirtyFiles: 3,
+    dirtyFileList: [
+      'domains/dashboard/web/index.html',
+      'domains/dashboard/web/styles.css',
+      'domains/dashboard/collector.ts',
+    ],
+    // recentCommits is a string[] in the contract; the frontend formats these.
+    recentCommits: [
+      '8f3a2c1 重构 dashboard 采集逻辑',
+      '2bd9e0a 新增 phase stepper 组件',
+      'c4f1a80 修复 verify 解析空指针',
+      '9a02d7d 初始化 openspec/changes 目录',
+    ],
+  },
+  risks: [
+    {
+      level: 'error',
+      code: 'verify-failed',
+      message: '1 个变更验证失败',
+      suggestion: '打开 fix-webhook-retries 并重新运行 comet verify',
+    },
+    {
+      level: 'warning',
+      code: 'tasks-incomplete',
+      message: '共 15 个未完成任务',
+      suggestion: '完成任务后变更即可进入 Verify 阶段',
+    },
+    {
+      level: 'warning',
+      code: 'git-dirty',
+      message: '3 个未提交文件阻塞 verify',
+      suggestion: '提交或暂存 (stash) 后再运行验证',
+    },
+  ],
+  changes: {
+    active: [
+      {
+        id: 'add-auth-rate-limiting',
+        name: 'add-auth-rate-limiting',
+        displayName: 'add-auth-rate-limiting',
+        status: 'active',
+        path: 'openspec/changes/add-auth-rate-limiting',
+        workflow: 'feature',
+        phase: 'build',
+        updatedAt: '2 小时前',
+        tasks: {
+          completed: 8,
+          total: 12,
+          incomplete: [
+            '为滑动窗口补充单元测试',
+            'Redis 适配器集成测试',
+            '5000 QPS 压测场景',
+            '补充 README 限流说明',
+          ],
+          sections: [
+            { title: '限流策略', completed: 3, total: 3, status: 'done' },
+            { title: '中间件实现', completed: 3, total: 4, status: 'active' },
+            { title: '测试覆盖', completed: 2, total: 5, status: 'pending' },
+          ],
+        },
+        artifacts: {
+          proposal: true,
+          design: true,
+          tasks: true,
+          plan: true,
+          verifyReport: false,
+          cometYaml: true,
+          grouped: [
+            {
+              key: 'proposal',
+              label: '提案',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/add-auth-rate-limiting/proposal.md',
+            },
+            {
+              key: 'design',
+              label: '设计文档',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/add-auth-rate-limiting/design.md',
+            },
+            {
+              key: 'tasks',
+              label: '任务清单',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/add-auth-rate-limiting/tasks.md',
+            },
+            {
+              key: 'designDoc',
+              label: '技术设计',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/specs/2026-06-20-rate-limiting-design.md',
+            },
+            {
+              key: 'plan',
+              label: '实施计划',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/plans/2026-06-20-rate-limiting.md',
+            },
+          ],
+        },
+        verify: { result: 'pending', reportExists: false },
+        next: {
+          command: 'comet build',
+          reason: '还有 4 个任务未完成',
+          description: '优先推进「测试覆盖」分组，全部任务完成后即可进入 Verify 阶段。',
+        },
+        risks: [
+          {
+            level: 'warning',
+            code: 'tasks-incomplete',
+            message: '4 个任务未完成，将阻塞进入 Verify',
+            suggestion: '完成「测试覆盖」分组后运行 comet verify',
+          },
+        ],
+      },
+      {
+        id: 'dashboard-redesign',
+        name: 'dashboard-redesign',
+        displayName: 'dashboard-redesign',
+        status: 'active',
+        path: 'openspec/changes/dashboard-redesign',
+        workflow: 'feature',
+        phase: 'design',
+        updatedAt: '昨天',
+        tasks: {
+          completed: 2,
+          total: 9,
+          incomplete: ['锁定视觉系统', '定义响应式断点', '交互原型'],
+          sections: [
+            { title: '信息架构', completed: 2, total: 3, status: 'active' },
+            { title: '视觉系统', completed: 0, total: 3, status: 'pending' },
+            { title: '交互原型', completed: 0, total: 3, status: 'pending' },
+          ],
+        },
+        artifacts: {
+          proposal: true,
+          design: true,
+          tasks: true,
+          plan: false,
+          verifyReport: false,
+          cometYaml: true,
+          grouped: [
+            {
+              key: 'proposal',
+              label: '提案',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/dashboard-redesign/proposal.md',
+            },
+            {
+              key: 'design',
+              label: '设计文档',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/dashboard-redesign/design.md',
+            },
+            {
+              key: 'tasks',
+              label: '任务清单',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/dashboard-redesign/tasks.md',
+            },
+          ],
+        },
+        verify: { result: 'pending', reportExists: false },
+        next: {
+          command: 'comet design',
+          reason: '设计阶段进行中',
+          description: '完成视觉系统与交互原型分组后，产出 plan.md 并进入构建。',
+        },
+        risks: [
+          {
+            level: 'warning',
+            code: 'tasks-incomplete',
+            message: '7 个任务未完成',
+            suggestion: '先锁定视觉系统，再展开交互原型',
+          },
+        ],
+      },
+      {
+        id: 'fix-webhook-retries',
+        name: 'fix-webhook-retries',
+        displayName: 'fix-webhook-retries',
+        status: 'active',
+        path: 'openspec/changes/fix-webhook-retries',
+        workflow: 'fix',
+        phase: 'verify',
+        updatedAt: '3 小时前',
+        tasks: {
+          completed: 11,
+          total: 11,
+          incomplete: [],
+          sections: [
+            { title: '重试逻辑', completed: 5, total: 5, status: 'done' },
+            { title: '退避策略', completed: 3, total: 3, status: 'done' },
+            { title: '测试', completed: 3, total: 3, status: 'done' },
+          ],
+        },
+        artifacts: {
+          proposal: true,
+          design: true,
+          tasks: true,
+          plan: true,
+          verifyReport: true,
+          cometYaml: true,
+          grouped: [
+            {
+              key: 'proposal',
+              label: '提案',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/fix-webhook-retries/proposal.md',
+            },
+            {
+              key: 'design',
+              label: '设计文档',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/fix-webhook-retries/design.md',
+            },
+            {
+              key: 'tasks',
+              label: '任务清单',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/fix-webhook-retries/tasks.md',
+            },
+            {
+              key: 'designDoc',
+              label: '技术设计',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/specs/2026-06-22-webhook-retry-design.md',
+            },
+            {
+              key: 'plan',
+              label: '实施计划',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/plans/2026-06-22-webhook-retry.md',
+            },
+            {
+              key: 'verifyReport',
+              label: '验证报告',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/reports/2026-06-23-webhook-verify.md',
+            },
+          ],
+        },
+        verify: {
+          result: 'fail',
+          reportExists: true,
+          summary: '2 / 4 断言通过 — 重试上限与幂等性失败',
+        },
+        next: {
+          command: 'comet verify',
+          reason: '验证失败需修复',
+          description: 'verify-result.md 显示 2 项断言失败，修复后重新运行 comet verify。',
+        },
+        risks: [
+          {
+            level: 'error',
+            code: 'verify-failed',
+            message: '验证未通过：2 项断言失败',
+            suggestion: '检查 verify-result.md 中的失败用例并修复实现',
+          },
+        ],
+      },
+      {
+        id: 'migrate-config-to-yaml',
+        name: 'migrate-config-to-yaml',
+        displayName: 'migrate-config-to-yaml',
+        status: 'active',
+        path: 'openspec/changes/migrate-config-to-yaml',
+        workflow: 'refactor',
+        phase: 'build',
+        updatedAt: '2 天前',
+        tasks: {
+          completed: 6,
+          total: 10,
+          incomplete: ['完成迁移脚本 dry-run', '补充配置迁移文档'],
+          sections: [
+            { title: '配置映射', completed: 4, total: 4, status: 'done' },
+            { title: '迁移脚本', completed: 2, total: 3, status: 'active' },
+            { title: '文档更新', completed: 0, total: 3, status: 'pending' },
+          ],
+        },
+        artifacts: {
+          proposal: true,
+          design: true,
+          tasks: true,
+          plan: true,
+          verifyReport: false,
+          cometYaml: true,
+          grouped: [
+            {
+              key: 'proposal',
+              label: '提案',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/migrate-config-to-yaml/proposal.md',
+            },
+            {
+              key: 'design',
+              label: '设计文档',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/migrate-config-to-yaml/design.md',
+            },
+            {
+              key: 'tasks',
+              label: '任务清单',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/migrate-config-to-yaml/tasks.md',
+            },
+            {
+              key: 'plan',
+              label: '实施计划',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/plans/2026-06-26-config-yaml.md',
+            },
+          ],
+        },
+        verify: { result: 'pending', reportExists: false },
+        next: {
+          command: 'comet build',
+          reason: '4 个任务未完成',
+          description: '完成迁移脚本与文档更新分组后进入验证。',
+        },
+        risks: [
+          {
+            level: 'info',
+            code: 'phase-stale',
+            message: '该变更 2 天未更新',
+            suggestion: '确认是否仍活跃，否则考虑归档',
+          },
+        ],
+      },
+    ],
+    archived: [
+      {
+        id: 'archive/2025-11-02-add-dark-mode',
+        name: '2025-11-02-add-dark-mode',
+        displayName: 'add-dark-mode',
+        status: 'archived',
+        path: 'openspec/changes/archive/2025-11-02-add-dark-mode',
+        workflow: 'feature',
+        phase: 'archive',
+        updatedAt: '2025-11-02',
+        archive: {
+          archiveName: '2025-11-02-add-dark-mode',
+          originalName: 'add-dark-mode',
+          archivedAt: '2025-11-02',
+          archivePath: 'openspec/changes/archive/2025-11-02-add-dark-mode',
+        },
+        tasks: {
+          completed: 14,
+          total: 14,
+          incomplete: [],
+          sections: [
+            { title: '主题切换', completed: 6, total: 6, status: 'done' },
+            { title: '样式适配', completed: 8, total: 8, status: 'done' },
+          ],
+        },
+        artifacts: {
+          proposal: true,
+          design: true,
+          tasks: true,
+          plan: true,
+          verifyReport: true,
+          cometYaml: true,
+          grouped: [
+            {
+              key: 'proposal',
+              label: '提案',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/archive/2025-11-02-add-dark-mode/proposal.md',
+            },
+            {
+              key: 'design',
+              label: '设计文档',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/archive/2025-11-02-add-dark-mode/design.md',
+            },
+            {
+              key: 'tasks',
+              label: '任务清单',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/archive/2025-11-02-add-dark-mode/tasks.md',
+            },
+            {
+              key: 'plan',
+              label: '实施计划',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/plans/2025-11-01-dark-mode.md',
+            },
+            {
+              key: 'verifyReport',
+              label: '验证报告',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/reports/2025-11-02-dark-mode-verify.md',
+            },
+          ],
+        },
+        verify: { result: 'pass', reportExists: true, summary: '全部断言通过' },
+      },
+      {
+        id: 'archive/2025-10-18-refactor-collector',
+        name: '2025-10-18-refactor-collector',
+        displayName: 'refactor-collector',
+        status: 'archived',
+        path: 'openspec/changes/archive/2025-10-18-refactor-collector',
+        workflow: 'refactor',
+        phase: 'archive',
+        updatedAt: '2025-10-18',
+        archive: {
+          archiveName: '2025-10-18-refactor-collector',
+          originalName: 'refactor-collector',
+          archivedAt: '2025-10-18',
+          archivePath: 'openspec/changes/archive/2025-10-18-refactor-collector',
+        },
+        tasks: {
+          completed: 9,
+          total: 9,
+          incomplete: [],
+          sections: [{ title: '重构', completed: 9, total: 9, status: 'done' }],
+        },
+        artifacts: {
+          proposal: true,
+          design: true,
+          tasks: true,
+          plan: true,
+          verifyReport: true,
+          cometYaml: true,
+          grouped: [
+            {
+              key: 'proposal',
+              label: '提案',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/archive/2025-10-18-refactor-collector/proposal.md',
+            },
+            {
+              key: 'design',
+              label: '设计文档',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/archive/2025-10-18-refactor-collector/design.md',
+            },
+            {
+              key: 'tasks',
+              label: '任务清单',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/archive/2025-10-18-refactor-collector/tasks.md',
+            },
+            {
+              key: 'plan',
+              label: '实施计划',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/plans/2025-10-17-refactor-collector.md',
+            },
+            {
+              key: 'verifyReport',
+              label: '验证报告',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/reports/2025-10-18-collector-verify.md',
+            },
+          ],
+        },
+        verify: { result: 'pass', reportExists: true, summary: '全部断言通过' },
+      },
+      {
+        id: 'archive/2025-09-30-init-openspec',
+        name: '2025-09-30-init-openspec',
+        displayName: 'init-openspec',
+        status: 'archived',
+        path: 'openspec/changes/archive/2025-09-30-init-openspec',
+        workflow: 'chore',
+        phase: 'archive',
+        updatedAt: '2025-09-30',
+        archive: {
+          archiveName: '2025-09-30-init-openspec',
+          originalName: 'init-openspec',
+          archivedAt: '2025-09-30',
+          archivePath: 'openspec/changes/archive/2025-09-30-init-openspec',
+        },
+        tasks: {
+          completed: 6,
+          total: 6,
+          incomplete: [],
+          sections: [{ title: '初始化', completed: 6, total: 6, status: 'done' }],
+        },
+        artifacts: {
+          proposal: true,
+          design: true,
+          tasks: true,
+          plan: true,
+          verifyReport: true,
+          cometYaml: true,
+          grouped: [
+            {
+              key: 'proposal',
+              label: '提案',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/archive/2025-09-30-init-openspec/proposal.md',
+            },
+            {
+              key: 'design',
+              label: '设计文档',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/archive/2025-09-30-init-openspec/design.md',
+            },
+            {
+              key: 'tasks',
+              label: '任务清单',
+              source: 'openspec',
+              exists: true,
+              path: 'openspec/changes/archive/2025-09-30-init-openspec/tasks.md',
+            },
+            {
+              key: 'plan',
+              label: '实施计划',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/plans/2025-09-29-init-openspec.md',
+            },
+            {
+              key: 'verifyReport',
+              label: '验证报告',
+              source: 'superpowers',
+              exists: true,
+              path: 'docs/superpowers/reports/2025-09-30-openspec-verify.md',
+            },
+          ],
+        },
+        verify: { result: 'pass', reportExists: true, summary: '全部断言通过' },
+      },
+    ],
+  },
+};
+
+// Enrich all changes with comet intermediate artifacts
+DEMO_SNAPSHOT.changes.active.forEach(addCometArtifacts);
+DEMO_SNAPSHOT.changes.archived.forEach(addCometArtifacts);
+
+// Demo-only data for sidebar visualizations that do not have a dashboard
+// collector yet. Shapes are intentionally close to BundleAuthoringState and
+// RepositoryEvalResult so real collection can replace this without redesigning UI.
+export const DEMO_SKILL_VISUALS = {
+  compose: {
+    summary: {
+      drafts: 3,
+      evalPassed: 2,
+      reviewApproved: 1,
+      targetPlatforms: 3,
+    },
+    bundles: [
+      {
+        name: 'customize-comet-release-checks',
+        status: 'review-approved',
+        currentStep: 'publish',
+        mode: 'optimize',
+        goal: '定制 /comet：在验证前插入发布准备、README 同步和 Changelog 检查。',
+        engineMode: 'deterministic',
+        runnerMode: 'change',
+        reusedSkills: [
+          { skill: 'comet', status: 'available', sourceCount: 1 },
+          { skill: 'verification-before-completion', status: 'available', sourceCount: 2 },
+          { skill: 'finishing-a-development-branch', status: 'available', sourceCount: 2 },
+        ],
+        generatedControlPlane: [
+          'SKILL.md',
+          'reference/workflow-protocol.json',
+          'reference/composition-report.md',
+          'reference/skill-review.md',
+          'comet/eval.yaml',
+          'scripts/comet-check.mjs',
+        ],
+        requiredConfirmations: [
+          { label: 'Skill Creator proposal confirmed', required: true, confirmed: true },
+          { label: 'Eval result attached', required: true, confirmed: true },
+          { label: 'Review approved', required: true, confirmed: true },
+          { label: 'Executable disclosure reviewed', required: false, confirmed: false },
+        ],
+        callChain: [
+          'comet-open',
+          'comet-design',
+          'release-readiness-check',
+          'comet-build',
+          'verification-before-completion',
+          'comet-archive',
+        ],
+        distribution: {
+          readiness: 'publishable',
+          plannedFiles: 18,
+          executables: 3,
+          platforms: [
+            { platform: 'Codex', status: 'previewed' },
+            { platform: 'Claude Code', status: 'previewed' },
+            { platform: 'Gemini', status: 'capability warning' },
+          ],
+        },
+      },
+      {
+        name: 'create-skill-maker-review-flow',
+        status: 'eval-passed',
+        currentStep: 'review',
+        mode: 'create',
+        goal: '创建 Skill：把需求澄清、作者分工、审阅报告和安装预览串成可恢复流程。',
+        engineMode: 'adaptive',
+        runnerMode: 'standalone',
+        reusedSkills: [
+          { skill: 'brainstorming', status: 'available', sourceCount: 2 },
+          { skill: 'writing-skills', status: 'available', sourceCount: 1 },
+          { skill: 'skill-creator', status: 'available', sourceCount: 1 },
+        ],
+        generatedControlPlane: [
+          'reference/authoring-lanes.json',
+          'reference/resolved-skills.json',
+          'reference/composition-report.md',
+          'reference/decision-points.md',
+          'scripts/comet-plan.mjs',
+        ],
+        requiredConfirmations: [
+          { label: 'Resolved Skill choices', required: true, confirmed: true },
+          { label: 'Authoring lanes complete', required: true, confirmed: true },
+          { label: 'Run quick eval', required: true, confirmed: true },
+        ],
+        callChain: [
+          'brainstorming',
+          'writing-plans',
+          'writing-skills',
+          'skill-review',
+          'install-preview',
+        ],
+        distribution: {
+          readiness: 'needs review approval',
+          plannedFiles: 16,
+          executables: 2,
+          platforms: [
+            { platform: 'Codex', status: 'planned' },
+            { platform: 'Claude Code', status: 'planned' },
+          ],
+        },
+      },
+      {
+        name: 'upgrade-review-comments-skill',
+        status: 'draft',
+        currentStep: 'needs-eval',
+        mode: 'optimize',
+        goal: '升级现有 Skill：为 PR 评审意见处理加入“证据优先”和本地验证检查。',
+        engineMode: 'deterministic',
+        runnerMode: 'change',
+        reusedSkills: [
+          { skill: 'receiving-code-review', status: 'available', sourceCount: 2 },
+          { skill: 'systematic-debugging', status: 'available', sourceCount: 2 },
+          { skill: 'github', status: 'ambiguous', sourceCount: 3 },
+        ],
+        generatedControlPlane: [
+          'bundle.yaml',
+          'reference/resolved-skills.json',
+          'comet/checks.yaml',
+        ],
+        requiredConfirmations: [
+          { label: 'Resolve ambiguous GitHub Skill', required: true, confirmed: false },
+          { label: 'Generate control plane', required: true, confirmed: false },
+          { label: 'Run quick eval', required: true, confirmed: false },
+        ],
+        callChain: [
+          'receiving-code-review',
+          'systematic-debugging',
+          'verification-before-completion',
+        ],
+        distribution: {
+          readiness: 'blocked by candidate ambiguity',
+          plannedFiles: 10,
+          executables: 1,
+          platforms: [{ platform: 'Codex', status: 'waiting' }],
+        },
+      },
+    ],
+  },
+  eval: {
+    summary: {
+      totalResults: 3,
+      passedResults: 2,
+      entryPassRate: 0.91,
+      tokenCount: 18640,
+      durationMs: 258000,
+    },
+    results: [
+      {
+        name: 'customize-comet-release-checks',
+        provider: 'comet-eval',
+        level: 'full',
+        draftHash: 'a'.repeat(64),
+        evalManifestHash: 'b'.repeat(64),
+        tasks: ['route-conformance', 'control-plane', 'publish-readiness'],
+        treatments: ['customize-comet-release-checks'],
+        passAtK: { 1: 1 },
+        weightedScore: { overall: 0.93 },
+        instabilityGap: { overall: 0.02 },
+        failures: [],
+        reports: ['eval-report.html'],
+        passed: true,
+        summary:
+          'Generated package passed route conformance, control-plane validation, and publish readiness.',
+        entries: [
+          {
+            id: 'route-conformance',
+            passed: true,
+            passRate: 0.96,
+            evidence: ['workflow-protocol.json', 'route-conformance.json'],
+          },
+          {
+            id: 'control-plane',
+            passed: true,
+            passRate: 0.92,
+            evidence: ['comet/eval.yaml', 'scripts/comet-check.mjs'],
+          },
+          {
+            id: 'publish-readiness',
+            passed: true,
+            passRate: 0.88,
+            evidence: ['reference/skill-review.md', 'review-summary.json'],
+          },
+        ],
+        bundle: {
+          compilePassed: true,
+          safetyPassed: true,
+          evidence: ['compile.json', 'hook-disclosure.json'],
+        },
+        benchmark: {
+          cases: 18,
+          baselinePassRate: 0.61,
+          withSkillPassRate: 0.89,
+          variance: 0.04,
+          tokenCount: 9400,
+          durationMs: 142000,
+        },
+      },
+      {
+        name: 'create-skill-maker-review-flow',
+        provider: 'comet-eval',
+        level: 'quick',
+        draftHash: 'c'.repeat(64),
+        evalManifestHash: 'd'.repeat(64),
+        tasks: ['authoring-lanes', 'entry-smoke', 'install-preview'],
+        treatments: ['create-skill-maker-review-flow'],
+        passAtK: { 1: 1 },
+        weightedScore: { overall: 0.9 },
+        instabilityGap: { overall: 0.03 },
+        failures: [],
+        reports: ['quick-eval-report.html'],
+        passed: true,
+        summary:
+          'Quick eval passed authoring-lane coverage, entry smoke, and install-preview checks.',
+        entries: [
+          {
+            id: 'authoring-lanes',
+            passed: true,
+            passRate: 0.9,
+            evidence: ['authoring-lanes.json', 'skill-review.md'],
+          },
+          {
+            id: 'install-preview',
+            passed: true,
+            passRate: 0.86,
+            evidence: ['install-preview.json'],
+          },
+        ],
+        bundle: {
+          compilePassed: true,
+          safetyPassed: true,
+          evidence: ['compile.json', 'safety.json'],
+        },
+        benchmark: {
+          cases: 10,
+          baselinePassRate: 0.54,
+          withSkillPassRate: 0.82,
+          tokenCount: 5140,
+          durationMs: 72000,
+        },
+      },
+      {
+        name: 'upgrade-review-comments-skill',
+        provider: 'comet-eval',
+        level: 'quick',
+        draftHash: 'e'.repeat(64),
+        evalManifestHash: 'f'.repeat(64),
+        tasks: ['review-comment-intake', 'candidate-resolution', 'hook-disclosure'],
+        treatments: ['upgrade-review-comments-skill'],
+        passAtK: { 1: 0 },
+        weightedScore: { overall: 0.58 },
+        instabilityGap: { overall: 0.12 },
+        failures: [
+          {
+            task: 'candidate-resolution',
+            treatment: 'upgrade-review-comments-skill',
+            reason: 'GitHub Skill candidate is still ambiguous.',
+          },
+          {
+            task: 'hook-disclosure',
+            treatment: 'upgrade-review-comments-skill',
+            reason: 'Hook executable disclosure is missing.',
+          },
+        ],
+        reports: ['quick-eval-report.html'],
+        passed: false,
+        summary:
+          'Entry smoke found one unresolved GitHub Skill candidate and a missing hook disclosure.',
+        entries: [
+          {
+            id: 'review-comment-intake',
+            passed: true,
+            passRate: 0.84,
+            evidence: ['review-thread-smoke.json'],
+          },
+          {
+            id: 'github-routing',
+            passed: false,
+            passRate: 0.58,
+            evidence: ['ambiguous-target.json'],
+          },
+        ],
+        bundle: {
+          compilePassed: true,
+          safetyPassed: false,
+          evidence: ['compile.json', 'hook-review-needed.json'],
+        },
+        benchmark: {
+          cases: 8,
+          baselinePassRate: 0.5,
+          withSkillPassRate: 0.63,
+          tokenCount: 4100,
+          durationMs: 44000,
+        },
+      },
+    ],
+  },
+};

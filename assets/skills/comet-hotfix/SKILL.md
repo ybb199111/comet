@@ -1,6 +1,6 @@
 ---
 name: comet-hotfix
-description: "Comet preset path: Bug fix / hotfix. Skip brainstorming, directly open → build → verify → archive. Applicable for behavior fixes, scenarios not involving new capability design."
+description: "Use when the user wants to fix an existing behavior bug without adding capability or needing full design; also use when resuming hotfix workflow."
 ---
 
 # Comet Preset Path: Hotfix
@@ -10,9 +10,9 @@ Quick bug fix workflow: open → build → verify → archive. Skip brainstormin
 **Applicable conditions** (all must be met):
 1. Fix bugs in existing functionality, no new capability
 2. No interface changes or architecture adjustments
-3. Change scope is predictable (usually ≤ 2 files)
+3. Change scope is predictable (file count is a hint only, not a hard upgrade condition; see Upgrade Assessment below)
 
-**Not applicable**: If fix process discovers need for architecture adjustments, should upgrade to full `/comet` workflow.
+**Not applicable**: If the fix process hits a qualitative-change signal (see "Upgrade Assessment" section), the user decides whether to upgrade to the full `/comet` workflow.
 
 ---
 
@@ -20,20 +20,11 @@ Quick bug fix workflow: open → build → verify → archive. Skip brainstormin
 
 ### 0. Output Language Constraint
 
-Streamlined OpenSpec artifacts must use the language of the user request that triggered this workflow.
+Streamlined OpenSpec artifacts must use the configured Comet artifact language. Read `language` from `.comet/config.yaml` before `.comet.yaml` exists, then use `"$COMET_BASH" "$COMET_STATE" get <name> language` after initialization.
 
 Execution chain: open → build → root cause check → verify → archive. Hotfix provides default decisions for each phase: streamlined open, direct build, root cause confirmation, scale-based verification, and final archive confirmation after verification passes.
 
-Locate Comet scripts before starting:
-
-```bash
-COMET_ENV="${COMET_ENV:-$(find . "$HOME"/.*/skills "$HOME/.config" "$HOME/.gemini" -path '*/comet/scripts/comet-env.sh' -type f -print -quit 2>/dev/null)}"
-if [ -z "$COMET_ENV" ]; then
-  echo "ERROR: comet-env.sh not found. Ensure the comet skill is installed." >&2
-  return 1
-fi
-. "$COMET_ENV"
-```
+Before starting, locate Comet scripts via `comet/reference/scripts.md`. When resuming from any entry point, first use `comet/reference/context-recovery.md` to confirm phase/workflow.
 
 ### 1. Quick Open (preset open)
 
@@ -50,25 +41,25 @@ After the skill loads, follow its guidance to create streamlined artifacts:
 Initialize Comet state file:
 
 ```bash
-"$COMET_BASH" "$COMET_STATE" init <name> hotfix
+node "$COMET_STATE" init <name> hotfix
 ```
 
 Verify initialized state:
 
 ```bash
-"$COMET_BASH" "$COMET_STATE" check <name> open
+node "$COMET_STATE" check <name> open
 ```
 
 Run phase guard to transition open → build:
 
 ```bash
-"$COMET_BASH" "$COMET_GUARD" <change-name> open --apply
+node "$COMET_GUARD" <change-name> open --apply
 ```
 
 Check `auto_transition` to decide whether to continue:
 
 ```bash
-"$COMET_BASH" "$COMET_STATE" next <name>
+node "$COMET_STATE" next <name>
 ```
 
 - `NEXT: auto` → continue to Step 2
@@ -76,9 +67,9 @@ Check `auto_transition` to decide whether to continue:
 
 ### 2. Direct Build (preset build)
 
-Use hotfix defaults: `build_mode: direct`. Skip Superpowers `brainstorming` and `writing-plans` (unless tasks > 3; if exceeds 3 tasks, transfer to `/comet-build`'s plan and execution method selection — note this does NOT trigger full workflow upgrade, only switches execution method).
+Use hotfix defaults: `build_mode: direct`, `review_mode: off` (hotfix/tweak skip review_mode selection — the guard does not require it for preset workflows). Skip Superpowers `brainstorming` and `writing-plans` (unless tasks > 3; if exceeds 3 tasks, transfer to `/comet-build`'s plan and execution method selection — note this does NOT trigger full workflow upgrade, only switches execution method).
 
-Before continuing or starting changes, handle uncommitted changes through `comet/reference/dirty-worktree.md`. If attribution shows the fix scope exceeds hotfix, handle it through this file's "Upgrade Conditions".
+Before continuing or starting changes, handle uncommitted changes through `comet/reference/dirty-worktree.md`. If attribution shows a qualitative-change signal or file-count tripwire is hit, handle it through this file's "Upgrade Assessment".
 
 **Immediately execute:** Execute tasks one by one according to tasks.md:
 
@@ -107,14 +98,14 @@ For specific investigation, minimal failing test, fix verification, and keeping 
 2. Search and verify problem code no longer exists
 3. If root cause not eliminated, return to Step 2 to continue fix (still in build phase, no state transition needed)
 
-**Upgrade conditions**:
-- Root cause check reveals deep architecture issues → Stop hotfix, handle per "Upgrade Conditions" section
-- Fix requires additional interface changes → Stop hotfix, handle per "Upgrade Conditions" section
+**Upgrade assessment signals**:
+- Root cause check reveals deep architecture issues → Hits a qualitative-change signal; pause per the "Upgrade Assessment" section and let the user decide
+- Fix requires additional interface changes → Hits a qualitative-change signal (introduces new public API); pause per the "Upgrade Assessment" section and let the user decide
 
 After root cause is confirmed eliminated, run phase guard to transition build → verify:
 
 ```bash
-"$COMET_BASH" "$COMET_GUARD" <change-name> build --apply
+node "$COMET_GUARD" <change-name> build --apply
 ```
 
 State automatically updates to `phase: verify`, `verify_result: pending`, then enter verification.
@@ -125,7 +116,7 @@ Reuse `/comet-verify`, with comet-verify's scale assessment deciding lightweight
 
 **Immediately execute:** Use the Skill tool to load the `comet-verify` skill. Skipping this step is prohibited.
 
-Small-scale hotfixes without delta spec usually meet lightweight verification conditions (≤ 3 tasks, ≤ 2 files), comet-verify's scale assessment will select the lightweight verification path (6 quick checks, including lightweight code review). If hotfix created delta spec, enter full verification path according to comet-verify's scale assessment rules.
+Small-scale hotfixes without delta spec usually meet lightweight verification conditions (≤ 3 tasks, changed files below the scale threshold), comet-verify's scale assessment will select the lightweight verification path (6 quick checks; default `review_mode: off` does not dispatch automatic code review). If the user wants to increase review, they can run `node "$COMET_STATE" set <name> review_mode standard` or `thorough` before verification. If hotfix created delta spec, enter full verification path according to comet-verify's scale assessment rules.
 
 After verification passes, record `.comet.yaml` `verify_result` as `pass` according to `/comet-verify` rules, must not skip this status before archiving. After verification passes, still enter `/comet-archive`'s final archive confirmation; do not automatically run the archive script.
 
@@ -143,11 +134,11 @@ If there is delta spec, sync to main spec according to comet-archive rules, and 
 <IMPORTANT>
 Hotfix workflow is **one-time continuous execution**. After invoking `/comet-hotfix`, agent must automatically advance through hotfix steps, without pausing to wait for user input mid-way.
 
-Exception: when `.comet.yaml` has `auto_transition: false`, after each phase guard advances `phase`, do not auto-invoke the next skill. In this case, use `"$COMET_BASH" "$COMET_STATE" next <name>` output and pause for manual continuation as instructed.
+Exception: when `.comet.yaml` has `auto_transition: false`, after each phase guard advances `phase`, do not auto-invoke the next skill. In this case, use `node "$COMET_STATE" next <name>` output and pause for manual continuation as instructed.
 
 The following situations must also pause and wait for user confirmation:
 
-1. Encountering upgrade conditions (see "Upgrade Conditions" section). **Must use the current platform's available user input/confirmation mechanism to pause and wait for the user to explicitly confirm** upgrading to full workflow
+1. Encountering an upgrade-assessment signal (see "Upgrade Assessment" section). **Must use the current platform's available user input/confirmation mechanism to pause and wait for the user to explicitly choose**: continue the hotfix flow, or upgrade to the full `/comet` workflow
 2. workspace isolation and execution-method selection when tasks exceed 3 and transfer to `/comet-build`
 3. verify phase (comet-verify) verification-failure and branch-handling decisions
 4. Final archive confirmation (before comet-archive runs the archive script)
@@ -159,28 +150,27 @@ After each step completes, immediately enter next step. Within each phase, must 
 
 ---
 
-## Upgrade Conditions
+## Upgrade Assessment
 
-Upgrade to full `/comet` when **any** of the following conditions are met:
+Hotfix upgrade assessment only decides whether to move from the preset workflow to full; file count never upgrades automatically, and `comet-state scale` only decides verification weight.
 
-| Condition | Explanation |
-|-----------|-------------|
-| Change involves **3+ files** | Exceeds single-point fix scope |
-| Architecture changes | New modules, new interfaces, new dependencies |
-| Database schema changes | Structural adjustments |
-| Introduces new public API | Fix creates new external interface |
-| Fix scope exceeds single function/module | Requires coordinated changes |
+If `/comet` passes an intent frame from the entry, hotfix must recheck `risk_signal` and escalation signals only before build: new capability, public API, schema change, cross-module coordination, or deep architecture work. When any signal matches, enter the existing escalation decision point; do not reimplement entry intent recognition.
 
-When upgrade conditions are met, **must follow the `comet/reference/decision-point.md` protocol to pause and wait for the user to explicitly confirm** upgrading to the full `/comet` workflow. Do not directly enter `/comet-design`, and do not automatically supplement Design Doc.
+Continuously check these qualitative-change signals: cross-module coordination, needing a new capability, database schema changes, introducing a new public API, or touching a deep architecture problem (in hotfix context this often surfaces during the root-cause elimination check). If any signal appears, the agent **must not self-upgrade or self-decide to continue**.
 
-After user confirms upgrade, **must first update the workflow and phase fields** before entering full flow:
+The file-count tripwire is only a prompt: when changed files exceed the hint threshold (for example > 4 files), ask the user whether to continue hotfix or upgrade full. More files do not necessarily mean qualitative change. A bug fix is usually focused on 1-3 files, so exceeding the threshold means the change surface is larger and is worth having the user confirm it still fits the preset scope.
+
+When a qualitative-change signal or file-count tripwire is hit, **must pause under the `comet/reference/decision-point.md` protocol and wait for the user's explicit choice**. Do not directly enter `/comet-design`; do not automatically add a Design Doc.
+
+After the user chooses upgrade (option B), use the legal state-machine upgrade channel, a single command that converts the preset workflow to full and rolls back to design:
 
 ```bash
-"$COMET_BASH" "$COMET_STATE" set <name> workflow full
-"$COMET_BASH" "$COMET_STATE" set <name> phase design
+node "$COMET_STATE" transition <name> preset-escalate
 ```
 
-Then on current change basis, supplement Design Doc: **Immediately use the Skill tool to load the `comet-design` skill**, proceed normally with full workflow. If user does not confirm upgrade, stop hotfix and report that current change has exceeded hotfix scope.
+This command atomically sets `workflow`/`classic_profile` to `full`, rolls `phase` back to `design`, and clears `design_doc` (satisfying comet-design entry requirements). Then add the Design Doc on the current change: **immediately use the Skill tool to load the `comet-design` skill**, then proceed through the normal full workflow.
+
+When the user chooses continue (option A), continue the hotfix workflow and record the user's reason for continuing.
 
 ---
 
@@ -189,14 +179,14 @@ Then on current change basis, supplement Design Doc: **Immediately use the Skill
 - Bug fixed, tests pass
 - Change archived
 - If spec changes, synced to main spec
-- **Phase guard**: Before build → verify run `"$COMET_BASH" "$COMET_GUARD" <change-name> build --apply`; before verify → archive follow `/comet-verify` and run `"$COMET_BASH" "$COMET_GUARD" <change-name> verify --apply`
+- **Phase guard**: Before build → verify run `node "$COMET_GUARD" <change-name> build --apply`; before verify → archive follow `/comet-verify` and run `node "$COMET_GUARD" <change-name> verify --apply`
 
 ## Automatic Handoff to Next Phase
 
 Follow `comet/reference/auto-transition.md`. Key command:
 
 ```bash
-"$COMET_BASH" "$COMET_STATE" next <name>
+node "$COMET_STATE" next <name>
 ```
 
 - `NEXT: auto` → invoke the skill pointed to by `SKILL` to continue hotfix workflow (`phase: build` returns `comet-hotfix`, `verify` returns `comet-verify`, `archive` returns `comet-archive`)

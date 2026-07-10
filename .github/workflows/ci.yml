@@ -30,30 +30,21 @@ jobs:
 
       - run: pnpm lint
 
+      - run: pnpm run lint:architecture
+
       - run: pnpm format:check
 
       - run: pnpm test:coverage
 
-  shellcheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run shellcheck
-        uses: ludeeus/action-shellcheck@2.0.0
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push'
+        uses: codecov/codecov-action@v5
         with:
-          scandir: ./assets/skills/comet/scripts
-
-  bats-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install bats
-        run: sudo apt-get install -y bats
-
-      - name: Run shell tests
-        run: bats test/shell/*.bats
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: unittests
+          name: comet-node-${{ matrix.node-version }}
+          fail_ci_if_error: false
 
   script-smoke:
     runs-on: ${{ matrix.os }}
@@ -75,10 +66,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Run Comet script smoke tests
-        run: pnpm test -- test/ts/comet-scripts.test.ts
-
-      - name: Run portable shell tests
-        run: pnpm test:shell
+        run: pnpm run test:script-smoke
 
   init-e2e:
     runs-on: ${{ matrix.os }}
@@ -130,17 +118,21 @@ jobs:
                     .augment/skills .kiro/skills .kimi-code/skills .lingma/skills .junie/skills \
                     .codebuddy/skills .cospec/skills .crush/skills .factory/skills \
                     .iflow/skills .pi/skills .qoder/skills .agents/skills \
-                    .bob/skills .forge/skills .trae/skills .github/skills; do
+                    .bob/skills .forge/skills .trae/skills .github/skills .zcode/skills \
+                    .mimocode/skills; do
             check_file "$PROJ/$sd/comet/SKILL.md"
-            check_file "$PROJ/$sd/comet/scripts/comet-guard.sh"
-            check_file "$PROJ/$sd/comet/scripts/comet-state.sh"
-            check_file "$PROJ/$sd/comet/scripts/comet-handoff.sh"
-            check_file "$PROJ/$sd/comet/scripts/comet-yaml-validate.sh"
-            check_file "$PROJ/$sd/comet/scripts/comet-archive.sh"
+            check_file "$PROJ/$sd/comet/scripts/comet-guard.mjs"
+            check_file "$PROJ/$sd/comet/scripts/comet-state.mjs"
+            check_file "$PROJ/$sd/comet/scripts/comet-handoff.mjs"
+            check_file "$PROJ/$sd/comet/scripts/comet-yaml-validate.mjs"
+            check_file "$PROJ/$sd/comet/scripts/comet-archive.mjs"
+            check_file "$PROJ/$sd/comet/scripts/comet-hook-guard.mjs"
+            check_file "$PROJ/$sd/comet/scripts/comet-env.mjs"
+            check_file "$PROJ/$sd/comet/scripts/comet-runtime.mjs"
           done
           check_file "$PROJ/.pi/extensions/comet-commands.ts"
           PROJ="$PROJ" node -e "const s=require(process.env.PROJ+'/.pi/settings.json'); if(s.enableSkillCommands!==true) process.exit(1)"
-          echo "All 29 platforms project Comet skills: OK"
+          echo "All 33 platforms project Comet skills: OK"
         shell: bash
 
       - name: Verify external installer status (project)
@@ -220,17 +212,21 @@ jobs:
                     .augment/skills .kiro/skills .kimi-code/skills .lingma/skills .junie/skills \
                     .codebuddy/skills .cospec/skills .crush/skills .factory/skills \
                     .iflow/skills .pi/agent/skills .qoder/skills .gemini/antigravity/skills \
-                    .bob/skills .forge/skills .trae/skills .github/skills; do
+                    .bob/skills .forge/skills .trae/skills .github/skills .zcode/skills \
+                    .config/mimocode/skills; do
             check_file "$HOME_DIR/$sd/comet/SKILL.md"
-            check_file "$HOME_DIR/$sd/comet/scripts/comet-guard.sh"
-            check_file "$HOME_DIR/$sd/comet/scripts/comet-state.sh"
-            check_file "$HOME_DIR/$sd/comet/scripts/comet-handoff.sh"
-            check_file "$HOME_DIR/$sd/comet/scripts/comet-yaml-validate.sh"
-            check_file "$HOME_DIR/$sd/comet/scripts/comet-archive.sh"
+            check_file "$HOME_DIR/$sd/comet/scripts/comet-guard.mjs"
+            check_file "$HOME_DIR/$sd/comet/scripts/comet-state.mjs"
+            check_file "$HOME_DIR/$sd/comet/scripts/comet-handoff.mjs"
+            check_file "$HOME_DIR/$sd/comet/scripts/comet-yaml-validate.mjs"
+            check_file "$HOME_DIR/$sd/comet/scripts/comet-archive.mjs"
+            check_file "$HOME_DIR/$sd/comet/scripts/comet-hook-guard.mjs"
+            check_file "$HOME_DIR/$sd/comet/scripts/comet-env.mjs"
+            check_file "$HOME_DIR/$sd/comet/scripts/comet-runtime.mjs"
           done
           check_file "$HOME_DIR/.pi/agent/extensions/comet-commands.ts"
           HOME_DIR="$HOME_DIR" node -e "const s=require(process.env.HOME_DIR+'/.pi/agent/settings.json'); if(s.enableSkillCommands!==true) process.exit(1)"
-          echo "All 29 platforms global Comet skills: OK"
+          echo "All 33 platforms global Comet skills: OK"
         shell: bash
 
       - name: Verify external installer status (global)

@@ -1,6 +1,6 @@
 ---
 name: comet-open
-description: "Comet Phase 1: Open. Invoke with /comet-open. Explore ideas through OpenSpec, confirm requirements clarification, then create change structure (proposal + design + tasks)."
+description: "Use when Comet needs to create a new OpenSpec change, or an active change is missing proposal/design/tasks/.comet.yaml initialization artifacts."
 ---
 
 # Comet Phase 1: Open
@@ -13,7 +13,7 @@ description: "Comet Phase 1: Open. Invoke with /comet-open. Explore ideas throug
 
 ### 0. Output Language Constraint
 
-Every prompt and artifact request passed to OpenSpec must include the output-language constraint: use the language of the user request that triggered this workflow. When resuming an existing change with a clear dominant artifact language, preserve that language unless the user explicitly asks to switch.
+Every prompt and artifact request passed to OpenSpec must include the resolved Comet artifact language, using normalized ids such as `en` or `zh-CN`. Before `.comet.yaml` exists, read `language` from `.comet/config.yaml`; after the change is initialized, use `"$COMET_BASH" "$COMET_STATE" get <name> language`. If no configured language exists, fall back to the current user request language. The generated `proposal.md`, `design.md`, and `tasks.md` must use that language as their main language.
 
 ### 1. Explore Ideas and Clarify Requirements
 
@@ -131,26 +131,16 @@ openspec/changes/<name>/
 ├── .openspec.yaml
 ├── .comet.yaml
 ├── proposal.md       # Why + What: problem, goals, scope
-├── design.md         # How (high-level): architecture decisions, approach selection
+├── design.md         # How (high-level framework): architecture decisions, approach selection (deep technical design is refined in the design phase Design Doc)
 └── tasks.md          # Task checklist (checkboxes)
 ```
 
 Create `.comet.yaml` state file:
 
+First locate scripts via `comet/reference/scripts.md`, then initialize state:
+
 ```bash
-COMET_ENV="${COMET_ENV:-$(find . "$HOME"/.*/skills "$HOME/.config" "$HOME/.gemini" -path '*/comet/scripts/comet-env.sh' -type f -print -quit 2>/dev/null)}"
-if [ -z "$COMET_ENV" ]; then
-  echo "ERROR: comet-env.sh not found. Ensure the comet skill is installed." >&2
-  return 1
-fi
-. "$COMET_ENV"
-
-if [ -z "$COMET_STATE" ] || [ -z "$COMET_GUARD" ]; then
-  echo "ERROR: Comet scripts not found. Ensure the comet skill is installed." >&2
-  return 1
-fi
-
-"$COMET_BASH" "$COMET_STATE" init <name> full
+node "$COMET_STATE" init <name> full
 ```
 
 ### 3. Entry State Verification
@@ -158,7 +148,7 @@ fi
 Verify state machine has been correctly initialized:
 
 ```bash
-"$COMET_BASH" "$COMET_STATE" check <name> open
+node "$COMET_STATE" check <name> open
 ```
 
 Proceed to Step 4 after verification passes. The script outputs specific failure reasons when verification fails.
@@ -195,12 +185,12 @@ After user selects "Confirm", proceed to exit conditions. When user selects "Nee
 
 - proposal.md, design.md, tasks.md all created with complete content
 - **User has confirmed** proposal, design, tasks content meets expectations
-- **Phase guard**: Run `"$COMET_BASH" "$COMET_GUARD" <change-name> open --apply`; after all PASS, auto-transitions to next phase
+- **Phase guard**: Run `node "$COMET_GUARD" <change-name> open --apply`; after all PASS, auto-transitions to next phase
 
 Must use `--apply` before exit, otherwise `.comet.yaml` remains at `phase: open` and the next phase entry check will fail.
 
 ```bash
-"$COMET_BASH" "$COMET_GUARD" <change-name> open --apply
+node "$COMET_GUARD" <change-name> open --apply
 ```
 
 Full workflow auto-transitions to `phase: design`; hotfix/tweak presets auto-transition to `phase: build`.
@@ -210,7 +200,7 @@ Full workflow auto-transitions to `phase: design`; hotfix/tweak presets auto-tra
 Follow `comet/reference/auto-transition.md`. Key command:
 
 ```bash
-"$COMET_BASH" "$COMET_STATE" next <change-name>
+node "$COMET_STATE" next <change-name>
 ```
 
 - `NEXT: auto` → invoke the skill pointed to by `SKILL` to enter the next phase

@@ -1,5 +1,5 @@
 {
-  "version": "0.3.8",
+  "version": "0.4.0-beta.3",
   "skills": [
     "comet/SKILL.md",
     "comet/reference/auto-transition.md",
@@ -9,14 +9,29 @@
     "comet/reference/decision-point.md",
     "comet/reference/dirty-worktree.md",
     "comet/reference/file-structure.md",
+    "comet/reference/intent-frame.md",
+    "comet/reference/scripts.md",
     "comet/reference/subagent-dispatch.md",
-    "comet/scripts/comet-env.sh",
-    "comet/scripts/comet-guard.sh",
-    "comet/scripts/comet-state.sh",
-    "comet/scripts/comet-handoff.sh",
-    "comet/scripts/comet-archive.sh",
-    "comet/scripts/comet-yaml-validate.sh",
-    "comet/scripts/comet-hook-guard.sh",
+    "comet-any/SKILL.md",
+    "comet-any/reference/authoring-subagents.md",
+    "comet-any/reference/authored-zone-example.md",
+    "comet-any/reference/bundle-authoring.md",
+    "comet-any/reference/eval-provider.md",
+    "comet-any/reference/subagents/script-author.md",
+    "comet-any/reference/subagents/reference-author.md",
+    "comet-any/reference/subagents/workflow-entry-author.md",
+    "comet-any/reference/subagents/skill-core-author.md",
+    "comet-any/reference/subagents/pause-points-author.md",
+    "comet-any/reference/subagents/skill-reviewer.md",
+    "comet/scripts/comet-runtime.mjs",
+    "comet/scripts/comet-env.mjs",
+    "comet/scripts/comet-guard.mjs",
+    "comet/scripts/comet-state.mjs",
+    "comet/scripts/comet-handoff.mjs",
+    "comet/scripts/comet-archive.mjs",
+    "comet/scripts/comet-yaml-validate.mjs",
+    "comet/scripts/comet-hook-guard.mjs",
+    "comet/scripts/comet-intent.mjs",
     "comet-open/SKILL.md",
     "comet-design/SKILL.md",
     "comet-build/SKILL.md",
@@ -25,17 +40,23 @@
     "comet-hotfix/SKILL.md",
     "comet-tweak/SKILL.md"
   ],
+  "internalSkills": [
+    "comet/runtime/classic/skill.yaml",
+    "comet/runtime/classic/guardrails.yaml",
+    "comet/runtime/classic/checks.yaml"
+  ],
   "rules": [
-    "comet/rules/comet-phase-guard.md"
+    "comet/rules/comet-phase-guard.md",
+    "comet/rules/comet-phase-guard.en.md"
   ],
   "hooks": {
-    "comet/scripts/comet-hook-guard.sh": {
+    "comet/scripts/comet-hook-guard.mjs": {
       "matcher": "Write|Edit",
       "description": "Block code writes in wrong Comet phase (open/design/archive)"
     }
   },
   "languages": [
-    { "id": "en", "name": "English", "skillsDir": "skills" },
-    { "id": "zh", "name": "中文", "skillsDir": "skills-zh" }
+    { "id": "en", "name": "English", "skillsDir": "skills", "artifactLanguage": "en" },
+    { "id": "zh", "name": "中文", "skillsDir": "skills-zh", "artifactLanguage": "zh-CN" }
   ]
 }

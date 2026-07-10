@@ -1,0 +1,278 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-bg: #ffffff;
+  --color-surface: #f5f5f7;
+  --color-surface-warm: #fbfbfd;
+  --color-fg: #1d1d1f;
+  --color-fg-2: #424245;
+  --color-muted: #6e6e73;
+  --color-meta: #6e6e73;
+  --color-border: #d2d2d7;
+  --color-border-soft: #e8e8ed;
+  --color-accent: #0063f8;
+  --color-accent-active: #0052e0;
+  --color-accent-soft: color-mix(in oklab, #0063f8 10%, #ffffff);
+  --color-accent-softer: color-mix(in oklab, #0063f8 6%, #ffffff);
+  --color-success: #16a34a;
+  --color-warn: #c47a06;
+  --color-danger: #dc2626;
+  --color-info: #0063f8;
+  --color-ok-soft: color-mix(in oklab, #16a34a 12%, #ffffff);
+  --color-warn-soft: color-mix(in oklab, #c47a06 12%, #ffffff);
+  --color-danger-soft: color-mix(in oklab, #dc2626 10%, #ffffff);
+  --color-info-soft: color-mix(in oklab, #0063f8 10%, #ffffff);
+  --shadow-raised: 0 12px 32px rgba(0, 0, 0, 0.08);
+  --shadow-card: none;
+  --spacing-dashboard: 1620px;
+}
+
+:root[data-theme='dark'],
+:host[data-theme='dark'] {
+  --color-bg: #0b0e13;
+  --color-surface: #181b1f;
+  --color-surface-warm: #22252e;
+  --color-fg: #d8dee9;
+  --color-fg-2: #b0b8c4;
+  --color-muted: #7b818a;
+  --color-meta: #8e939e;
+  --color-border: #343740;
+  --color-border-soft: #282b33;
+  --color-accent: #6e9fff;
+  --color-accent-active: #8bb4ff;
+  --color-accent-soft: color-mix(in oklab, #6e9fff 18%, #0b0e13);
+  --color-accent-softer: color-mix(in oklab, #6e9fff 12%, #0b0e13);
+  --color-success: #73bf69;
+  --color-warn: #ff9830;
+  --color-danger: #f2495c;
+  --color-info: #6e9fff;
+  --color-ok-soft: color-mix(in oklab, #73bf69 18%, #0b0e13);
+  --color-warn-soft: color-mix(in oklab, #ff9830 18%, #0b0e13);
+  --color-danger-soft: color-mix(in oklab, #f2495c 15%, #0b0e13);
+  --color-info-soft: color-mix(in oklab, #6e9fff 15%, #0b0e13);
+  --shadow-raised: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --shadow-card: none;
+}
+
+:root {
+  --rail-w: 248px;
+  font-family: Inter, 'Inter var', sans-serif;
+  color: var(--color-fg);
+  background: var(--color-surface);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 主题切换过渡动画 - 短促干脆 */
+:root,
+:root * {
+  transition-property: color, background-color, border-color, box-shadow;
+  transition-duration: 0.15s;
+  transition-timing-function: ease-out;
+}
+
+/* 排除不需要过渡的元素 */
+:root button:active,
+:root input:active,
+:root .no-transition {
+  transition: none !important;
+}
+
+html {
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+}
+
+/* 统一滚动条宽度，避免主题切换时布局抖动 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.max-w-dashboard {
+  max-width: var(--spacing-dashboard);
+}
+
+.artifact-markdown {
+  color: var(--color-fg-2);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.artifact-markdown h1,
+.artifact-markdown h2,
+.artifact-markdown h3,
+.artifact-markdown h4 {
+  color: var(--color-fg);
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 1.25rem 0 0.5rem;
+}
+
+.artifact-markdown h1 {
+  font-size: 1.75rem;
+}
+
+.artifact-markdown h2 {
+  font-size: 1.35rem;
+}
+
+.artifact-markdown h3,
+.artifact-markdown h4 {
+  font-size: 1rem;
+}
+
+.artifact-markdown p {
+  margin: 0.65rem 0;
+}
+
+.artifact-markdown ul {
+  margin: 0.65rem 0;
+  padding-left: 1.25rem;
+  list-style: disc;
+}
+
+.artifact-markdown li {
+  margin: 0.35rem 0;
+}
+
+.artifact-markdown code {
+  border-radius: 6px;
+  background: var(--color-surface);
+  padding: 0.12rem 0.35rem;
+  font-family: Inter, 'Inter var', sans-serif;
+  font-size: 0.92em;
+}
+
+.artifact-markdown pre {
+  margin: 0.9rem 0;
+  overflow: auto;
+  border-radius: 12px;
+  background: #1d1d1f;
+  padding: 1rem;
+  color: #f5f5f7;
+}
+
+:root[data-theme='dark'] .artifact-markdown pre,
+:host[data-theme='dark'] .artifact-markdown pre {
+  background: #14171c;
+  color: #d8dee9;
+}
+
+:root[data-theme='dark'] .artifact-markdown code,
+:host[data-theme='dark'] .artifact-markdown code {
+  background: #282b33;
+}
+
+:root[data-theme='dark'] .artifact-markdown h1,
+:root[data-theme='dark'] .artifact-markdown h2,
+:root[data-theme='dark'] .artifact-markdown h3,
+:root[data-theme='dark'] .artifact-markdown h4,
+:host[data-theme='dark'] .artifact-markdown h1,
+:host[data-theme='dark'] .artifact-markdown h2,
+:host[data-theme='dark'] .artifact-markdown h3,
+:host[data-theme='dark'] .artifact-markdown h4 {
+  color: #e8ecf2;
+}
+
+:root[data-theme='dark'] .artifact-markdown a,
+:host[data-theme='dark'] .artifact-markdown a {
+  color: #6e9fff;
+}
+
+:root[data-theme='dark'] .artifact-markdown blockquote,
+:host[data-theme='dark'] .artifact-markdown blockquote {
+  border-left-color: #343740;
+  color: #7b818a;
+}
+
+:root[data-theme='dark'] .artifact-markdown hr,
+:host[data-theme='dark'] .artifact-markdown hr {
+  border-color: #343740;
+}
+
+:root[data-theme='dark'] ::-webkit-scrollbar,
+:host[data-theme='dark'] ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+:root[data-theme='dark'] ::-webkit-scrollbar-track,
+:host[data-theme='dark'] ::-webkit-scrollbar-track {
+  background: #0b0e13;
+}
+
+:root[data-theme='dark'] ::-webkit-scrollbar-thumb,
+:host[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: #343740;
+  border-radius: 4px;
+}
+
+:root[data-theme='dark'] ::-webkit-scrollbar-thumb:hover,
+:host[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
+  background: #4a4d56;
+}
+
+:root[data-theme='dark'] .summary-card-glow,
+:host[data-theme='dark'] .summary-card-glow {
+  box-shadow: 0 0 0 1px rgba(108, 182, 255, 0.1);
+}
+
+:root[data-theme='dark'] .accent-glow,
+:host[data-theme='dark'] .accent-glow {
+  box-shadow: 0 0 12px rgba(108, 182, 255, 0.15);
+}
+
+.artifact-markdown pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 100;
+  transform: translate(-50%, 20px);
+  opacity: 0;
+  pointer-events: none;
+  border-radius: 999px;
+  background: var(--color-fg);
+  color: var(--color-bg);
+  padding: 11px 20px;
+  font-size: 14px;
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* All component styling is now inline via Tailwind classes */

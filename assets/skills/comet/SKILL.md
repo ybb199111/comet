@@ -1,6 +1,6 @@
 ---
 name: comet
-description: "Comet — OpenSpec + Superpowers dual-star development workflow. Start with /comet for automatic phase detection and dispatch to subcommands. Five phases: open → design → build → verify → archive."
+description: "Use when the user wants to start or resume a Comet workflow and route by active change, .comet.yaml, and hotfix/tweak intent."
 ---
 
 # Comet — OpenSpec + Superpowers Dual-Star Development Workflow
@@ -22,23 +22,67 @@ Agents need only read this section for decision-making. Refer to the Reference A
 
 ### Output Language Rule
 
-Use the language of the user request that triggered this workflow as the default output language. When resuming an existing change with a clear dominant artifact language, preserve that language unless the user explicitly asks to switch.
+Use the configured Comet artifact language as the output language for every OpenSpec and Superpowers artifact. The configured value is a normalized language id, `en` or `zh-CN`. For an existing change, read `language` from `openspec/changes/<name>/.comet.yaml` using `"$COMET_BASH" "$COMET_STATE" get <name> language`. Before `.comet.yaml` exists, read `language` from `.comet/config.yaml`; if neither exists, fall back to the current user request language. Include the resolved language explicitly in every prompt or ARGUMENTS passed to external OpenSpec/Superpowers skills.
 
 ### Automatic Phase Detection
 
-**Step 0: Active Change Discovery and Intent Detection**
+**Step 0: Active Change Discovery and Intent Resolution**
 
-1. Detect presets first; if hotfix/tweak matches, invoke the corresponding preset skill directly and do not enter the normal open branch
-2. When no preset matches, run `openspec list --json` to get all active changes
+1. First load script locations through `comet/reference/scripts.md` and ensure `$COMET_INTENT` is available.
+2. Run `openspec list --json` to collect active changes.
+3. Fill a `CometIntentFrame` from the user request, active change list, and necessary repository state.
+4. Prefer `node "$COMET_INTENT" route --stdin` to pass the frame JSON and get the runtime-normalized route. `CometIntentFrame + runtime scorer` is the source of truth; this prose is only for intent recognition slot extraction.
+5. Handle the runtime route:
+   - `hotfix` → invoke `/comet-hotfix`
+   - `tweak` → invoke `/comet-tweak`
+   - `full` → follow the active-change table to invoke `/comet-open` or ask for confirmation
+   - `resume` → continue to Step 1 and read the selected change `.comet.yaml`
+   - `ask_user` → pause through `comet/reference/decision-point.md` and wait for the user's choice
+   - `out_of_scope` → explain that the input is not a Comet workflow start/resume request and do not initialize a change
 
-**Preset detection has highest priority**:
-- User explicitly describes a bug fix / hotfix + meets hotfix conditions → directly invoke `/comet-hotfix`
-- User explicitly describes copy/config/docs/prompt small adjustment + meets tweak conditions → directly invoke `/comet-tweak`
-- No preset match → follow the table below
+**Minimal CometIntentFrame Skeleton**:
+
+```json
+{
+  "schema_version": "comet.intent.v1",
+  "utterance": "<user request>",
+  "intent": { "name": "start_change", "confidence": 0.8 },
+  "slots": {
+    "requested_action": "start",
+    "workflow_candidate": "full",
+    "user_explicit_workflow": null,
+    "change_id": null,
+    "existing_behavior": null,
+    "new_capability": null,
+    "public_api_change": null,
+    "schema_change": null,
+    "cross_module_change": null
+  },
+  "context": {
+    "active_changes_count": 0,
+    "active_change_names": []
+  },
+  "evidence": [],
+  "proposed_route": {
+    "name": "ask_user",
+    "confidence": 0.5
+  }
+}
+```
+
+**Intent Recognition Slot Extraction**:
+See `comet/reference/intent-frame.md` for complete field meanings; normal routing only needs the minimal skeleton above.
+
+- `fix_bug` + `existing_behavior: true` + no new capability/public API/schema/cross-module signal → prefer `hotfix`
+- User explicitly describes a lightweight/medium change that can fit in a single OpenSpec change, should be executed through OpenSpec apply, and does not need full `/comet` deep design/plan → prefer `tweak`
+- Copy, config, docs, prompt, or a lightweight/medium single OpenSpec change → prefer `tweak`
+- New capability, public API, schema change, cross-module coordination, or architecture work → prefer `full`
+- Multiple active changes without an explicit change → `ask_user`
+- Low confidence, missing key evidence, or explicit workflow conflicting with risk signals → `ask_user`
 
 | Active changes | User input | Behavior |
 |----------------|------------|----------|
-| None | non-preset input | → Invoke `/comet-open` |
+| None | `full` route | → Invoke `/comet-open` |
 | Exactly 1 | `/comet <description>` | → **Ask**: continue this change or create a new change |
 | Multiple | `/comet <description>` | → **Ask**: continue existing or create new; if continuing, list changes for selection |
 | Exactly 1 | `/comet` with no description | → Auto-select, enter Step 1 |
@@ -57,16 +101,16 @@ Prefer reading `openspec/changes/<name>/.comet.yaml`. If not available, fall bac
 **Resume rules**:
 - On every context resume, rerun Step 0 and Step 1; do not trust conversation history for phase detection
 - If there is an active change and the worktree has uncommitted changes, handle them through `comet/reference/dirty-worktree.md`. That protocol defines checks, attribution, and prohibitions; this file does not repeat them
-- If `phase: build`, first check `build_pause`, `plan`, `build_mode`, and `isolation` (see details below):
-  - If `build_pause: plan-ready` but `isolation` and `build_mode` are already set, treat as stale pause: first output `[COMET] Detected stale pause (build_pause=plan-ready but isolation/build_mode already set), auto-clearing and continuing`, then run `"$COMET_BASH" "$COMET_STATE" set <name> build_pause null`, then read the next unchecked task from tasks.md and resume execution per `build_mode`
-  - If `build_pause: plan-ready` and the plan file exists, but `isolation` or `build_mode` is not yet set, return to the `/comet-build` plan-ready resume point, prompt the user to choose isolation and execution method, and do not regenerate the plan
+- If `phase: build`, first check `build_pause`, `plan`, `isolation`, `build_mode`, `tdd_mode`, and `review_mode` (see details below):
+  - If `build_pause: plan-ready` but `isolation`, `build_mode`, `tdd_mode`, and `review_mode` are all already set, treat as stale pause: first output `[COMET] Detected stale pause (build_pause=plan-ready but isolation/build_mode/tdd_mode/review_mode are set), auto-clearing and continuing`, then run `node "$COMET_STATE" set <name> build_pause null`, then read the next unchecked task from tasks.md and resume execution per `build_mode`
+  - If `build_pause: plan-ready` and the plan file exists, but `isolation`, `build_mode`, `tdd_mode`, or `review_mode` is not yet set, return to the `/comet-build` plan-ready resume point, prompt the user to complete/confirm workspace isolation, execution method, TDD mode, and code review mode, and do not regenerate the plan
   - If `build_pause: plan-ready` but the plan file is missing, return to `/comet-build` to handle corrupted state or regenerate the plan
-  - If `build_mode`, `isolation`, or `tdd_mode` is unset, return to the corresponding `/comet-build` step to supplement before executing
+  - If `isolation`, `build_mode`, `tdd_mode`, or `review_mode` is unset, return to the corresponding `/comet-build` step to supplement before executing
   - If all are set, read the next unchecked task from tasks.md and continue:
     - If `build_mode: subagent-driven-development`, do not execute tasks directly in the main window; return to `/comet-build`'s background subagent dispatch rules, main window only coordinates
     - Other execution modes follow `/comet-build`'s corresponding rules
-- If `phase: verify` and `verify_result: fail`, enter the verification failure decision blocking point: pause and ask the user to fix or accept deviation; only after the user chooses fix, run `"$COMET_BASH" "$COMET_STATE" transition <name> verify-fail` and invoke `/comet-build`
-- If `phase: open` but proposal/design/tasks are complete, first run `"$COMET_BASH" "$COMET_GUARD" <change-name> open --apply` to repair state, then continue detection
+- If `phase: verify` and `verify_result: fail`, enter the verification failure decision blocking point: pause and ask the user to fix or accept deviation; only after the user chooses fix, run `node "$COMET_STATE" transition <name> verify-fail` and invoke `/comet-build`
+- If `phase: open` but proposal/design/tasks are complete, first run `node "$COMET_GUARD" <change-name> open --apply` to repair state, then continue detection
 - If `phase: archive`, only invoke `/comet-archive`; `/comet-archive` must first wait for final archive confirmation. After archive succeeds, the change moves to the archive directory, so do not run guard against the old active directory
 
 **Step 2: Phase Determination** (check in order, first match wins)
@@ -82,22 +126,19 @@ Prefer reading `openspec/changes/<name>/.comet.yaml`. If not available, fall bac
 
 If metadata conflicts with file state, use verifiable file state as source of truth and correct `.comet.yaml` before continuing.
 
-### Preset Upgrade Criteria
+### Preset Upgrade Assessment
 
-**hotfix → full** (upgrade if any condition met):
-- Change involves **3+ files**
-- Architecture changes (new modules, new interfaces, new dependencies)
-- Database schema changes
-- Fix introduces new public API
-- Fix scope exceeds a single function/module
+hotfix/tweak scope assessment uses a three-layer division of labor, avoiding "using pure file count as a hard upgrade condition" that wrongly blocks normal small changes:
 
-**tweak → full** (upgrade if any condition met):
-- Change involves **5+ files**
-- Cross-module coordination required
-- **5+** new test cases needed
-- Config item additions or deletions (not value changes)
-- New capability needed
-- Delta spec needed (existing spec affected)
+1. **Qualitative-change signals** (agent semantic recognition; hitting any one pauses and delegates a two-choice decision to the user): cross-module coordinated change, new capability needed, database schema change, introduces new public API, hits deep architecture issues (each preset reuses this core signal set and may add its own context-specific signal, such as tweak's "needing to split into multiple OpenSpec changes")
+2. **File-count tripwire** (user decides; not an automatic upgrade): when changed files exceed a hint threshold, pause and let the user decide whether to continue the preset or upgrade to full; do not auto-kick
+3. **Verification weight** (scale script decides): `comet-state scale` only decides `verify_mode` (verification weight); it does not block the flow or trigger an upgrade
+
+**Upgrade decision point (user chooses one of two)**:
+- Continue the preset lightweight flow (user confirms scope is manageable)
+- Upgrade to full `/comet` (use `node "$COMET_STATE" transition <name> preset-escalate` to legally rewind to the design phase, supplementing Design Doc and Superpowers plan)
+
+See the "Upgrade Assessment" section of each `comet-hotfix` / `comet-tweak` for detailed rules.
 
 ### Error Handling Quick Reference
 
@@ -105,7 +146,7 @@ If metadata conflicts with file state, use verifiable file state as source of tr
 |----------|----------|
 | `openspec list --json` fails | Check if openspec is installed, prompt user to run `openspec init` |
 | Sub-skill unavailable | Stop workflow, prompt to install or enable the corresponding skill |
-| `.comet.yaml` malformed or missing | Use file state as source of truth, correct with `"$COMET_BASH" "$COMET_STATE" set` then continue |
+| `.comet.yaml` malformed or missing | Use file state as source of truth, correct with `node "$COMET_STATE" set` then continue |
 | Build/test fails | Return to build phase for fixes, do not enter verify |
 | Incomplete change directory structure | Fill missing files according to `comet-open` artifact requirements |
 
@@ -118,18 +159,18 @@ Flow chain: open → design → build → verify → archive
 
 **Continuous execution requirement**: starting from the detected phase, the agent automatically continues through all later phases. But **auto-advancing only applies at transition points without user decisions**. When encountering user decision points, **must use the current platform's available user input/confirmation mechanism to pause and wait for the user's explicit response**. Must not use recommendation rules, defaults, or historical preferences to substitute for user confirmation, and must not just output a text prompt and then continue executing.
 
-**Distinguish phase advancement vs automatic handoff**: each sub-skill runs phase guard `--apply` before exit to advance the `.comet.yaml` `phase` field. This step **always happens** and is not controlled by `auto_transition`. After that, the sub-skill runs `"$COMET_BASH" "$COMET_STATE" next <name>` to resolve the next action: when `auto_transition` is not `false`, output is `NEXT: auto` (auto-invoke next skill); when `auto_transition` is `false`, output is `NEXT: manual` (do not invoke next skill, show a manual run hint). Therefore `auto_transition` **only controls next skill invocation, not phase advancement**. Regardless of `auto_transition`, user decision points below remain blocking.
+**Distinguish phase advancement vs automatic handoff**: each sub-skill runs phase guard `--apply` before exit to advance the `.comet.yaml` `phase` field. This step **always happens** and is not controlled by `auto_transition`. After that, the sub-skill runs `node "$COMET_STATE" next <name>` to resolve the next action: when `auto_transition` is not `false`, output is `NEXT: auto` (auto-invoke next skill); when `auto_transition` is `false`, output is `NEXT: manual` (do not invoke next skill, show a manual run hint). Therefore `auto_transition` **only controls next skill invocation, not phase advancement**. Regardless of `auto_transition`, user decision points below remain blocking.
 
 **Decision points are blocking points**: whenever reaching any of the following nodes, the current `/comet` invocation must stop, and follow the `comet/reference/decision-point.md` protocol to obtain the user's explicit choice. Only after the user explicitly chooses can the corresponding state fields be written and operations executed, then auto-advance resumes.
 
 Nodes requiring user participation (pause only at these nodes):
 1. Open phase proposal/design/tasks review and confirmation
 2. Confirm design approach during brainstorming
-3. Plan-ready pause choice during build phase, followed by workflow configuration selection (isolation + execution method + TDD mode)
+3. Plan-ready pause choice during build phase, followed by workflow configuration selection (workspace isolation + execution method + TDD mode + code review mode)
 4. Decide to fix or accept deviation when verify fails (including Spec drift handling)
 5. Choose branch handling method for finishing-branch
 6. Archive phase final confirmation before running the archive script
-7. Encounter upgrade conditions (hotfix/tweak → full workflow)
+7. Encounter an upgrade-assessment signal (hotfix/tweak → user chooses one of two: continue preset / upgrade to full workflow)
 8. Build phase scope expansion requiring redesign or new change split
 9. Open phase large PRD requiring confirmation to split into multiple changes
 
@@ -158,7 +199,7 @@ Agents should not skip these decision points; other unambiguous phase transition
 | `/comet-verify` | 4. Verify and Close | Both | Verification report, branch handling |
 | `/comet-archive` | 5. Archive | OpenSpec | delta→main spec sync, design doc markup, archive |
 | `/comet-hotfix` | Preset path | Both | Quick fix (skip brainstorming) |
-| `/comet-tweak` | Preset path | Both | Small change (skip brainstorming and full plan) |
+| `/comet-tweak` | Preset path | Both | OpenSpec-chained medium change (delta spec is first-class, skip brainstorming and full plan) |
 
 ```
 /comet
@@ -168,11 +209,11 @@ Agents should not skip these decision points; other unambiguous phase transition
 
 /comet-hotfix (preset, skip brainstorming)
   open ──→ build ──→ verify ──→ archive
-    ↑ If upgrade triggered → block for confirmation → supplement Design Doc → return to full workflow
+    ↑ Upgrade-assessment signal hit → user chooses one of two (continue preset / upgrade full) → if upgrade, transition preset-escalate → supplement Design Doc → return to full workflow
 
-/comet-tweak (preset, skip brainstorming and full plan)
-  open ──→ lightweight build ──→ light verify ──→ archive
-    ↑ If upgrade triggered → block for confirmation → supplement Design Doc → return to full workflow
+/comet-tweak (lightweight preset, chains OpenSpec, delta spec is first-class)
+  open ──→ build ──→ verify ──→ archive
+    ↑ Upgrade-assessment signal hit → user chooses one of two (continue preset / upgrade full) → if upgrade, transition preset-escalate → supplement Design Doc → return to full workflow
 ```
 
 ---
@@ -185,9 +226,10 @@ Agents should not skip these decision points; other unambiguous phase transition
 - Before `build → verify`, `build_mode` must be selected
 - `build_mode: subagent-driven-development` must also have `subagent_dispatch: confirmed`
 - Before full workflow leaves build phase, `tdd_mode` must be selected as `tdd` or `direct`
+- Before full workflow leaves build phase, `review_mode` must be selected as `off`, `standard`, or `thorough`
 - `build_mode: direct` is allowed by default only for `hotfix` / `tweak`; full workflow requires `direct_override: true`
 - `build_pause` is not an execution method and must not be written to `build_mode`
-- These constraints are enforced by both `comet-guard.sh build --apply` and `comet-state.sh transition <name> build-complete`
+- These constraints are enforced by both `comet-guard.mjs build --apply` and `comet-state.mjs transition <name> build-complete`
 
 ### .comet.yaml Field Reference
 
@@ -215,68 +257,11 @@ See `comet/reference/debug-gate.md` for the complete debug gate protocol.
 
 ### Script Location
 
-Comet scripts are distributed in `comet/scripts/`. **Do not hardcode paths** — locate once, cache in env vars. This block is a standard boilerplate repeated in every sub-skill for independent loadability; changes must be kept in sync across all files (boilerplate version: `v2`, update this version when changing to help locate files needing sync):
+Comet scripts are distributed in `comet/scripts/`. **Do not hardcode paths** — locate once, cache in env vars. The full bootstrap block, command reference (`--apply`, `transition`, `next`, `archive`), and output formats live in `comet/reference/scripts.md`. Run that bootstrap once per session, then reuse `$COMET_GUARD`, `$COMET_STATE`, `$COMET_HANDOFF`, `$COMET_ARCHIVE`, `$COMET_RUNTIME` throughout. Key entry points:
 
 ```bash
-COMET_ENV="${COMET_ENV:-$(find . "$HOME"/.*/skills "$HOME/.config" "$HOME/.gemini" -path '*/comet/scripts/comet-env.sh' -type f -print -quit 2>/dev/null)}"
-if [ -z "$COMET_ENV" ]; then
-  echo "ERROR: comet-env.sh not found. Ensure the comet skill is installed." >&2
-  return 1
-fi
-. "$COMET_ENV"
-
-# Stop workflow when script location fails
-if [ -z "$COMET_GUARD" ] || [ -z "$COMET_STATE" ] || [ -z "$COMET_HANDOFF" ] || [ -z "$COMET_ARCHIVE" ]; then
-  echo "ERROR: Comet scripts not found. Ensure the comet skill is installed." >&2
-  echo "Expected path pattern: */comet/scripts/comet-*.sh under project or platform skill directories" >&2
-  return 1
-fi
+node "$COMET_GUARD" <change-name> <phase> --apply    # phase guard + auto state update
+node "$COMET_STATE" transition <change-name> <event> # open-complete | design-complete | build-complete | verify-pass | verify-fail
+node "$COMET_STATE" next <change-name>               # NEXT: auto|manual|done  + SKILL: <skill-name>; auto_transition:false → manual, which pauses only the next skill invocation and does not block phase updates
+node "$COMET_ARCHIVE" <change-name>                  # full archive in one command
 ```
-
-**Auto state update**: Guard supports `--apply` flag, automatically updating `.comet.yaml` state fields after checks pass:
-
-```bash
-"$COMET_BASH" "$COMET_GUARD" <change-name> <phase> --apply
-```
-
-`--apply` delegates to `comet-state transition`. Use these semantic events when state changes need to be expressed directly:
-
-```bash
-"$COMET_BASH" "$COMET_STATE" transition <change-name> open-complete
-"$COMET_BASH" "$COMET_STATE" transition <change-name> design-complete
-"$COMET_BASH" "$COMET_STATE" transition <change-name> build-complete
-"$COMET_BASH" "$COMET_STATE" transition <change-name> verify-pass
-"$COMET_BASH" "$COMET_STATE" transition <change-name> verify-fail
-"$COMET_BASH" "$COMET_STATE" transition <archive-name> archived
-```
-
-**Resolve next action**: after guard-based phase advancement, use the `next` subcommand to determine whether to auto-invoke the next skill:
-
-```bash
-"$COMET_BASH" "$COMET_STATE" next <change-name>
-```
-
-Output format: `NEXT: auto|manual|done` + `SKILL: <skill-name>` (omitted for `done`) + `HINT` (for `manual` only). With `auto_transition: false`, output is `manual`, which pauses only the next skill invocation and does not block phase updates.
-
-**Archive script**: Complete all archive steps in one command:
-
-```bash
-"$COMET_BASH" "$COMET_ARCHIVE" <change-name>
-```
-
-After loading comet, agents should run the variable assignments above once, then reuse `$COMET_GUARD`, `$COMET_STATE`, `$COMET_HANDOFF`, `$COMET_ARCHIVE` throughout the session.
-
-
-### Best Practices
-
-1. **brainstorming cannot be skipped** — Every change must undergo deep design (except hotfix and tweak)
-2. **delta spec is a living document** — Freely modify during phase 3, sync at archive
-3. **Handoff packages are generated by scripts** — OpenSpec → Superpowers context must be generated through `comet-handoff.sh` as compact traceable excerpts (use `--full` when needed), and validated by guard for source/hash/mode
-4. **Keep tasks.md in sync** — Check off each completed task
-5. **Commit frequently** — One commit per task, message reflects design intent
-6. **Verify before archive confirmation** — Enter `/comet-archive` only after `/comet-verify` passes, but wait for final user confirmation before running the archive script
-7. **Classify incremental updates** — Small edits, medium brainstorming, large new changes
-8. **Plan must associate with change** — File header contains `change:` and `design-doc:` metadata
-9. **Archive closure** — design doc and plan must mark `archived-with` status
-10. **Modifying existing features** — Just open a new change
-11. **Preset has limits** — Switch to full workflow promptly when hotfix/tweak meet upgrade conditions
