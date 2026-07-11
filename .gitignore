@@ -92,6 +92,10 @@ skills-lock.json
 # Superpowers docs (local only)
 #docs/superpowers/
 
+# Local auto-update helper (Windows Task Scheduler)
+scripts/comet-autoupdate.sh
+comet-autoupdate.log
+
 .codegraph/
 
 .comet/
