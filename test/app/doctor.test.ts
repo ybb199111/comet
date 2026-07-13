@@ -7,7 +7,7 @@ import { doctorCommand } from '../../app/commands/doctor.js';
 
 const stateScript = path.resolve('assets', 'skills', 'comet', 'scripts', 'comet-state.mjs');
 
-async function installManagedCometSkills(baseDir: string): Promise<void> {
+async function installManagedCometSkills(baseDir: string, platformDir = '.claude'): Promise<void> {
   const manifest = JSON.parse(
     await fs.readFile(path.resolve('assets', 'manifest.json'), 'utf8'),
   ) as {
@@ -16,7 +16,7 @@ async function installManagedCometSkills(baseDir: string): Promise<void> {
   };
   const managedPaths = [...new Set([...manifest.skills, ...(manifest.internalSkills ?? [])])];
   for (const relPath of managedPaths) {
-    const target = path.join(baseDir, '.claude', 'skills', ...relPath.split('/'));
+    const target = path.join(baseDir, platformDir, 'skills', ...relPath.split('/'));
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, `${relPath}\n`);
   }
@@ -58,7 +58,7 @@ describe('doctor command', () => {
     const before = await fs.readFile(path.join(changeDir, '.comet.yaml'), 'utf8');
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    let json = '';
+    let json: string;
     try {
       await doctorCommand(tmpDir, { json: true });
       json = log.mock.calls.map((call) => call.join(' ')).join('\n');
@@ -76,7 +76,7 @@ describe('doctor command', () => {
 
   it('prints the current Comet version in text output', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    let output = '';
+    let output: string;
     try {
       await doctorCommand(tmpDir);
       output = log.mock.calls.map((call) => call.join(' ')).join('\n');
@@ -92,7 +92,7 @@ describe('doctor command', () => {
     await installManagedCometSkills(fakeHome);
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    let output = '';
+    let output: string;
     try {
       await doctorCommand(tmpDir, { homeDir: fakeHome });
       output = log.mock.calls.map((call) => call.join(' ')).join('\n');
@@ -123,7 +123,7 @@ describe('doctor command', () => {
     );
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    let output = '';
+    let output: string;
     try {
       await doctorCommand(tmpDir);
       output = log.mock.calls.map((call) => call.join(' ')).join('\n');
@@ -145,9 +145,9 @@ describe('doctor command', () => {
     await fs.writeFile(path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'), '# comet\n');
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    let output = '';
+    let output: string;
     try {
-      await doctorCommand(tmpDir, { scope: 'project' });
+      await doctorCommand(tmpDir);
       output = log.mock.calls.map((call) => call.join(' ')).join('\n');
     } finally {
       log.mockRestore();
@@ -158,6 +158,65 @@ describe('doctor command', () => {
     expect(output).not.toContain('missing 31:');
   });
 
+  it('reports an explicitly scoped canonical global Codex install without a detection path', async () => {
+    const fakeHome = path.join(tmpDir, 'canonical-global-home');
+    await installManagedCometSkills(fakeHome, '.agents');
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await doctorCommand(tmpDir, { scope: 'global', homeDir: fakeHome });
+      const output = log.mock.calls.map((call) => call.join(' ')).join('\n');
+      expect(output).toContain('skills: Codex (global): complete');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('reports legacy-only Codex skills as requiring update and canonical Codex skills as healthy', async () => {
+    const manifest = JSON.parse(
+      await fs.readFile(path.resolve('assets', 'manifest.json'), 'utf8'),
+    ) as { skills: string[]; internalSkills?: string[] };
+    const managedPaths = [...new Set([...manifest.skills, ...(manifest.internalSkills ?? [])])];
+    for (const relPath of managedPaths) {
+      const target = path.join(tmpDir, '.codex', 'skills', ...relPath.split('/'));
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, `${relPath}\n`);
+    }
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await doctorCommand(tmpDir);
+      const legacyOutput = log.mock.calls.map((call) => call.join(' ')).join('\n');
+      expect(legacyOutput).toContain('skills: Codex (project): legacy');
+      expect(legacyOutput).toContain('run: comet update --scope project');
+
+      await fs.mkdir(path.join(tmpDir, '.agents'), { recursive: true });
+      await fs.rename(
+        path.join(tmpDir, '.codex', 'skills'),
+        path.join(tmpDir, '.agents', 'skills'),
+      );
+      log.mockClear();
+      await doctorCommand(tmpDir, { scope: 'project' });
+      const canonicalOutput = log.mock.calls.map((call) => call.join(' ')).join('\n');
+      expect(canonicalOutput).toContain('skills: Codex (project): complete');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('does not report Codex healthy from shared canonical Skills without Codex detection paths', async () => {
+    await installManagedCometSkills(tmpDir, '.agents');
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await doctorCommand(tmpDir);
+      const output = log.mock.calls.map((call) => call.join(' ')).join('\n');
+      expect(output).not.toContain('skills: Codex (project)');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('uses the shared schema and leaves invalid state untouched', async () => {
     const invalidChangeDir = path.join(tmpDir, 'openspec', 'changes', 'top-level-invalid');
     state(tmpDir, 'init', 'top-level-invalid', 'full');
@@ -165,7 +224,7 @@ describe('doctor command', () => {
     const before = await fs.readFile(path.join(invalidChangeDir, '.comet.yaml'), 'utf8');
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    let json = '';
+    let json: string;
     try {
       await doctorCommand(tmpDir, { json: true });
       json = log.mock.calls.map((call) => call.join(' ')).join('\n');
@@ -192,7 +251,7 @@ describe('doctor command', () => {
     state(tmpDir, 'init', 'demo', 'full');
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    let json = '';
+    let json: string;
     try {
       await doctorCommand(tmpDir, { json: true });
       json = log.mock.calls.map((call) => call.join(' ')).join('\n');
@@ -212,7 +271,7 @@ describe('doctor command', () => {
     state(tmpDir, 'init', 'demo', 'full');
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    let output = '';
+    let output: string;
     try {
       await doctorCommand(tmpDir);
       output = log.mock.calls.map((call) => call.join(' ')).join('\n');
@@ -234,7 +293,7 @@ describe('doctor command', () => {
     await fs.appendFile(path.join(invalidChangeDir, '.comet.yaml'), 'unknown_root_field: true\n');
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    let output = '';
+    let output: string;
     try {
       await doctorCommand(tmpDir);
       output = log.mock.calls.map((call) => call.join(' ')).join('\n');

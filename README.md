@@ -14,6 +14,7 @@
   <a href="https://www.npmjs.com/package/@rpamis/comet"><img alt="npm version" src="https://img.shields.io/npm/v/@rpamis/comet?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/@rpamis/comet"><img alt="npm download count" src="https://img.shields.io/npm/dm/@rpamis/comet?style=flat-square&label=Downloads/mo" /></a>
   <a href="https://www.npmjs.com/package/@rpamis/comet"><img alt="npm weekly download count" src="https://img.shields.io/npm/dw/@rpamis/comet?style=flat-square&label=Downloads/wk" /></a>
+  <a href="https://docs.comet.rpamis.com/"><img alt="Comet Docs" src="https://img.shields.io/badge/Docs-docs.comet.rpamis.com-FFD700?style=flat-square" /></a>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" /></a>
 </p>
 
@@ -207,6 +208,15 @@ and diagnostic recovery hints when a change is malformed or missing required evi
 | Option   | Description                                                               |
 | -------- | ------------------------------------------------------------------------- |
 | `--json` | Output active changes with `nextCommand`, `currentStep`, and runtime data |
+
+</details>
+
+<details>
+<summary><code>comet resume-probe [path]</code> — Decide whether an active Comet workflow should resume</summary>
+
+Read-only probe for active changes, `.comet.yaml`, current phase, and the user request. It returns `auto_resume`,
+`ask_user`, `out_of_scope`, or `none`. `comet init/update` merges a `<comet-ambient-resume>` managed block into
+`AGENTS.md` and `CLAUDE.md` while preserving user-authored rules.
 
 </details>
 

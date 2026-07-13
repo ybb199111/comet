@@ -4,6 +4,7 @@ import { classicGuardCommand } from './classic-guard.js';
 import { classicHandoffCommand } from './classic-handoff.js';
 import { classicHookGuardCommand } from './classic-hook-guard.js';
 import { classicIntentCommand } from './classic-intent-command.js';
+import { classicResumeProbeCommand } from './classic-resume-probe-command.js';
 import { classicStateCommand } from './classic-state-command.js';
 import { classicValidateCommand } from './classic-validate-command.js';
 
@@ -32,6 +33,7 @@ export const CLASSIC_COMMANDS = [
   'archive',
   'hook-guard',
   'intent',
+  'resume-probe',
 ] as const;
 
 export type ClassicCommandName = (typeof CLASSIC_COMMANDS)[number];
@@ -44,6 +46,7 @@ const DEFAULT_HANDLERS: ClassicCommandHandlers = {
   archive: classicArchiveCommand,
   'hook-guard': classicHookGuardCommand,
   intent: classicIntentCommand,
+  'resume-probe': classicResumeProbeCommand,
 };
 
 function isClassicCommand(value: string): value is ClassicCommandName {

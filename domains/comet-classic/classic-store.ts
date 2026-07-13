@@ -99,7 +99,15 @@ async function readDocument(file: string): Promise<Document> {
   return document;
 }
 
-export async function readClassicState(changeDir: string): Promise<ClassicStateProjection> {
+export interface ReadClassicStateOptions {
+  migrate?: boolean;
+}
+
+export async function readClassicState(
+  changeDir: string,
+  options: ReadClassicStateOptions = {},
+): Promise<ClassicStateProjection> {
+  const shouldMigrate = options.migrate !== false;
   const file = path.join(changeDir, '.comet.yaml');
   const document = await readDocument(file);
   let doc = documentRecord(document);
@@ -113,14 +121,14 @@ export async function readClassicState(changeDir: string): Promise<ClassicStateP
     // Legacy format: Run fields embedded in .comet.yaml — migrate
     const { runStateFromDocument } = await import('../../domains/engine/state.js');
     run = runStateFromDocument(doc);
-    if (run) {
+    if (run && shouldMigrate) {
       await writeRunState(changeDir, run);
       stripLegacyRunFields(document);
       migrated = true;
     }
   }
 
-  if (migrated) {
+  if (migrated && shouldMigrate) {
     const temporary = path.join(changeDir, `.comet.yaml.${randomUUID()}.tmp`);
     await fs.writeFile(temporary, document.toString(), 'utf8');
     await fs.rename(temporary, file);

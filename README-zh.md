@@ -14,6 +14,7 @@
   <a href="https://www.npmjs.com/package/@rpamis/comet"><img alt="npm version" src="https://img.shields.io/npm/v/@rpamis/comet?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/@rpamis/comet"><img alt="npm download count" src="https://img.shields.io/npm/dm/@rpamis/comet?style=flat-square&label=Downloads/mo" /></a>
   <a href="https://www.npmjs.com/package/@rpamis/comet"><img alt="npm weekly download count" src="https://img.shields.io/npm/dw/@rpamis/comet?style=flat-square&label=Downloads/wk" /></a>
+  <a href="https://docs.comet.rpamis.com/"><img alt="Comet Docs" src="https://img.shields.io/badge/Docs-docs.comet.rpamis.com-FFD700?style=flat-square" /></a>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" /></a>
 </p>
 
@@ -182,6 +183,14 @@ Comet Eval的自动化双Agent架构能够在线上与LangSmith/LangFuse环境�
 | 选项     | 描述                                                           |
 | -------- | -------------------------------------------------------------- |
 | `--json` | 输出活跃更改，并包含 `nextCommand`、`currentStep` 和运行时数据 |
+
+</details>
+
+<details>
+<summary><code>comet resume-probe [path]</code> — 判断是否应恢复活跃 Comet workflow</summary>
+
+只读检查 active change、`.comet.yaml`、当前 phase 和用户请求，输出 `auto_resume`、`ask_user`、`out_of_scope` 或 `none`。
+`comet init/update` 会把 `<comet-ambient-resume>` managed block 合并进 `AGENTS.md` 和 `CLAUDE.md`，保留用户已有规则。
 
 </details>
 

@@ -5,10 +5,15 @@ import { fileURLToPath } from 'url';
 import { parseDocument } from 'yaml';
 
 import { fileExists, readJson, copyFile, ensureDir } from '../../platform/fs/file-system.js';
-import { getPlatformSkillsDir, type Platform } from '../../platform/install/platforms.js';
+import {
+  getPlatformConfigDir,
+  getPlatformSkillsDir,
+  type Platform,
+} from '../../platform/install/platforms.js';
 import type { InstallScope, InstallMode } from '../../platform/install/types.js';
 import { formatSupportedArtifactLanguages, resolveArtifactLanguage } from './languages.js';
 import type { LanguageConfig, SkillLanguageId } from './languages.js';
+import { installCometProjectInstructions } from './project-instructions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -70,6 +75,33 @@ function getManagedSkillReplacementPaths(manifest: Manifest): Set<string> {
   }
 
   return allowed;
+}
+
+function getManagedSkillTopLevelEntries(manifest: Manifest): string[] {
+  const entries = new Set<string>();
+
+  for (const skillPath of getManagedSkillPaths(manifest)) {
+    const [topLevel] = skillPath.split('/').filter(Boolean);
+    if (topLevel) entries.add(topLevel);
+  }
+
+  return [...entries].sort();
+}
+
+function getManagedEntriesForTopLevel(
+  managedEntries: Set<string>,
+  topLevelEntry: string,
+): Set<string> {
+  const scopedEntries = new Set<string>();
+  const prefix = `${topLevelEntry}/`;
+
+  for (const entry of managedEntries) {
+    if (entry.startsWith(prefix)) {
+      scopedEntries.add(entry.slice(prefix.length));
+    }
+  }
+
+  return scopedEntries;
 }
 
 async function collectDirectoryEntryPaths(root: string, current = root): Promise<string[]> {
@@ -173,10 +205,50 @@ async function createSymlink(
   await symlink(target, linkPath, type);
 }
 
+async function lstatOrNull(filePath: string): Promise<Awaited<ReturnType<typeof lstat>> | null> {
+  try {
+    return await lstat(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+async function createSkillsSymlinks(
+  targetRoot: string,
+  linkRoot: string,
+  managedEntries: Set<string>,
+  topLevelEntries: string[],
+): Promise<number> {
+  const rootStat = await lstatOrNull(linkRoot);
+  if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    await createSymlink(targetRoot, linkRoot, managedEntries);
+    return 0;
+  }
+
+  let failed = 0;
+  for (const topLevelEntry of topLevelEntries) {
+    const targetEntry = path.join(targetRoot, topLevelEntry);
+    const linkEntry = path.join(linkRoot, topLevelEntry);
+    const managedEntryScope = getManagedEntriesForTopLevel(managedEntries, topLevelEntry);
+
+    try {
+      await createSymlink(targetEntry, linkEntry, managedEntryScope);
+    } catch (err) {
+      failed++;
+      console.error(
+        `    Failed to create symlink ${linkEntry} -> ${targetEntry}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  return failed;
+}
+
 /**
  * Install skills using symlink mode:
  * 1. Copy skills to central store (.comet/skills/)
- * 2. Create symlink from platform dir to central store
+ * 2. Create symlinks from the platform skills dir to central store
  */
 async function installSkillsAsSymlink(
   baseDir: string,
@@ -198,6 +270,7 @@ async function installSkillsAsSymlink(
     throw new Error(`Invalid manifest at ${manifestPath}: "skills" must be an array`);
   }
   const managedSkillReplacementPaths = getManagedSkillReplacementPaths(manifest);
+  const managedSkillTopLevelEntries = getManagedSkillTopLevelEntries(manifest);
 
   // Step 1: Copy skills to central store
   let copied = 0;
@@ -226,12 +299,17 @@ async function installSkillsAsSymlink(
     }
   }
 
-  // Step 2: Create symlink from platform dir to central store
+  // Step 2: Create symlinks from platform dir to central store
   const platformSkillsDir = path.join(baseDir, getPlatformSkillsDir(platform, scope), 'skills');
   const centralSkillsDir = path.join(centralDir, 'skills');
 
   try {
-    await createSymlink(centralSkillsDir, platformSkillsDir, managedSkillReplacementPaths);
+    failedCount += await createSkillsSymlinks(
+      centralSkillsDir,
+      platformSkillsDir,
+      managedSkillReplacementPaths,
+      managedSkillTopLevelEntries,
+    );
   } catch (err) {
     failedCount++;
     console.error(
@@ -645,6 +723,7 @@ ${content}`;
  *   'claude-code' — settings.local.json with PreToolUse array (Claude Code, Codex, Amazon Q)
  *   'qwen' — settings.json with PreToolUse/hooks array (Qwen Code)
  *   'qoder' — settings.json with PreToolUse/hooks array (Qoder)
+ *   'codebuddy' — settings.json with PreToolUse/hooks array (CodeBuddy Code)
  *   'gemini' — settings.json with hooks.BeforeTool array (Gemini CLI)
  *   'windsurf' — hooks.json with pre_write_code array
  *   'copilot' — hooks/*.json with preToolUse
@@ -667,23 +746,30 @@ async function installCometHooksForPlatform(
 
   const hookFormat = platform.hookFormat;
   const skillsDir = getPlatformSkillsDir(platform, scope);
-  const platformBase = path.join(baseDir, skillsDir);
+  const platformBase = path.join(baseDir, getPlatformConfigDir(platform, scope));
 
   try {
     switch (hookFormat) {
       case 'claude-code':
-        return installClaudeCodeHooks(baseDir, platformBase, skillsDir, hooksConfig);
+        return await installClaudeCodeHooks(baseDir, platformBase, skillsDir, hooksConfig);
       case 'qwen':
       case 'qoder':
-        return installQwenStyleHooks(baseDir, platformBase, skillsDir, hooksConfig, hookFormat);
+      case 'codebuddy':
+        return await installQwenStyleHooks(
+          baseDir,
+          platformBase,
+          skillsDir,
+          hooksConfig,
+          hookFormat,
+        );
       case 'gemini':
-        return installGeminiHooks(baseDir, platformBase, skillsDir, hooksConfig);
+        return await installGeminiHooks(baseDir, platformBase, skillsDir, hooksConfig);
       case 'windsurf':
-        return installWindsurfHooks(baseDir, platformBase, skillsDir, hooksConfig);
+        return await installWindsurfHooks(baseDir, platformBase, skillsDir, hooksConfig);
       case 'copilot':
-        return installCopilotHooks(baseDir, platformBase, skillsDir, hooksConfig);
+        return await installCopilotHooks(baseDir, platformBase, skillsDir, hooksConfig);
       case 'kiro':
-        return installKiroHooks(baseDir, platformBase, skillsDir, hooksConfig);
+        return await installKiroHooks(baseDir, platformBase, skillsDir, hooksConfig);
       default:
         return { installed: false, reason: `unsupported hook format: ${hookFormat}` };
     }
@@ -760,6 +846,28 @@ function asHookGroup(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? (value as Array<Record<string, unknown>>) : [];
 }
 
+async function readSettingsJsonObject(
+  settingsPath: string,
+  hookFormat: string,
+): Promise<Record<string, unknown>> {
+  if (!(await fileExists(settingsPath))) return {};
+
+  try {
+    const parsed = JSON.parse(await readFile(settingsPath, 'utf-8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('expected a JSON object');
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(
+      `Invalid ${hookFormat} settings at ${settingsPath}: ${(error as Error).message}`,
+      {
+        cause: error,
+      },
+    );
+  }
+}
+
 /**
  * Claude Code, Codex, Amazon Q format:
  * Writes to settings.local.json with { hooks: { PreToolUse: [...] } }
@@ -812,7 +920,7 @@ async function installClaudeCodeHooks(
 }
 
 /**
- * Qwen Code / Qoder format:
+ * Qwen Code / Qoder / CodeBuddy format:
  * Writes to settings.json with { hooks: { PreToolUse: [{ matcher, hooks: [{ type, command }] }] } }
  */
 async function installQwenStyleHooks(
@@ -820,7 +928,7 @@ async function installQwenStyleHooks(
   platformBase: string,
   skillsDir: string,
   hooksConfig: Record<string, HookConfig>,
-  _hookFormat: string,
+  hookFormat: string,
 ): Promise<{ installed: boolean; reason?: string }> {
   const settingsPath = path.join(platformBase, 'settings.json');
 
@@ -845,14 +953,7 @@ async function installQwenStyleHooks(
     hooks,
   }));
 
-  let settings: Record<string, unknown> = {};
-  if (await fileExists(settingsPath)) {
-    try {
-      settings = JSON.parse(await readFile(settingsPath, 'utf-8')) as Record<string, unknown>;
-    } catch {
-      settings = {};
-    }
-  }
+  const settings = await readSettingsJsonObject(settingsPath, hookFormat);
 
   const existingHooks = (settings.hooks as Record<string, unknown>) ?? {};
   const existingPreToolUse = asHookGroup(existingHooks.PreToolUse);
@@ -1065,13 +1166,23 @@ function parseProjectConfigOverrides(content: string): Record<string, string> {
   return out;
 }
 
-function renderProjectConfig(existing: Record<string, string>, language: string = 'en'): string {
+// `language` is null when the caller has no definitive language selection to assert (e.g.
+// multiple platforms in the same scope disagree and no --language flag was given) — in that
+// case the existing config's language is preserved, falling back to 'en' only when absent.
+// A non-null language always overwrites the managed `language` field: init/update pass it
+// specifically to persist the language the user just selected/installed.
+function renderProjectConfig(
+  existing: Record<string, string>,
+  language: string | null = null,
+): string {
+  const resolvedLanguage = language ?? existing.language ?? 'en';
   const lines: string[] = [];
-  const fields = getManagedConfigFields(language);
+  const fields = getManagedConfigFields(resolvedLanguage);
   const managed: Set<string> = new Set(fields.map((f) => f.key));
   for (const f of fields) {
     lines.push(f.comment);
-    lines.push(`${f.key}: ${existing[f.key] ?? f.def}`);
+    const value = f.key === 'language' ? resolvedLanguage : (existing[f.key] ?? f.def);
+    lines.push(`${f.key}: ${value}`);
   }
   for (const [k, v] of Object.entries(existing)) {
     if (!managed.has(k)) lines.push(`${k}: ${v}`);
@@ -1080,7 +1191,10 @@ function renderProjectConfig(existing: Record<string, string>, language: string 
   return lines.join('\n');
 }
 
-async function mergeProjectConfig(projectPath: string, language: string = 'en'): Promise<void> {
+async function mergeProjectConfig(
+  projectPath: string,
+  language: string | null = null,
+): Promise<void> {
   const configPath = path.join(projectPath, '.comet', 'config.yaml');
   let existing: Record<string, string> = {};
   if (await fileExists(configPath)) {
@@ -1102,6 +1216,7 @@ async function createWorkingDirs(projectPath: string, language: string = 'en'): 
   }
 
   await mergeProjectConfig(projectPath, language);
+  await installCometProjectInstructions(projectPath, language === 'zh-CN' ? 'zh' : 'en');
 }
 
 export {

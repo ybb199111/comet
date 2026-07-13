@@ -2,6 +2,36 @@
 
 All notable changes to @rpamis/comet will be documented in this file.
 
+## What's Changed [0.4.0-beta.4] - 2026-07-11
+
+### Added
+
+- **Ambient resume**: Adds a low-noise Comet resume probe and managed project instruction block so agents can recover active workflows when the user resumes work without explicitly invoking `/comet`.
+- **Project installation registry**: Added a user-level registry for project-scope Comet installs so interactive update and uninstall can operate across all indexed projects from one command while JSON and scripted calls remain current-project by default.
+- **Stable Classic commands**: Added top-level `comet state`, `comet guard`, `comet handoff`, and `comet archive` commands so agents no longer depend on internal installed script paths ([#186](https://github.com/rpamis/comet/issues/186)).
+- **Custom project build evidence**: Projects without an inferred npm, Maven, or Cargo command can now record auditable build and verification results instead of relying on an undocumented skip path ([#192](https://github.com/rpamis/comet/issues/192)).
+
+### Changed
+
+- **CLI brand experience**: `comet init` now keeps a fixed-grid cyan-blue Comet logo centered over a gold tagline while the banner remains aligned with the rest of the CLI, and introduces it with a vivid 1.8-second comet approach, sweep, particle release, and tagline reveal in compatible interactive terminals. Automated, colorless, or narrow output receives a stable static banner. CLI and package metadata use the clearer "Agent Skill Harness For Turning Ideas Into Evaluated Workflows" tagline.
+- **Mixed change status**: `comet status` now distinguishes Comet-managed and plain OpenSpec changes and recommends the correct archive command for ready changes ([#187](https://github.com/rpamis/comet/issues/187)).
+
+### Fixed
+
+- **npm publish preflight**: Release security scanning now prunes literal and wildcard-excluded package paths before accessing the filesystem, so ignored Eval caches and temporary pytest directories cannot block Windows publishing with local permission errors.
+- **Parallel active change guards**: Classic source-write hooks now bind branch and worktree execution to the explicitly selected change, allow legal build work despite unrelated open/design/archive changes, and fail with an actionable selection prompt when multiple active changes are ambiguous ([#196](https://github.com/rpamis/comet/issues/196)).
+- **Codex CLI Skill discovery**: Codex project and global installs now place Comet Skills in the current `.agents/skills` discovery directory while keeping Codex-specific configuration under `.codex`; update and uninstall safely migrate managed legacy `.codex/skills` installs without removing unrelated Skills.
+- **Generated Eval manifests**: `comet eval` now resolves Factory `draftHash` placeholders into temporary version-bound manifests before collection, so `/comet-any` output can be evaluated immediately without modifying generated Bundle files ([#183](https://github.com/rpamis/comet/issues/183)).
+- **Eval Harness**: npm-installed `comet eval` now locates the version-matched bundled harness by default and reports a missing harness separately from a missing `uv` executable.
+- **Indexed project updates**: `comet update --all-projects` now reports npm package update failures as failed project results and fails explicitly on unreadable project registries instead of treating them as successful or empty updates.
+- **Dashboard responsive workflow view**: `comet dashboard` now keeps the change workspace inside the viewport with the left navigation rail, preserves scroll position when opening artifact previews, and shows archived changes as complete instead of suggesting another verify step ([#170](https://github.com/rpamis/comet/issues/170)).
+- **Symlink installs with existing Skills**: `comet init` and `comet update --install-mode symlink` now preserve existing platform `skills/` directories and link Comet-managed Skills inside them, so local or third-party Skills no longer make Comet installation fail ([#171](https://github.com/rpamis/comet/issues/171)).
+- **OpenSpec CLI install scope**: `comet init` now installs or upgrades the OpenSpec CLI as a global tool even during project-scope setup, so choosing OpenSpec no longer creates a project `node_modules/` directory ([#175](https://github.com/rpamis/comet/issues/175)).
+- **Archived dashboard artifacts**: `comet dashboard` now resolves archived changes back to the project root before reading `docs/superpowers/` path pointers, so archived Superpowers plans, design docs, and verify reports remain visible ([#176](https://github.com/rpamis/comet/issues/176)).
+- **Archive confirmation enforcement**: `/comet-archive` now records the user's final approval in machine-owned Classic state and refuses mutating archive runs until that transition succeeds, preventing direct script invocation from bypassing the required confirmation.
+- **Archive annotations**: Classic archive annotations now preserve clean Markdown EOF formatting and remain idempotent, preventing `git diff --check` failures ([#185](https://github.com/rpamis/comet/issues/185)).
+- **Global artifact language**: Global `comet init` and `comet update` now persist the selected artifact language in `~/.comet/config.yaml`, and Classic workflows resolve project configuration before falling back to that global default, so globally installed Chinese Skills create and validate OpenSpec and Superpowers artifacts in `zh-CN` while still allowing per-project overrides ([#174](https://github.com/rpamis/comet/issues/174)).
+
 ## What's Changed [0.4.0-beta.3] - 2026-07-08
 
 ### Fixed

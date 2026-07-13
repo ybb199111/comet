@@ -5,6 +5,7 @@ import os from 'os';
 
 import { PLATFORMS, type Platform } from '../../platform/install/platforms.js';
 import {
+  removeLegacyCometSkillsForPlatform,
   removeCometSkillsForPlatform,
   removeCometRulesForPlatform,
   removeCometHooksForPlatform,
@@ -16,6 +17,10 @@ import {
   installCometHooksForPlatform,
 } from '../../domains/skill/platform-install.js';
 import { fileExists, removeFile, removeDir, isDirEmpty } from '../../platform/fs/file-system.js';
+import {
+  getProjectRegistryPath,
+  upsertProjectInstallation,
+} from '../../platform/install/project-registry.js';
 
 describe('uninstall', () => {
   let tmpDir: string;
@@ -31,6 +36,137 @@ describe('uninstall', () => {
   afterEach(async () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
+
+  it('removes only managed Codex skills from canonical and legacy roots', async () => {
+    const codexPlatform = PLATFORMS.find((platform) => platform.id === 'codex')!;
+    await copyCometSkillsForPlatform(tmpDir, codexPlatform, true, 'skills', 'project');
+    const legacyComet = path.join(tmpDir, '.codex', 'skills', 'comet');
+    await fs.mkdir(legacyComet, { recursive: true });
+    await fs.writeFile(path.join(legacyComet, 'SKILL.md'), '# Comet\n');
+    for (const root of ['.agents', '.codex']) {
+      const personal = path.join(tmpDir, root, 'skills', 'personal', 'SKILL.md');
+      await fs.mkdir(path.dirname(personal), { recursive: true });
+      await fs.writeFile(personal, '# Personal\n');
+    }
+
+    await removeCometSkillsForPlatform(tmpDir, codexPlatform, 'project');
+
+    await expect(fs.access(path.join(tmpDir, '.agents', 'skills', 'comet'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(fs.access(legacyComet)).rejects.toMatchObject({ code: 'ENOENT' });
+    for (const root of ['.agents', '.codex']) {
+      await expect(
+        fs.readFile(path.join(tmpDir, root, 'skills', 'personal', 'SKILL.md'), 'utf8'),
+      ).resolves.toBe('# Personal\n');
+    }
+  });
+
+  it.each(['canonical', 'external'] as const)(
+    'unlinks a legacy Codex managed Skill junction without modifying its %s target',
+    async (targetKind) => {
+      const codexPlatform = PLATFORMS.find((platform) => platform.id === 'codex')!;
+      const target =
+        targetKind === 'canonical'
+          ? path.join(tmpDir, '.agents', 'skills', 'comet')
+          : path.join(tmpDir, 'external', 'comet');
+      const legacyLink = path.join(tmpDir, '.codex', 'skills', 'comet');
+      await fs.mkdir(target, { recursive: true });
+      await fs.writeFile(path.join(target, 'SKILL.md'), '# Target Comet\n');
+      await fs.writeFile(path.join(target, 'keep.txt'), 'keep\n');
+      await fs.mkdir(path.dirname(legacyLink), { recursive: true });
+      await fs.symlink(target, legacyLink, process.platform === 'win32' ? 'junction' : 'dir');
+
+      await removeLegacyCometSkillsForPlatform(tmpDir, codexPlatform, 'project');
+
+      await expect(fs.lstat(legacyLink)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.readFile(path.join(target, 'SKILL.md'), 'utf8')).resolves.toBe(
+        '# Target Comet\n',
+      );
+      await expect(fs.readFile(path.join(target, 'keep.txt'), 'utf8')).resolves.toBe('keep\n');
+    },
+  );
+
+  it.each(['canonical', 'external'] as const)(
+    'unlinks a nested legacy Codex managed junction without modifying its %s target',
+    async (targetKind) => {
+      const codexPlatform = PLATFORMS.find((platform) => platform.id === 'codex')!;
+      const target =
+        targetKind === 'canonical'
+          ? path.join(tmpDir, '.agents', 'skills', 'comet', 'scripts')
+          : path.join(tmpDir, 'external', 'comet-scripts');
+      const legacyComet = path.join(tmpDir, '.codex', 'skills', 'comet');
+      const legacyLink = path.join(legacyComet, 'scripts');
+      await fs.mkdir(target, { recursive: true });
+      await fs.writeFile(path.join(target, 'comet-state.mjs'), 'target state\n');
+      await fs.writeFile(path.join(target, 'keep.txt'), 'keep\n');
+      await fs.mkdir(legacyComet, { recursive: true });
+      await fs.writeFile(path.join(legacyComet, 'SKILL.md'), '# Legacy Comet\n');
+      await fs.symlink(target, legacyLink, process.platform === 'win32' ? 'junction' : 'dir');
+
+      await removeLegacyCometSkillsForPlatform(tmpDir, codexPlatform, 'project');
+
+      await expect(fs.lstat(legacyLink)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fs.readFile(path.join(target, 'comet-state.mjs'), 'utf8')).resolves.toBe(
+        'target state\n',
+      );
+      await expect(fs.readFile(path.join(target, 'keep.txt'), 'utf8')).resolves.toBe('keep\n');
+    },
+  );
+
+  it.each(['.agents', '.codex'] as const)(
+    'refuses to clean a shared Codex skills-root junction at %s',
+    async (root) => {
+      const codexPlatform = PLATFORMS.find((platform) => platform.id === 'codex')!;
+      const target = path.join(tmpDir, 'external', root.slice(1), 'skills');
+      const targetComet = path.join(target, 'comet');
+      const personal = path.join(target, 'personal', 'SKILL.md');
+      const skillsLink = path.join(tmpDir, root, 'skills');
+      await fs.mkdir(targetComet, { recursive: true });
+      await fs.writeFile(path.join(targetComet, 'SKILL.md'), '# Target Comet\n');
+      await fs.writeFile(path.join(targetComet, 'keep.txt'), 'keep\n');
+      await fs.mkdir(path.dirname(personal), { recursive: true });
+      await fs.writeFile(personal, '# Personal\n');
+      await fs.mkdir(path.dirname(skillsLink), { recursive: true });
+      await fs.symlink(target, skillsLink, process.platform === 'win32' ? 'junction' : 'dir');
+
+      const result = await removeCometSkillsForPlatform(tmpDir, codexPlatform, 'project');
+
+      expect(result.failed).toBeGreaterThan(0);
+      await expect(fs.lstat(skillsLink)).resolves.toMatchObject({});
+      await expect(fs.readFile(path.join(targetComet, 'SKILL.md'), 'utf8')).resolves.toBe(
+        '# Target Comet\n',
+      );
+      await expect(fs.readFile(path.join(targetComet, 'keep.txt'), 'utf8')).resolves.toBe('keep\n');
+      await expect(fs.readFile(personal, 'utf8')).resolves.toBe('# Personal\n');
+    },
+  );
+
+  it.each(['.agents', '.codex'] as const)(
+    'refuses to clean a shared Codex platform-root junction at %s',
+    async (root) => {
+      const codexPlatform = PLATFORMS.find((platform) => platform.id === 'codex')!;
+      const target = path.join(tmpDir, 'external', `${root.slice(1)}-root`);
+      const comet = path.join(target, 'skills', 'comet', 'SKILL.md');
+      const personal = path.join(target, 'skills', 'personal', 'SKILL.md');
+      await fs.mkdir(path.dirname(comet), { recursive: true });
+      await fs.mkdir(path.dirname(personal), { recursive: true });
+      await fs.writeFile(comet, '# Comet\n');
+      await fs.writeFile(personal, '# Personal\n');
+      await fs.symlink(
+        target,
+        path.join(tmpDir, root),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+
+      const result = await removeCometSkillsForPlatform(tmpDir, codexPlatform, 'project');
+
+      expect(result.failed).toBeGreaterThan(0);
+      await expect(fs.lstat(path.join(tmpDir, root))).resolves.toMatchObject({});
+      await expect(fs.readFile(comet, 'utf8')).resolves.toBe('# Comet\n');
+      await expect(fs.readFile(personal, 'utf8')).resolves.toBe('# Personal\n');
+    },
+  );
 
   describe('file-system utilities', () => {
     describe('removeFile', () => {
@@ -241,6 +377,22 @@ describe('uninstall', () => {
   });
 
   describe('removeCometHooksForPlatform', () => {
+    it('removes Codex hooks from .codex without creating .agents settings', async () => {
+      const codexPlatform = PLATFORMS.find((platform) => platform.id === 'codex')!;
+      await installCometHooksForPlatform(tmpDir, codexPlatform, 'project');
+
+      const settingsPath = path.join(tmpDir, '.codex', 'settings.local.json');
+      await expect(fs.access(settingsPath)).resolves.toBeUndefined();
+      const result = await removeCometHooksForPlatform(tmpDir, codexPlatform, 'project');
+
+      expect(result.removed).toBeGreaterThan(0);
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+      expect(settings.hooks).toBeUndefined();
+      await expect(
+        fs.access(path.join(tmpDir, '.agents', 'settings.local.json')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
     it('removes Claude Code hooks while preserving non-Comet hooks', async () => {
       const claudePlatform: Platform = PLATFORMS.find((p) => p.id === 'claude')!;
 
@@ -280,6 +432,33 @@ describe('uninstall', () => {
       );
       expect(allCommands).toContain('bash my-custom-hook.sh');
       expect(allCommands.some((c: string) => c.includes('comet-hook-guard'))).toBe(false);
+    });
+
+    it('removes CodeBuddy hooks while preserving user settings and hooks', async () => {
+      const codebuddyPlatform: Platform = PLATFORMS.find((p) => p.id === 'codebuddy')!;
+      const settingsDir = path.join(tmpDir, '.codebuddy');
+      const settingsPath = path.join(settingsDir, 'settings.json');
+      const settings = {
+        enabledPlugins: { 'user-plugin@example': true },
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Write|Edit',
+              hooks: [{ type: 'command', command: 'node user-hook.mjs' }],
+            },
+          ],
+        },
+      };
+      await fs.mkdir(settingsDir, { recursive: true });
+      await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+
+      await installCometHooksForPlatform(tmpDir, codebuddyPlatform, 'project');
+      const result = await removeCometHooksForPlatform(tmpDir, codebuddyPlatform, 'project');
+
+      expect(result.removed).toBeGreaterThan(0);
+      const updated = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(updated.enabledPlugins).toEqual(settings.enabledPlugins);
+      expect(updated.hooks.PreToolUse).toEqual(settings.hooks.PreToolUse);
     });
 
     it('removes Copilot hook file', async () => {
@@ -458,6 +637,271 @@ describe('uninstallCommand interactive selection', () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
+  it('uninstalls an explicitly scoped canonical global Codex install without a detection path', async () => {
+    const fakeHome = path.join(tmpDir, 'fake-home');
+    const codexPlatform = PLATFORMS.find((platform) => platform.id === 'codex')!;
+    await copyCometSkillsForPlatform(fakeHome, codexPlatform, true, 'skills', 'global');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let jsonOutput: string;
+    try {
+      await uninstallCommand(tmpDir, { scope: 'global', force: true, json: true });
+      jsonOutput = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(JSON.parse(jsonOutput).targets).toEqual([
+      expect.objectContaining({ scope: 'global', platform: 'codex' }),
+    ]);
+    await expect(
+      fs.access(path.join(fakeHome, '.agents', 'skills', 'comet')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not auto-detect Codex from a shared canonical global Skill root', async () => {
+    const fakeHome = path.join(tmpDir, 'fake-home');
+    const codexPlatform = PLATFORMS.find((platform) => platform.id === 'codex')!;
+    await copyCometSkillsForPlatform(fakeHome, codexPlatform, true, 'skills', 'global');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await uninstallCommand(tmpDir, { force: true, json: true });
+    } finally {
+      log.mockRestore();
+    }
+
+    await expect(
+      fs.access(path.join(fakeHome, '.agents', 'skills', 'comet')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('uninstalls all indexed projects with --all-projects --force --json', async () => {
+    const fakeHome = path.join(tmpDir, 'fake-home-all-uninstall');
+    const projectA = path.join(tmpDir, 'project-a');
+    const projectB = path.join(tmpDir, 'project-b');
+    const claudePlatform = PLATFORMS.find((p) => p.id === 'claude')!;
+
+    for (const project of [projectA, projectB]) {
+      await copyCometSkillsForPlatform(project, claudePlatform, true, 'skills', 'project');
+      await upsertProjectInstallation(project, [{ platform: 'claude', language: 'en' }], 'init', {
+        homeDir: fakeHome,
+      });
+    }
+
+    homedirSpy.mockRestore();
+    homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let jsonOutput: string;
+    try {
+      await uninstallCommand(projectA, { allProjects: true, force: true, json: true });
+      jsonOutput = log.mock.calls.map((c) => c.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+
+    const result = JSON.parse(jsonOutput);
+    expect(result.mode).toBe('all-projects');
+    expect(
+      result.projects.every((project: { status: string }) => project.status === 'uninstalled'),
+    ).toBe(true);
+    await expect(
+      fs.access(path.join(projectA, '.claude', 'skills', 'comet')),
+    ).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(
+      fs.access(path.join(projectB, '.claude', 'skills', 'comet')),
+    ).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+
+    const registry = JSON.parse(await fs.readFile(getProjectRegistryPath(fakeHome), 'utf-8'));
+    expect(registry.projects).toEqual([]);
+  });
+
+  it.each([true, false])(
+    'reports canonical Codex cleanup refusal and preserves project state in %s output',
+    async (json) => {
+      const fakeHome = path.join(tmpDir, `failure-home-${json}`);
+      const sharedSkills = path.join(tmpDir, `failure-shared-skills-${json}`);
+      await fs.mkdir(path.join(sharedSkills, 'comet'), { recursive: true });
+      await fs.writeFile(path.join(sharedSkills, 'comet', 'SKILL.md'), '# Comet\n');
+      await fs.mkdir(path.join(tmpDir, '.agents'), { recursive: true });
+      await fs.symlink(
+        sharedSkills,
+        path.join(tmpDir, '.agents', 'skills'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+      await fs.mkdir(path.join(tmpDir, '.codex', 'rules'), { recursive: true });
+      await fs.writeFile(path.join(tmpDir, '.codex', 'rules', 'comet-phase-guard.md'), '# Rule\n');
+      await fs.writeFile(
+        path.join(tmpDir, 'AGENTS.md'),
+        '<comet-ambient-resume>keep</comet-ambient-resume>\n',
+      );
+      await fs.mkdir(path.join(tmpDir, '.comet'), { recursive: true });
+      await fs.writeFile(path.join(tmpDir, '.comet', 'state'), 'keep\n');
+      await upsertProjectInstallation(tmpDir, [{ platform: 'codex', language: 'en' }], 'init', {
+        homeDir: fakeHome,
+      });
+      homedirSpy.mockRestore();
+      homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      try {
+        await uninstallCommand(tmpDir, { force: true, json });
+        const output = log.mock.calls.map((call) => call.join(' ')).join('\n');
+        if (json) {
+          const result = JSON.parse(output);
+          expect(result.targets[0].skillsFailed).toBeGreaterThan(0);
+          expect(result.summary.totalFailures).toBeGreaterThan(0);
+        } else {
+          expect(output).toMatch(/incomplete|failed/iu);
+        }
+      } finally {
+        log.mockRestore();
+      }
+
+      await expect(
+        fs.access(path.join(tmpDir, '.codex', 'rules', 'comet-phase-guard.md')),
+      ).resolves.toBeUndefined();
+      await expect(fs.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf8')).resolves.toContain(
+        'comet-ambient-resume',
+      );
+      await expect(fs.readFile(path.join(tmpDir, '.comet', 'state'), 'utf8')).resolves.toBe(
+        'keep\n',
+      );
+      const registry = JSON.parse(await fs.readFile(getProjectRegistryPath(fakeHome), 'utf8'));
+      expect(registry.projects).toHaveLength(1);
+    },
+  );
+
+  it('stops follow-on cleanup when a legacy-only Codex root refuses removal', async () => {
+    const sharedSkills = path.join(tmpDir, 'legacy-only-shared-skills');
+    await fs.mkdir(path.join(sharedSkills, 'comet'), { recursive: true });
+    await fs.writeFile(path.join(sharedSkills, 'comet', 'SKILL.md'), '# Legacy Comet\n');
+    await fs.mkdir(path.join(tmpDir, '.codex', 'rules'), { recursive: true });
+    await fs.symlink(
+      sharedSkills,
+      path.join(tmpDir, '.codex', 'skills'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await fs.writeFile(
+      path.join(tmpDir, '.codex', 'rules', 'comet-phase-guard.md'),
+      '# Keep Rule\n',
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await uninstallCommand(tmpDir, { force: true, json: true });
+      const result = JSON.parse(log.mock.calls.map((call) => call.join(' ')).join('\n'));
+      expect(result.targets[0]).toMatchObject({ platform: 'codex', skillsFailed: 1 });
+      expect(result.summary.totalFailures).toBeGreaterThan(0);
+    } finally {
+      log.mockRestore();
+    }
+    await expect(
+      fs.readFile(path.join(tmpDir, '.codex', 'rules', 'comet-phase-guard.md'), 'utf8'),
+    ).resolves.toBe('# Keep Rule\n');
+    await expect(fs.lstat(path.join(tmpDir, '.codex', 'skills'))).resolves.toMatchObject({});
+  });
+
+  it('does not mark all-projects uninstall complete when canonical cleanup is refused', async () => {
+    const fakeHome = path.join(tmpDir, 'all-projects-failure-home');
+    const project = path.join(tmpDir, 'all-projects-failure-project');
+    const sharedSkills = path.join(tmpDir, 'all-projects-failure-skills');
+    await fs.mkdir(path.join(sharedSkills, 'comet'), { recursive: true });
+    await fs.writeFile(path.join(sharedSkills, 'comet', 'SKILL.md'), '# Comet\n');
+    await fs.mkdir(path.join(project, '.agents'), { recursive: true });
+    await fs.symlink(
+      sharedSkills,
+      path.join(project, '.agents', 'skills'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await fs.mkdir(path.join(project, '.codex'), { recursive: true });
+    await upsertProjectInstallation(project, [{ platform: 'codex', language: 'en' }], 'init', {
+      homeDir: fakeHome,
+    });
+    homedirSpy.mockRestore();
+    homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await uninstallCommand(project, { allProjects: true, force: true, json: true });
+      const result = JSON.parse(log.mock.calls.map((call) => call.join(' ')).join('\n'));
+      expect(result.projects[0].status).toBe('failed');
+      expect(result.projects[0].summary.totalFailures).toBeGreaterThan(0);
+    } finally {
+      log.mockRestore();
+    }
+    const registry = JSON.parse(await fs.readFile(getProjectRegistryPath(fakeHome), 'utf8'));
+    expect(registry.projects).toHaveLength(1);
+  });
+
+  it('rejects --all-projects with --scope global during uninstall', async () => {
+    await expect(
+      uninstallCommand(tmpDir, { allProjects: true, scope: 'global', json: true, force: true }),
+    ).rejects.toThrow('--all-projects cannot be combined with --scope global');
+  });
+
+  it('keeps JSON uninstall current-project by default when registry has projects', async () => {
+    const fakeHome = path.join(tmpDir, 'fake-home-current-uninstall');
+    const projectA = path.join(tmpDir, 'project-current-uninstall');
+    const projectB = path.join(tmpDir, 'project-other-uninstall');
+    const claudePlatform = PLATFORMS.find((p) => p.id === 'claude')!;
+
+    await copyCometSkillsForPlatform(projectA, claudePlatform, true, 'skills', 'project');
+    await copyCometSkillsForPlatform(projectB, claudePlatform, true, 'skills', 'project');
+    await upsertProjectInstallation(projectA, [{ platform: 'claude', language: 'en' }], 'init', {
+      homeDir: fakeHome,
+    });
+    await upsertProjectInstallation(projectB, [{ platform: 'claude', language: 'en' }], 'init', {
+      homeDir: fakeHome,
+    });
+
+    homedirSpy.mockRestore();
+    homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let jsonOutput: string;
+    try {
+      await uninstallCommand(projectA, { json: true, force: true });
+      jsonOutput = log.mock.calls.map((c) => c.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+
+    const result = JSON.parse(jsonOutput);
+    expect(result.mode).toBeUndefined();
+    expect(await fileExists(path.join(projectB, '.claude', 'skills', 'comet'))).toBe(true);
+  });
+
+  it('removes the current project from the registry after project-scope JSON uninstall', async () => {
+    const fakeHome = path.join(tmpDir, 'fake-home-current-uninstall-refresh');
+    const projectA = path.join(tmpDir, 'project-current-uninstall-refresh');
+    const projectB = path.join(tmpDir, 'project-other-uninstall-refresh');
+    const claudePlatform = PLATFORMS.find((p) => p.id === 'claude')!;
+
+    await copyCometSkillsForPlatform(projectA, claudePlatform, true, 'skills', 'project');
+    await copyCometSkillsForPlatform(projectB, claudePlatform, true, 'skills', 'project');
+    await upsertProjectInstallation(projectA, [{ platform: 'claude', language: 'en' }], 'init', {
+      homeDir: fakeHome,
+    });
+    await upsertProjectInstallation(projectB, [{ platform: 'claude', language: 'en' }], 'init', {
+      homeDir: fakeHome,
+    });
+
+    homedirSpy.mockRestore();
+    homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await uninstallCommand(projectA, { json: true, force: true });
+    } finally {
+      log.mockRestore();
+    }
+
+    const registry = JSON.parse(await fs.readFile(getProjectRegistryPath(fakeHome), 'utf-8')) as {
+      projects: Array<{ path: string }>;
+    };
+    expect(registry.projects.map((project) => project.path)).toEqual([path.resolve(projectB)]);
+    expect(await fileExists(path.join(projectB, '.claude', 'skills', 'comet'))).toBe(true);
+  });
+
   it('auto-selects single target and uninstalls on confirmation', async () => {
     const claudePlatform = PLATFORMS.find((p) => p.id === 'claude')!;
     await copyCometSkillsForPlatform(tmpDir, claudePlatform, true, 'skills', 'project');
@@ -498,9 +942,10 @@ describe('uninstallCommand interactive selection', () => {
   it('shows checkbox when multiple targets detected', async () => {
     const claudePlatform = PLATFORMS.find((p) => p.id === 'claude')!;
     await copyCometSkillsForPlatform(tmpDir, claudePlatform, true, 'skills', 'project');
-    // Create a second platform (codex) fixture
-    const codexDir = path.join(tmpDir, '.codex', 'skills', 'comet');
+    // Create a second current platform (Codex) fixture and its detection directory.
+    const codexDir = path.join(tmpDir, '.agents', 'skills', 'comet');
     await fs.mkdir(codexDir, { recursive: true });
+    await fs.mkdir(path.join(tmpDir, '.codex'), { recursive: true });
     await fs.writeFile(path.join(codexDir, 'SKILL.md'), '# Comet', 'utf-8');
 
     mockedCheckbox.mockResolvedValue(['claude:project'] as never);
@@ -546,6 +991,16 @@ describe('uninstallCommand interactive selection', () => {
   it('skips prompt with --json and uninstalls all', async () => {
     const claudePlatform = PLATFORMS.find((p) => p.id === 'claude')!;
     await copyCometSkillsForPlatform(tmpDir, claudePlatform, true, 'skills', 'project');
+    await fs.writeFile(
+      path.join(tmpDir, 'AGENTS.md'),
+      'before\n\n<comet-ambient-resume>\nbody\n</comet-ambient-resume>\nafter\n',
+      'utf-8',
+    );
+    await fs.writeFile(
+      path.join(tmpDir, 'CLAUDE.md'),
+      '# Claude\n\n<comet-ambient-resume>\nbody\n</comet-ambient-resume>\n',
+      'utf-8',
+    );
 
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     let jsonOutput;
@@ -561,6 +1016,7 @@ describe('uninstallCommand interactive selection', () => {
 
     const result = JSON.parse(jsonOutput);
     expect(result.summary.targetsProcessed).toBeGreaterThan(0);
+    expect(result.projectInstructionsRemoved).toBe(2);
   });
 
   it('prints message when no targets found', async () => {
@@ -575,6 +1031,30 @@ describe('uninstallCommand interactive selection', () => {
 
     expect(output).toContain('No Comet installations found');
     expect(mockedSelect).not.toHaveBeenCalled();
+  });
+
+  it('returns stable JSON summary when no targets are found', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let jsonOutput: string;
+    try {
+      await uninstallCommand(tmpDir, { json: true });
+      jsonOutput = log.mock.calls.map((c) => c.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+
+    const result = JSON.parse(jsonOutput);
+    expect(result).toMatchObject({
+      targets: [],
+      workingDirsRemoved: 0,
+      summary: {
+        targetsProcessed: 0,
+        totalSkillsRemoved: 0,
+        totalRulesRemoved: 0,
+        totalHooksRemoved: 0,
+      },
+      projectInstructionsRemoved: 0,
+    });
   });
 
   it('uninstalls antigravity2 global skills correctly without deleting other config files', async () => {
@@ -601,5 +1081,70 @@ describe('uninstallCommand interactive selection', () => {
     expect(await fileExists(skillsCometDir)).toBe(false);
     expect(await fileExists(manifestPath)).toBe(true);
     expect(JSON.parse(await fs.readFile(manifestPath, 'utf-8'))).toEqual({ user: 'settings' });
+  });
+
+  it('does not remove root managed project instructions with only global scope', async () => {
+    const fakeHome = path.join(tmpDir, 'fake-home');
+    await fs.mkdir(path.join(fakeHome, '.agents', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(fakeHome, '.agents', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n\nUse this skill.',
+      'utf-8',
+    );
+
+    const agentsOriginal =
+      'before\n\n<comet-ambient-resume>\nmanaged\n</comet-ambient-resume>\nafter\n';
+    const claudeOriginal = '# User\n\n<comet-ambient-resume>\nmanaged\n</comet-ambient-resume>\n';
+    await fs.writeFile(path.join(tmpDir, 'AGENTS.md'), agentsOriginal, 'utf-8');
+    await fs.writeFile(path.join(tmpDir, 'CLAUDE.md'), claudeOriginal, 'utf-8');
+
+    const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let jsonOutput: string;
+    try {
+      await uninstallCommand(tmpDir, { json: true, force: true, scope: 'global' });
+      jsonOutput = log.mock.calls.map((c) => c.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homedirSpy.mockRestore();
+    }
+
+    const result = JSON.parse(jsonOutput);
+    expect(result.projectInstructionsRemoved).toBe(0);
+
+    const agents = await fs.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf-8');
+    const claude = await fs.readFile(path.join(tmpDir, 'CLAUDE.md'), 'utf-8');
+    expect(agents).toBe(agentsOriginal);
+    expect(claude).toBe(claudeOriginal);
+  });
+
+  it('removes only managed project instruction blocks and keeps user-authored content', async () => {
+    const claudePlatform = PLATFORMS.find((p) => p.id === 'claude')!;
+    await copyCometSkillsForPlatform(tmpDir, claudePlatform, true, 'skills', 'project');
+    await fs.writeFile(
+      path.join(tmpDir, 'AGENTS.md'),
+      '# User\n\nKeep this.\n<comet-ambient-resume>\nmanaged\n</comet-ambient-resume>\n',
+      'utf-8',
+    );
+    await fs.writeFile(
+      path.join(tmpDir, 'CLAUDE.md'),
+      '# User\n\nAlso keep this.\n<comet-ambient-resume>\nmanaged\n</comet-ambient-resume>\n',
+      'utf-8',
+    );
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await uninstallCommand(tmpDir, { force: true });
+    } finally {
+      log.mockRestore();
+    }
+
+    const agents = await fs.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf-8');
+    const claude = await fs.readFile(path.join(tmpDir, 'CLAUDE.md'), 'utf-8');
+    expect(agents).toContain('Keep this.');
+    expect(agents).not.toContain('<comet-ambient-resume>');
+    expect(claude).toContain('Also keep this.');
+    expect(claude).not.toContain('<comet-ambient-resume>');
   });
 });

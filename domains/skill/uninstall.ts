@@ -1,5 +1,5 @@
 import path from 'path';
-import { readFile, writeFile } from 'fs/promises';
+import { lstat, readFile, writeFile } from 'fs/promises';
 
 import {
   fileExists,
@@ -8,7 +8,12 @@ import {
   removeDir,
   isDirEmpty,
 } from '../../platform/fs/file-system.js';
-import { getPlatformSkillsDir, type Platform } from '../../platform/install/platforms.js';
+import {
+  getPlatformConfigDir,
+  getPlatformSkillsDir,
+  getPlatformSkillsDirs,
+  type Platform,
+} from '../../platform/install/platforms.js';
 import type { InstallScope } from '../../platform/install/types.js';
 import {
   readManifest,
@@ -16,6 +21,7 @@ import {
   computeRuleDestPath,
   isManagedHookCommand,
 } from './platform-install.js';
+import { removeCometProjectInstructions } from './project-instructions.js';
 
 interface RemovalResult {
   removed: number;
@@ -23,6 +29,85 @@ interface RemovalResult {
 }
 
 const OPENCODE_STYLE_PLATFORM_IDS = new Set(['opencode', 'mimocode']);
+
+async function removeManagedSkillsFromDirs(
+  baseDir: string,
+  skillsDirs: string[],
+  managedSkills: string[],
+): Promise<RemovalResult> {
+  let removed = 0;
+  let failed = 0;
+  const parentDirs = new Set<string>();
+  for (const skillsDir of skillsDirs) {
+    const platformRoot = path.join(baseDir, skillsDir);
+    const skillsRoot = path.join(baseDir, skillsDir, 'skills');
+    let sharedBoundary = false;
+    for (const boundary of [platformRoot, skillsRoot]) {
+      try {
+        if ((await lstat(boundary)).isSymbolicLink()) {
+          failed++;
+          sharedBoundary = true;
+          break;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    if (sharedBoundary) continue;
+
+    for (const skillRelPath of managedSkills) {
+      const parts = skillRelPath.split('/');
+      let current = baseDir;
+      let linkedAncestor = false;
+      const ancestorParts = [
+        ...skillsDir.split(/[\\/]/u).filter(Boolean),
+        'skills',
+        ...parts.slice(0, -1),
+      ];
+      for (const part of ancestorParts) {
+        current = path.join(current, part);
+        try {
+          if ((await lstat(current)).isSymbolicLink()) {
+            if (await removeFile(current)) removed++;
+            linkedAncestor = true;
+            break;
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') break;
+          throw error;
+        }
+      }
+      if (linkedAncestor) continue;
+
+      if (await removeFile(path.join(skillsRoot, ...parts))) removed++;
+      current = skillsRoot;
+      for (const part of parts.slice(0, -1)) {
+        current = path.join(current, part);
+        parentDirs.add(current);
+      }
+    }
+  }
+
+  for (const dir of [...parentDirs].sort(
+    (left, right) => right.split(path.sep).length - left.split(path.sep).length,
+  )) {
+    if (await isDirEmpty(dir)) await removeDir(dir);
+  }
+  return { removed, failed };
+}
+
+export async function removeLegacyCometSkillsForPlatform(
+  baseDir: string,
+  platform: Platform,
+  scope: InstallScope = 'project',
+): Promise<RemovalResult> {
+  const canonicalDir = getPlatformSkillsDir(platform, scope);
+  const legacyDirs = getPlatformSkillsDirs(platform, scope).filter((dir) => dir !== canonicalDir);
+  if (legacyDirs.length === 0) return { removed: 0, failed: 0 };
+
+  const managedSkills = getManagedSkillPaths(await readManifest());
+  return removeManagedSkillsFromDirs(baseDir, legacyDirs, managedSkills);
+}
 
 async function removeCometSkillsForPlatform(
   baseDir: string,
@@ -32,23 +117,15 @@ async function removeCometSkillsForPlatform(
   const manifest = await readManifest();
   const managedSkills = getManagedSkillPaths(manifest);
   const skillsDir = getPlatformSkillsDir(platform, scope);
-  const skillsDirs = [skillsDir];
-  if (scope === 'global' && platform.id === 'pi') {
-    skillsDirs.push(platform.skillsDir);
-  }
-  const uniqueSkillsDirs = [...new Set(skillsDirs)];
-  let removed = 0;
-  const failed = 0;
-
-  for (const targetSkillsDir of uniqueSkillsDirs) {
-    for (const skillRelPath of managedSkills) {
-      const dest = path.join(baseDir, targetSkillsDir, 'skills', skillRelPath);
-      const result = await removeFile(dest);
-      if (result) {
-        removed++;
-      }
-    }
-  }
+  const uniqueSkillsDirs = [
+    ...new Set([
+      ...getPlatformSkillsDirs(platform, scope),
+      ...(scope === 'global' && platform.id === 'pi' ? [platform.skillsDir] : []),
+    ]),
+  ];
+  const skillsRemoval = await removeManagedSkillsFromDirs(baseDir, uniqueSkillsDirs, managedSkills);
+  let removed = skillsRemoval.removed;
+  const failed = skillsRemoval.failed;
 
   if (OPENCODE_STYLE_PLATFORM_IDS.has(platform.id)) {
     const commandsDir = path.join(baseDir, skillsDir, 'commands');
@@ -72,30 +149,6 @@ async function removeCometSkillsForPlatform(
     }
     if (await isDirEmpty(extensionsDir)) {
       await removeDir(extensionsDir);
-    }
-  }
-
-  const parentDirs = new Set<string>();
-  for (const targetSkillsDir of uniqueSkillsDirs) {
-    for (const skillRelPath of managedSkills) {
-      const parts = skillRelPath.split('/');
-      if (parts[0].startsWith('comet')) {
-        let current = path.join(baseDir, targetSkillsDir, 'skills', parts[0]);
-        parentDirs.add(current);
-        for (let i = 1; i < parts.length - 1; i++) {
-          current = path.join(current, parts[i]);
-          parentDirs.add(current);
-        }
-      }
-    }
-  }
-
-  const sortedDirs = [...parentDirs].sort(
-    (a, b) => b.split(path.sep).length - a.split(path.sep).length,
-  );
-  for (const dir of sortedDirs) {
-    if (await isDirEmpty(dir)) {
-      await removeDir(dir);
     }
   }
 
@@ -163,8 +216,7 @@ async function removeCometHooksForPlatform(
   }
 
   const hookFormat = platform.hookFormat;
-  const skillsDir = getPlatformSkillsDir(platform, scope);
-  const platformBase = path.join(baseDir, skillsDir);
+  const platformBase = path.join(baseDir, getPlatformConfigDir(platform, scope));
   const scriptRelPaths = Object.keys(hooksConfig);
 
   try {
@@ -173,6 +225,7 @@ async function removeCometHooksForPlatform(
         return removeClaudeCodeHooks(platformBase, scriptRelPaths);
       case 'qwen':
       case 'qoder':
+      case 'codebuddy':
         return removeQwenStyleHooks(platformBase, scriptRelPaths);
       case 'gemini':
         return removeGeminiHooks(platformBase, scriptRelPaths);
@@ -486,4 +539,5 @@ export {
   removeCometRulesForPlatform,
   removeCometHooksForPlatform,
   removeWorkingDirs,
+  removeCometProjectInstructions,
 };

@@ -311,7 +311,7 @@ function SearchIcon({ className }) {
 function Dashboard({ snapshot, visible, selected, selectedId, tab, onTab, onSelect, onPreview }) {
   const isEmpty = snapshot.changes.active.length + snapshot.changes.archived.length === 0;
   return (
-    <div className="mx-auto max-w-dashboard">
+    <div className="mx-auto min-w-0 max-w-dashboard">
       <SectionHead
         title="项目概览"
         hint={`生成于 ${formatTimestamp(snapshot.project.generatedAt)}`}
@@ -321,7 +321,7 @@ function Dashboard({ snapshot, visible, selected, selectedId, tab, onTab, onSele
       {isEmpty ? (
         <EmptyState />
       ) : (
-        <div className="grid items-start gap-5 xl:grid-cols-[320px_minmax(620px,940px)_320px]">
+        <div className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(260px,320px)_minmax(0,1fr)] 2xl:grid-cols-[minmax(260px,320px)_minmax(0,1fr)_minmax(260px,320px)]">
           <ChangesExplorer
             visible={visible}
             selectedId={selectedId}
@@ -709,6 +709,7 @@ function TaskProgress({ change }) {
   const total = change.tasks.total;
   const completed = change.tasks.completed;
   const remaining = Math.max(0, total - completed);
+  const archived = change.status === 'archived';
   const doneSections = change.tasks.sections.filter((s) => s.status === 'done').length;
   const totalSections = change.tasks.sections.length;
   const percent = total ? Math.round((completed / total) * 100) : 0;
@@ -720,8 +721,17 @@ function TaskProgress({ change }) {
   const circumference = 2 * Math.PI * 54;
   const dashOffset = circumference * (1 - animatedPercent / 100);
 
-  const nextPhase = change.phase === 'verify' ? '归档' : 'Verify';
   const isComplete = remaining === 0 && total > 0;
+  const hintTone =
+    archived || isComplete ? 'bg-ok-soft text-success' : 'bg-accent-softer text-fg-2';
+  const dotTone = archived || isComplete ? 'bg-success' : 'bg-accent';
+  const hintText = archived
+    ? '已归档完成，流程已结束'
+    : isComplete
+      ? `所有任务已完成，可以进入 ${change.phase === 'verify' ? '归档' : 'Verify'}`
+      : `剩余 ${animatedRemainingValue} 项未完成，完成后进入 ${
+          change.phase === 'verify' ? '归档' : 'Verify'
+        }`;
 
   return (
     <article className="rounded-xl border border-border-soft bg-bg px-5 py-4">
@@ -823,17 +833,9 @@ function TaskProgress({ change }) {
       )}
 
       {/* Next hint */}
-      <div
-        className={`mt-4 flex items-center gap-2 rounded-lg px-3 py-2 text-[11px] ${isComplete ? 'bg-ok-soft text-success' : 'bg-accent-softer text-fg-2'}`}
-      >
-        <span
-          className={`h-1.5 w-1.5 shrink-0 rounded-full ${isComplete ? 'bg-success' : 'bg-accent'}`}
-        />
-        <span>
-          {isComplete
-            ? `所有任务已完成，可以进入 ${nextPhase}`
-            : `剩余 ${animatedRemainingValue} 项未完成，完成后进入 ${nextPhase}`}
-        </span>
+      <div className={`mt-4 flex items-center gap-2 rounded-lg px-3 py-2 text-[11px] ${hintTone}`}>
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotTone}`} />
+        <span>{hintText}</span>
       </div>
     </article>
   );
@@ -841,7 +843,7 @@ function TaskProgress({ change }) {
 
 function SidePanel({ change, git, onPreview }) {
   return (
-    <aside className="min-h-[480px] space-y-4">
+    <aside className="min-h-[480px] space-y-4 xl:col-start-2 2xl:col-start-auto">
       {change.status === 'archived' ? (
         <ArchiveSummary change={change} />
       ) : (
@@ -973,11 +975,26 @@ function KeyValue({ k, v }) {
 function ArtifactDrawer({ artifact, onClose }) {
   useEffect(() => {
     if (!artifact) return;
+    const scrollY = window.scrollY;
+    const previousBodyStyle = {
+      position: document.body.style.position,
+      top: document.body.style.top,
+      left: document.body.style.left,
+      right: document.body.style.right,
+      width: document.body.style.width,
+    };
     document.body.style.position = 'fixed';
-    document.body.style.inset = '0';
+    document.body.style.top = `-${scrollY}px`;
+    document.body.style.left = '0';
+    document.body.style.right = '0';
+    document.body.style.width = '100%';
     return () => {
-      document.body.style.position = '';
-      document.body.style.inset = '';
+      document.body.style.position = previousBodyStyle.position;
+      document.body.style.top = previousBodyStyle.top;
+      document.body.style.left = previousBodyStyle.left;
+      document.body.style.right = previousBodyStyle.right;
+      document.body.style.width = previousBodyStyle.width;
+      window.scrollTo(0, scrollY);
     };
   }, [artifact]);
 

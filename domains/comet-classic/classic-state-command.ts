@@ -4,10 +4,15 @@ import { existsSync, promises as fs } from 'fs';
 import path from 'path';
 import { Document, parseDocument } from 'yaml';
 import type { ClassicCommandHandler, ClassicCommandResult } from './classic-cli.js';
+import {
+  clearCurrentChange,
+  resolveCurrentChange,
+  selectCurrentChange,
+} from './classic-current-change.js';
 import { collectClassicEvidence } from './classic-evidence.js';
 import { openSpecChangeNameError, resolveClassicChangeDirectory } from './classic-paths.js';
 import { resolveClassicStepId } from './classic-resolver.js';
-import { transitionClassicRuntimeRun } from './classic-runtime-run.js';
+import { transitionClassicRuntimeRun, validateClassicRuntimeRun } from './classic-runtime-run.js';
 import { appendClassicStateEvent } from './classic-state-events.js';
 import {
   CLASSIC_WIRE_KEYS,
@@ -23,6 +28,8 @@ import {
 } from './classic-transitions.js';
 import { readRunState } from '../../domains/engine/state.js';
 import { appendTrajectory, readTrajectory } from '../../domains/engine/run-store.js';
+import { recordCommandCheck, type CommandCheckScope } from './classic-command-checks.js';
+import { readClassicConfigValue } from './classic-project-config.js';
 
 const GREEN = '\u001b[32m';
 const RED = '\u001b[31m';
@@ -34,6 +41,7 @@ const ARTIFACT_LANGUAGES = ['en', 'zh-CN'] as const;
 const EVENTS = CLASSIC_TRANSITION_EVENTS;
 const MACHINE_OWNED_FIELDS = new Set<string>([
   ...RUN_WIRE_KEYS,
+  'archive_confirmation',
   'classic_profile',
   'classic_migration',
 ]);
@@ -55,6 +63,7 @@ const FIELD_ENUMS: Record<string, readonly string[]> = {
   auto_transition: ['true', 'false'],
   verify_result: ['pending', 'pass', 'fail'],
   branch_status: ['pending', 'handled'],
+  archive_confirmation: ['pending', 'confirmed'],
   archived: ['true', 'false'],
   direct_override: ['true', 'false'],
   classic_profile: PROFILES,
@@ -71,6 +80,7 @@ const CLASSIC_FIELD_WIRE_NAMES: Partial<Record<keyof ClassicState, string>> = {
   phase: 'phase',
   verificationReport: 'verification_report',
   verifiedAt: 'verified_at',
+  archiveConfirmation: 'archive_confirmation',
   verifyResult: 'verify_result',
   workflow: 'workflow',
 };
@@ -278,6 +288,12 @@ function sparseClassicState(record: Record<string, unknown>): ClassicState {
     branchStatus: enumRecordValue(record, 'branch_status', ['pending', 'handled'] as const, null),
     createdAt: nullableRecordString(record, 'created_at'),
     verifiedAt: nullableRecordString(record, 'verified_at'),
+    archiveConfirmation: enumRecordValue(
+      record,
+      'archive_confirmation',
+      ['pending', 'confirmed'] as const,
+      null,
+    ),
     archived: nullableRecordBoolean(record, 'archived') ?? false,
     directOverride: nullableRecordBoolean(record, 'direct_override'),
     handoffContext: nullableRecordString(record, 'handoff_context'),
@@ -291,18 +307,14 @@ function sparseClassicState(record: Record<string, unknown>): ClassicState {
 async function projectConfigValue(
   field: 'context_compression' | 'auto_transition' | 'review_mode' | 'language',
 ): Promise<string | null> {
-  const file = path.resolve('.comet', 'config.yaml');
-  if (!(await exists(file))) return null;
-  const document = await readDocument(file);
-  const value = document.get(field);
-  return value === null || value === undefined ? null : scalar(value);
+  return (await readClassicConfigValue(field))?.value ?? null;
 }
 
 async function projectLanguageDefault(): Promise<string> {
   if (process.env.COMET_LANGUAGE)
     return validateLanguage(process.env.COMET_LANGUAGE, 'COMET_LANGUAGE');
-  const value = await projectConfigValue('language');
-  if (value) return validateLanguage(value, '.comet/config.yaml');
+  const configured = await readClassicConfigValue('language');
+  if (configured) return validateLanguage(configured.value, configured.source);
   return 'en';
 }
 
@@ -399,7 +411,7 @@ async function setField(
   options: { internal?: boolean; machineOwned?: boolean } = {},
 ): Promise<void> {
   if (MACHINE_OWNED_FIELDS.has(field) && !options.machineOwned) {
-    fail(`ERROR: '${field}' is a machine-owned Run field and cannot be set directly`);
+    fail(`ERROR: '${field}' is a machine-owned field and cannot be set directly`);
   }
   if (!SETTABLE_FIELDS.has(field) && !MACHINE_OWNED_FIELDS.has(field)) {
     fail(`ERROR: Unknown field: '${field}'`);
@@ -490,6 +502,7 @@ async function init(output: CommandOutput, name: string, workflow: string): Prom
     branch_status: 'pending',
     created_at: new Date().toISOString().slice(0, 10),
     verified_at: null,
+    archive_confirmation: null,
     archived: false,
   });
   await atomicWrite(file, document.toString());
@@ -657,6 +670,14 @@ async function transition(output: CommandOutput, name: string, event: string): P
     }
   } else if (event === 'verify-fail') {
     await requirePhase(name, 'verify');
+  } else if (event === 'archive-confirm') {
+    await requirePhase(name, 'archive');
+    if ((await readField(name, 'verify_result')) !== 'pass') {
+      fail(`ERROR: Cannot transition '${name}': verify_result must be pass before archiving`);
+    }
+    if ((await readField(name, 'archived')) === 'true') {
+      fail(`ERROR: Cannot transition '${name}': already archived`);
+    }
   } else if (event === 'preset-escalate') {
     // preset (hotfix/tweak) → full: rewind phase to design so the agent can
     // supplement a Design Doc before continuing. Unlike verify-fail /
@@ -680,6 +701,11 @@ async function transition(output: CommandOutput, name: string, event: string): P
     await requirePhase(name, 'archive');
     if ((await readField(name, 'verify_result')) !== 'pass') {
       fail(`ERROR: Cannot transition '${name}': verify_result must be pass before archiving`);
+    }
+    if ((await readField(name, 'archive_confirmation')) !== 'confirmed') {
+      fail(
+        `ERROR: Cannot transition '${name}': archive_confirmation must be confirmed before archiving`,
+      );
     }
   }
   await applyTransitionEvent(output, name, event as ClassicTransitionEvent);
@@ -1033,12 +1059,16 @@ async function recoverVerify(output: CommandOutput, name: string): Promise<void>
 }
 
 async function recoverArchive(output: CommandOutput, name: string): Promise<void> {
+  const archiveConfirmation = await readField(name, 'archive_confirmation');
   output.stdout.push(
     '  Archive:',
     fieldStatus('verify_result', await readField(name, 'verify_result')),
+    fieldStatus('archive_confirmation', archiveConfirmation),
     fieldStatus('archived', await readField(name, 'archived')),
     '',
-    'Recovery action: Run /comet-archive to complete archiving.',
+    archiveConfirmation === 'confirmed'
+      ? 'Recovery action: Archive is confirmed. Run /comet-archive to complete archiving.'
+      : 'Recovery action: Ask for final archive confirmation in /comet-archive before running the archive command.',
   );
 }
 
@@ -1112,8 +1142,105 @@ async function scale(output: CommandOutput, name: string): Promise<void> {
   );
 }
 
+function parseRecordCheckOptions(args: string[]): {
+  command: string;
+  exitCode: number;
+  cwd?: string;
+} {
+  let command: string | undefined;
+  let exitCodeText: string | undefined;
+  let cwd: string | undefined;
+  for (let index = 0; index < args.length; index += 2) {
+    const option = args[index];
+    if (!['--command', '--exit-code', '--cwd'].includes(option)) {
+      fail(`ERROR: Unknown option: ${option}`);
+    }
+    const value = args[index + 1];
+    if (value === undefined) fail(`ERROR: Missing value for option: ${option}`);
+    if (option === '--command') command = value;
+    else if (option === '--exit-code') exitCodeText = value;
+    else cwd = value;
+  }
+  if (command === undefined) fail('ERROR: Missing option: --command');
+  if (exitCodeText === undefined) fail('ERROR: Missing option: --exit-code');
+  if (!/^-?\d+$/u.test(exitCodeText)) fail('ERROR: --exit-code must be an integer');
+  return { command, exitCode: Number(exitCodeText), ...(cwd === undefined ? {} : { cwd }) };
+}
+
+async function recordCheck(
+  output: CommandOutput,
+  name: string,
+  scopeText: string,
+  args: string[],
+): Promise<void> {
+  validateChangeName(name);
+  if (scopeText !== 'build' && scopeText !== 'verify') {
+    fail(`ERROR: Invalid command check scope: '${scopeText}'`);
+  }
+  const options = parseRecordCheckOptions(args);
+  const { label, directory, file } = await stateFile(name);
+  if (label !== `openspec/changes/${name}` || !(await exists(file))) {
+    fail(`ERROR: command checks require an active change: ${name}`);
+  }
+  try {
+    const projection = await readClassicState(directory, { migrate: false });
+    if (!projection.classic || !projection.run) {
+      throw new Error('command checks require an existing synchronized Classic Run');
+    }
+    const { run } = await validateClassicRuntimeRun(directory, projection);
+    const recorded = await recordCommandCheck(directory, run, {
+      scope: scopeText as CommandCheckScope,
+      ...options,
+    });
+    output.stderr.push(
+      green(
+        `[RECORDED] ${recorded.scope} exit=${recorded.exitCode} cwd=${recorded.cwd} command=${recorded.command}`,
+      ),
+    );
+  } catch (error) {
+    fail(`ERROR: ${(error as Error).message}`);
+  }
+}
+
 function required(args: string[], count: number, usage: string): void {
   if (args.length < count) fail(usage);
+}
+
+function requiredExact(args: string[], count: number, usage: string): void {
+  if (args.length !== count) fail(usage);
+}
+
+async function selectChange(output: CommandOutput, name: string): Promise<void> {
+  validateChangeName(name);
+  try {
+    const selection = await selectCurrentChange(process.cwd(), name);
+    output.stderr.push(
+      green(
+        `[SELECTED] current change: ${selection.change}${selection.branch ? ` (branch: ${selection.branch})` : ''}`,
+      ),
+    );
+  } catch (error) {
+    fail(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function currentChange(output: CommandOutput): Promise<void> {
+  const resolution = await resolveCurrentChange(process.cwd());
+  if (resolution.status === 'selected') {
+    output.stdout.push(resolution.selection.change);
+    return;
+  }
+  if (resolution.status === 'missing') {
+    fail('ERROR: no current change selected\nUse: comet-state.mjs select <change-name>');
+  }
+  fail(
+    `ERROR: current change selection is stale: ${resolution.reason}\nUse: comet-state.mjs select <change-name>`,
+  );
+}
+
+async function clearSelection(output: CommandOutput): Promise<void> {
+  await clearCurrentChange(process.cwd());
+  output.stderr.push(green('[CLEARED] current change selection'));
 }
 
 export const classicStateCommand: ClassicCommandHandler = async (args) => {
@@ -1141,9 +1268,25 @@ export const classicStateCommand: ClassicCommandHandler = async (args) => {
     } else if (subcommand === 'scale') {
       required(rest, 1, 'Usage: comet-state.mjs scale <change-name>');
       await scale(output, rest[0]);
+    } else if (subcommand === 'record-check') {
+      required(
+        rest,
+        2,
+        'Usage: comet state record-check <change> <build|verify> --command <text> --exit-code <int> [--cwd <path>]',
+      );
+      await recordCheck(output, rest[0], rest[1], rest.slice(2));
     } else if (subcommand === 'task-checkoff') {
       required(rest, 2, 'Usage: comet-state.mjs task-checkoff <file> <task-text>');
       await taskCheckoff(output, rest[0], rest[1]);
+    } else if (subcommand === 'select') {
+      requiredExact(rest, 1, 'Usage: comet-state.mjs select <change-name>');
+      await selectChange(output, rest[0]);
+    } else if (subcommand === 'current') {
+      requiredExact(rest, 0, 'Usage: comet-state.mjs current');
+      await currentChange(output);
+    } else if (subcommand === 'clear-selection') {
+      requiredExact(rest, 0, 'Usage: comet-state.mjs clear-selection');
+      await clearSelection(output);
     } else if (subcommand === 'next') {
       required(rest, 1, 'Usage: comet-state.mjs next <change-name>');
       await next(output, rest[0]);

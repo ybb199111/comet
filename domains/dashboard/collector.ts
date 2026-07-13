@@ -156,8 +156,7 @@ async function buildChangeItem(input: BuildChangeInput): Promise<ChangeDashboard
 
   const yaml: CometYaml = (await readCometYaml(yamlPath)) ?? {};
 
-  // Resolve project root: openspec/changes/<name> → project root (3 levels up)
-  const projectRoot = path.resolve(input.dir, '..', '..', '..');
+  const projectRoot = resolveProjectRoot(input.dir);
 
   // Read yaml path-pointers for Superpowers artifacts
   const yamlPlanPath = stripNullish(yaml.plan);
@@ -401,6 +400,15 @@ function stripNullish(raw: string | undefined): string | undefined {
   const value = raw.trim();
   if (!value || value === 'null') return undefined;
   return value;
+}
+
+function resolveProjectRoot(changeDir: string): string {
+  let cursor = path.resolve(changeDir);
+  while (path.dirname(cursor) !== cursor) {
+    if (path.basename(cursor) === 'openspec') return path.dirname(cursor);
+    cursor = path.dirname(cursor);
+  }
+  throw new Error(`Dashboard change is not inside an openspec directory: ${changeDir}`);
 }
 
 async function findDeltaSpec(changeDir: string): Promise<string | undefined> {

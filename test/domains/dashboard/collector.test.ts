@@ -146,6 +146,74 @@ describe('collectDashboardSnapshot', () => {
     expect(archived.verify.reportExists).toBe(true);
   });
 
+  it('resolves archived Superpowers artifacts from docs/superpowers path pointers', async () => {
+    const designDocPath = path.join(root, 'docs', 'superpowers', 'specs', 'demo-design.md');
+    const planPath = path.join(root, 'docs', 'superpowers', 'plans', 'demo-plan.md');
+    const verifyPath = path.join(root, 'docs', 'superpowers', 'reports', 'demo-verify.md');
+    await fs.mkdir(path.dirname(designDocPath), { recursive: true });
+    await fs.mkdir(path.dirname(planPath), { recursive: true });
+    await fs.mkdir(path.dirname(verifyPath), { recursive: true });
+    await fs.writeFile(designDocPath, '# Design Doc\n');
+    await fs.writeFile(planPath, '# Plan\n');
+    await fs.writeFile(verifyPath, '# Verify\nAll passed.');
+
+    await writeChange(root, {
+      name: '2026-07-09-demo',
+      status: 'archived',
+      yaml: {
+        phase: 'archive',
+        archived: 'true',
+        verify_result: 'pass',
+        design_doc: 'docs/superpowers/specs/demo-design.md',
+        plan: 'docs/superpowers/plans/demo-plan.md',
+        verification_report: 'docs/superpowers/reports/demo-verify.md',
+      },
+    });
+
+    const snap = await collectDashboardSnapshot(root);
+    const archived = snap.changes.archived[0];
+
+    expect(archived.artifacts.plan).toBe(true);
+    expect(archived.artifacts.verifyReport).toBe(true);
+    expect(archived.verify.reportExists).toBe(true);
+    expect(archived.artifacts.grouped).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'designDoc',
+          source: 'superpowers',
+          exists: true,
+          path: designDocPath,
+        }),
+        expect.objectContaining({
+          key: 'plan',
+          source: 'superpowers',
+          exists: true,
+          path: planPath,
+        }),
+        expect.objectContaining({
+          key: 'verifyReport',
+          source: 'superpowers',
+          exists: true,
+          path: verifyPath,
+        }),
+      ]),
+    );
+    expect(archived.artifactPreviews).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'plan',
+          exists: true,
+          content: '# Plan\n',
+        }),
+        expect.objectContaining({
+          key: 'verifyReport',
+          exists: true,
+          content: '# Verify\nAll passed.',
+        }),
+      ]),
+    );
+  });
+
   it('sorts active changes by risk, then updatedAt, then name', async () => {
     await writeChange(root, {
       name: 'docs-cleanup',

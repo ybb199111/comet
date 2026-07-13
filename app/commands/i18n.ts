@@ -59,6 +59,7 @@ export type TranslationKey =
   | 'npmNetworkHint'
   | 'npmPackageUpdated'
   | 'npmPackageFailed'
+  | 'npmPackageFailedBlocking'
   | 'noInstallsFound'
   | 'updatingSkillsOnTargets'
   | 'copyingSkillsFiles'
@@ -74,6 +75,9 @@ export type TranslationKey =
   | 'summaryScope'
   | 'summaryLanguage'
   | 'updateComplete'
+  | 'updateAllProjectsPrompt'
+  | 'updateAllProjectsYes'
+  | 'updateAllProjectsNo'
   | 'configMerged'
   | 'cancelled'
   | 'installMode'
@@ -127,8 +131,8 @@ const TRANSLATIONS: Record<Language, Record<TranslationKey, string>> = {
     getStartedHotfix: '/comet-hotfix       — Quick bug fix (skip brainstorming)',
     getStartedTweak: '/comet-tweak        — Small change (skip brainstorming and plan)',
     selectNpmDeps: 'Select npm dependencies to install/upgrade:',
-    npmDepOpenSpec: 'OpenSpec CLI (@fission-ai/openspec@latest)',
-    npmDepOpenSpecInstalled: 'OpenSpec CLI (already installed — upgrade to latest)',
+    npmDepOpenSpec: 'OpenSpec CLI (global, @fission-ai/openspec@latest)',
+    npmDepOpenSpecInstalled: 'OpenSpec CLI (already installed globally — upgrade to latest)',
     npmDepSuperpowers: 'Superpowers (npx skills add obra/superpowers)',
     npmDepSuperpowersInstalled: 'Superpowers (already installed — re-run install)',
     npmDepSuperpowersHint: 'v6.0.0+ recommended — ~2× faster, ~50% fewer tokens',
@@ -142,6 +146,7 @@ const TRANSLATIONS: Record<Language, Record<TranslationKey, string>> = {
     npmNetworkHint: 'Check your network connection or firewall settings and try again.',
     npmPackageUpdated: 'npm package: updated to latest',
     npmPackageFailed: 'npm package: update failed, continuing with bundled skills',
+    npmPackageFailedBlocking: 'npm package: update failed',
     noInstallsFound: 'No platforms with comet skills installed. Run `comet init` first.',
     updatingSkillsOnTargets: 'Updating comet skills on',
     copyingSkillsFiles: 'Copying',
@@ -157,6 +162,9 @@ const TRANSLATIONS: Record<Language, Record<TranslationKey, string>> = {
     summaryScope: 'scope:',
     summaryLanguage: 'language:',
     updateComplete: 'Update complete.',
+    updateAllProjectsPrompt: 'Proceed with updating all indexed projects?',
+    updateAllProjectsYes: 'Yes, update all indexed projects',
+    updateAllProjectsNo: 'No, cancel',
     configMerged:
       'Project config merged (.comet/config.yaml): preserved your values, added any missing fields',
     cancelled: 'Cancelled.',
@@ -210,8 +218,8 @@ const TRANSLATIONS: Record<Language, Record<TranslationKey, string>> = {
     getStartedHotfix: '/comet-hotfix       — 快速修复（跳过 brainstorming）',
     getStartedTweak: '/comet-tweak        — 小改动（跳过 brainstorming 和完整 plan）',
     selectNpmDeps: '选择要安装/升级的 npm 依赖：',
-    npmDepOpenSpec: 'OpenSpec CLI (@fission-ai/openspec@latest)',
-    npmDepOpenSpecInstalled: 'OpenSpec CLI（已安装 — 升级到最新版本）',
+    npmDepOpenSpec: 'OpenSpec CLI（全局安装，@fission-ai/openspec@latest）',
+    npmDepOpenSpecInstalled: 'OpenSpec CLI（已全局安装 — 升级到最新版本）',
     npmDepSuperpowers: 'Superpowers (npx skills add obra/superpowers)',
     npmDepSuperpowersInstalled: 'Superpowers（已安装 — 重新运行安装）',
     npmDepSuperpowersHint: '推荐 v6.0.0+ — 速度快约 2 倍，节省约 50% token',
@@ -225,6 +233,7 @@ const TRANSLATIONS: Record<Language, Record<TranslationKey, string>> = {
     npmNetworkHint: '请检查网络连接或防火墙设置后重试。',
     npmPackageUpdated: 'npm 包：已更新到最新版本',
     npmPackageFailed: 'npm 包：更新失败，继续使用已打包的 skills',
+    npmPackageFailedBlocking: 'npm 包：更新失败',
     noInstallsFound: '未检测到已安装 comet skills 的平台。请先运行 `comet init`。',
     updatingSkillsOnTargets: '正在更新 comet skills，覆盖',
     copyingSkillsFiles: '正在复制',
@@ -240,6 +249,9 @@ const TRANSLATIONS: Record<Language, Record<TranslationKey, string>> = {
     summaryScope: '范围：',
     summaryLanguage: '语言：',
     updateComplete: '更新完成。',
+    updateAllProjectsPrompt: '继续更新所有已索引项目？',
+    updateAllProjectsYes: '是，更新所有已索引项目',
+    updateAllProjectsNo: '否，取消',
     configMerged: '项目配置已合并 (.comet/config.yaml)：已保留你的设置，补齐缺失字段',
     cancelled: '已取消。',
     installMode: '安装模式：',

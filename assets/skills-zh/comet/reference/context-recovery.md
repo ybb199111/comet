@@ -14,6 +14,16 @@ node "$COMET_STATE" check <change-name> <phase> --recover
 
 若检查结果显示实际 phase、workflow 或 evidence 应由其他 Skill 处理，按脚本输出和 `/comet` 路由规则切换；不要在错误阶段继续补写状态。若存在未提交改动，先按 `comet/reference/dirty-worktree.md` 归因。
 
+## 未显式 `/comet` 的恢复
+
+如果用户没有提 `/comet`，但本仓库可能有 active change，开始处理需要改动或调查的任务前先运行 Ambient Resume 探针。先按 `comet/reference/scripts.md` 定位脚本并确保 `$COMET_RESUME_PROBE` 可用，然后把当前用户请求从 stdin 传入：
+
+```bash
+node "$COMET_RESUME_PROBE" probe --stdin
+```
+
+只有返回 `auto_resume` 才自动恢复；`ask_user` 必须短问用户；`out_of_scope` 和 `none` 不进入 workflow。
+
 ## 恢复步骤
 
 ```bash

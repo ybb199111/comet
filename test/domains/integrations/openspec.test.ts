@@ -102,6 +102,26 @@ describe('openspec', () => {
       expect(mockedExecFileSync).toHaveBeenCalledTimes(4);
     });
 
+    it('installs the OpenSpec CLI globally for project scope to avoid project node_modules', async () => {
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('/usr/bin/openspec'));
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('upgraded'));
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('/usr/bin/openspec'));
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('ok'));
+
+      const { getNpmExecutable, installOpenSpec } =
+        await import('../../../domains/integrations/openspec.js');
+      const result = await installOpenSpec('/tmp/test', ['claude'], 'project');
+
+      expect(result).toBe('installed');
+      const npmCall = mockedExecFileSync.mock.calls.find(
+        ([command, args]) =>
+          command === getNpmExecutable() &&
+          Array.isArray(args) &&
+          args.includes('@fission-ai/openspec@latest'),
+      );
+      expect(npmCall?.[1]).toEqual(['install', '-g', '@fission-ai/openspec@latest']);
+    });
+
     it('returns failed when openspec CLI is not available', async () => {
       mockedExecFileSync.mockImplementationOnce(() => {
         throw new Error('not found');
@@ -122,7 +142,7 @@ describe('openspec', () => {
         throw new Error('not found');
       });
       const error = new Error(
-        'Command failed: npm install @fission-ai/openspec@latest',
+        'Command failed: npm install -g @fission-ai/openspec@latest',
       ) as Error & {
         stderr?: Buffer;
         stdout?: Buffer;
@@ -358,6 +378,27 @@ describe('openspec', () => {
       const result = await installOpenSpec('/tmp/test', ['claude'], 'project');
 
       expect(result).toBe('installed');
+    });
+
+    it('installs the OpenSpec CLI globally even when initializing project scope', async () => {
+      mockedExecFileSync.mockImplementationOnce(() => {
+        throw new Error('not found');
+      });
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('installed'));
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('/usr/bin/openspec'));
+      mockedExecFileSync.mockReturnValueOnce(Buffer.from('ok'));
+
+      const { installOpenSpec } = await import('../../../domains/integrations/openspec.js');
+      const result = await installOpenSpec('/tmp/project', ['claude'], 'project');
+
+      expect(result).toBe('installed');
+      expect(mockedExecFileSync.mock.calls[1]).toEqual([
+        expect.stringMatching(/^npm(?:\.cmd)?$/),
+        ['install', '-g', '@fission-ai/openspec@latest'],
+        expect.objectContaining({
+          cwd: expect.not.stringMatching(/\/tmp\/project$/),
+        }),
+      ]);
     });
 
     it('returns failed when openspec init throws', async () => {

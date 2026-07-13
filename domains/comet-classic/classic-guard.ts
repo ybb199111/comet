@@ -4,6 +4,11 @@ import { existsSync, promises as fs, readFileSync } from 'fs';
 import path from 'path';
 import { parseDocument } from 'yaml';
 import type { ClassicCommandHandler, ClassicCommandResult } from './classic-cli.js';
+import {
+  latestCommandCheck,
+  type CommandCheckScope,
+  type RecordedCommandCheck,
+} from './classic-command-checks.js';
 import { inspectClassicChange } from './classic-diagnostics.js';
 import { openSpecChangeNameError, resolveClassicChangeDirectory } from './classic-paths.js';
 import { ensureClassicRuntimeRun, transitionClassicRuntimeRun } from './classic-runtime-run.js';
@@ -13,6 +18,7 @@ import { appendClassicStateEvent } from './classic-state-events.js';
 import { CLASSIC_GUARD_TRANSITION_EVENT, applyClassicTransition } from './classic-transitions.js';
 import { classicValidateCommand } from './classic-validate-command.js';
 import { readClassicState } from './classic-store.js';
+import { readClassicConfigValue } from './classic-project-config.js';
 
 const GREEN = '\u001b[32m';
 const RED = '\u001b[31m';
@@ -119,31 +125,6 @@ async function resolveChangeDir(name: string): Promise<string> {
   return (await resolveClassicChangeDirectory(name)).label;
 }
 
-function stripInlineComment(value: string): string {
-  let out = '';
-  let quote = '';
-  for (let i = 0; i < value.length; i += 1) {
-    const c = value[i];
-    if (quote === '') {
-      if (c === '"' || c === "'") {
-        quote = c;
-      } else if (c === '#' && (i === 0 || /\s/u.test(value[i - 1]))) {
-        return out.replace(/\s+$/u, '');
-      }
-    } else if (c === quote) {
-      quote = '';
-    }
-    out += c;
-  }
-  return out;
-}
-
-function stripWrappingQuotes(value: string): string {
-  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1);
-  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
-  return value;
-}
-
 async function readField(changeDir: string, field: string): Promise<string> {
   const file = path.join(changeDir, '.comet.yaml');
   const document = parseDocument(await fs.readFile(file, 'utf8'), { uniqueKeys: false });
@@ -160,18 +141,7 @@ async function readField(changeDir: string, field: string): Promise<string> {
 async function projectConfigValue(field: string, changeDir: string): Promise<string> {
   const changeValue = await readField(changeDir, field);
   if (changeValue && changeValue !== 'null') return changeValue;
-  for (const config of ['.comet/config.yaml']) {
-    if (!(await exists(config))) continue;
-    for (const line of (await fs.readFile(config, 'utf8')).split(/\r?\n/u)) {
-      if (new RegExp(`^${field}:`, 'u').test(line)) {
-        const value = stripWrappingQuotes(
-          stripInlineComment(line.replace(new RegExp(`^${field}:\\s*`, 'u'), '')),
-        );
-        if (value && value !== 'null') return value;
-      }
-    }
-  }
-  return '';
+  return (await readClassicConfigValue(field))?.value ?? '';
 }
 
 async function configuredLanguage(changeDir: string): Promise<'en' | 'zh-CN'> {
@@ -289,6 +259,9 @@ type CheckResult = { passed: true; detail?: string } | { passed: false; detail: 
 function pushCheck(output: GuardOutput, outcome: CheckOutcome): void {
   if (outcome.passed) {
     output.stderr.push(green(`  [PASS] ${outcome.description}`));
+    if (outcome.detail) {
+      for (const line of outcome.detail.split('\n')) output.stderr.push(green(`    ${line}`));
+    }
   } else {
     output.stderr.push(red(`  [FAIL] ${outcome.description}`));
     if (outcome.detail) {
@@ -316,8 +289,8 @@ function check(description: string, run: () => Promise<CheckResult>): () => Prom
   };
 }
 
-function pass(): CheckResult {
-  return { passed: true };
+function pass(detail?: string): CheckResult {
+  return { passed: true, ...(detail ? { detail } : {}) };
 }
 
 function fail(detail: string): CheckResult {
@@ -341,6 +314,12 @@ interface CommandRun {
   status: number;
   output: string;
 }
+
+const INFERRED_COMMAND_SOURCES = [
+  'package.json with a build script',
+  'pom.xml',
+  'Cargo.toml',
+] as const;
 
 async function removedProjectCommandField(field: 'build_command' | 'verify_command') {
   const config = path.join('.comet', 'config.yaml');
@@ -384,35 +363,74 @@ function runInferred(command: string): CommandRun {
   };
 }
 
-async function buildPasses(): Promise<CommandRun> {
-  if (process.env.COMET_SKIP_BUILD === '1') return { status: 0, output: '' };
-  if (await removedProjectCommandField('build_command')) {
-    return removedProjectCommandRun('build_command');
-  }
+async function inferredBuildCommand(): Promise<string | null> {
   if (
     (await exists('package.json')) &&
-    /"build"/u.test(await fs.readFile('package.json', 'utf8'))
+    (() => {
+      const parsed = JSON.parse(readFileSync('package.json', 'utf8')) as {
+        scripts?: Record<string, unknown>;
+      };
+      return typeof parsed.scripts?.build === 'string';
+    })()
   ) {
-    return runInferred('npm run build');
+    return 'npm run build';
   }
   if (await exists('pom.xml')) {
     if (process.platform === 'win32') {
-      if (existsSync('mvnw.cmd')) return runInferred('mvnw.cmd compile -q');
-      return runInferred('mvn.cmd compile -q');
+      if (existsSync('mvnw.cmd')) return 'mvnw.cmd compile -q';
+      return 'mvn.cmd compile -q';
     }
-    if (existsSync('mvnw')) return runInferred('./mvnw compile -q');
-    return runInferred('mvn compile -q');
+    if (existsSync('mvnw')) return './mvnw compile -q';
+    return 'mvn compile -q';
   }
-  if (await exists('Cargo.toml')) return runInferred('cargo build');
-  return { status: 1, output: '' };
+  if (await exists('Cargo.toml')) return 'cargo build';
+  return null;
 }
 
-async function verificationCommandPasses(): Promise<CommandRun> {
-  if (process.env.COMET_SKIP_BUILD === '1') return { status: 0, output: '' };
-  if (await removedProjectCommandField('verify_command')) {
-    return removedProjectCommandRun('verify_command');
+function evidenceDetail(record: RecordedCommandCheck): string {
+  return `Evidence: recorded command-check at ${record.timestamp}; command: ${record.command}; cwd: ${record.cwd}`;
+}
+
+function recoveryCommand(change: string, scope: CommandCheckScope, command: string): string {
+  return `comet state record-check ${change} ${scope} --command "${command}" --exit-code 0`;
+}
+
+async function commandCheckPasses(
+  changeDir: string,
+  change: string,
+  run: ClassicRunContext['run'],
+  scope: CommandCheckScope,
+): Promise<CommandRun> {
+  if (process.env.COMET_SKIP_BUILD === '1') {
+    return { status: 0, output: 'SKIPPED via COMET_SKIP_BUILD=1' };
   }
-  return buildPasses();
+  const removedFields: Array<'build_command' | 'verify_command'> =
+    scope === 'build' ? ['build_command'] : ['verify_command', 'build_command'];
+  for (const removedField of removedFields) {
+    if (await removedProjectCommandField(removedField)) {
+      return removedProjectCommandRun(removedField);
+    }
+  }
+  const inferred = scope === 'build' ? await inferredBuildCommand() : null;
+  if (inferred) return runInferred(inferred);
+
+  const recorded = await latestCommandCheck(changeDir, run, scope);
+  if (!recorded) {
+    return {
+      status: 1,
+      output:
+        scope === 'build'
+          ? `No inferred build command or recorded build check. Detection searched: ${INFERRED_COMMAND_SOURCES.join(', ')}.\nNext: run the required command, then record it with:\n${recoveryCommand(change, scope, '<command>')}`
+          : `No recorded verify check.\nNext: run the required verification command, then record it with:\n${recoveryCommand(change, scope, '<command>')}`,
+    };
+  }
+  if (recorded.exitCode !== 0) {
+    return {
+      status: recorded.exitCode,
+      output: `Latest recorded ${scope} check failed with exit code ${recorded.exitCode}.\n${evidenceDetail(recorded)}\nNext: rerun the command successfully, then record it with:\n${recoveryCommand(change, scope, recorded.command)}`,
+    };
+  }
+  return { status: 0, output: evidenceDetail(recorded) };
 }
 
 async function tasksAllDone(changeDir: string): Promise<CheckResult> {
@@ -787,6 +805,7 @@ async function guardBuildChecks(
   output: GuardOutput,
   changeDir: string,
   change: string,
+  run: ClassicRunContext['run'],
 ): Promise<boolean> {
   return runChecks(output, [
     check('isolation selected', () => isolationSelected(changeDir, change)),
@@ -811,20 +830,25 @@ async function guardBuildChecks(
     // Build check runs last — only after all config checks pass — to avoid
     // wasting time on a build that would be rejected by a config failure.
     check('Build passes', async () => {
-      const buildResult = await buildPasses();
-      return buildResult.status === 0 ? pass() : fail(buildResult.output);
+      const buildResult = await commandCheckPasses(changeDir, change, run, 'build');
+      return buildResult.status === 0 ? pass(buildResult.output) : fail(buildResult.output);
     }),
   ]);
 }
 
-async function guardVerifyChecks(output: GuardOutput, changeDir: string): Promise<boolean> {
+async function guardVerifyChecks(
+  output: GuardOutput,
+  changeDir: string,
+  change: string,
+  run: ClassicRunContext['run'],
+): Promise<boolean> {
   return runChecks(output, [
     check('tasks.md all tasks checked', () => tasksAllDone(changeDir)),
     // Verification command runs after tasks check — no point running tests
     // if tasks.md is incomplete.
     check('Verification passes', async () => {
-      const verifyResult = await verificationCommandPasses();
-      return verifyResult.status === 0 ? pass() : fail(verifyResult.output);
+      const verifyResult = await commandCheckPasses(changeDir, change, run, 'verify');
+      return verifyResult.status === 0 ? pass(verifyResult.output) : fail(verifyResult.output);
     }),
     check('verification_report exists', async () =>
       (await verificationReportExists(changeDir)) ? pass() : fail(''),
@@ -915,8 +939,10 @@ export const classicGuardCommand: ClassicCommandHandler = async (args, options) 
     let blocked: boolean;
     if (phase === 'open') blocked = await guardOpenChecks(output, changeDir);
     else if (phase === 'design') blocked = await guardDesignChecks(output, changeDir, change);
-    else if (phase === 'build') blocked = await guardBuildChecks(output, changeDir, change);
-    else if (phase === 'verify') blocked = await guardVerifyChecks(output, changeDir);
+    else if (phase === 'build')
+      blocked = await guardBuildChecks(output, changeDir, change, runContext.run);
+    else if (phase === 'verify')
+      blocked = await guardVerifyChecks(output, changeDir, change, runContext.run);
     else blocked = await guardArchiveChecks(output, changeDir);
 
     if (blocked) {

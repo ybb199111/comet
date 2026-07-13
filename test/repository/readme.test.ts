@@ -24,6 +24,20 @@ describe('README assets', () => {
     expect(zh).toContain('`plan-ready` 表示 plan 已生成');
   });
 
+  it('documents Ambient Resume probe and managed project instructions', async () => {
+    const en = await fs.readFile('README.md', 'utf-8');
+    const zh = await fs.readFile('README-zh.md', 'utf-8');
+
+    expect(en).toContain('comet resume-probe [path]');
+    expect(en).toContain('managed block');
+    expect(en).toContain('<comet-ambient-resume>');
+    expect(en).toContain('preserving user-authored rules');
+    expect(zh).toContain('comet resume-probe [path]');
+    expect(zh).toContain('managed block');
+    expect(zh).toContain('<comet-ambient-resume>');
+    expect(zh).toContain('保留用户已有规则');
+  });
+
   it('documents status and doctor as diagnostics-aware user commands', async () => {
     const readme = await fs.readFile('README.md', 'utf-8');
 

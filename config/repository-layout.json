@@ -14,7 +14,8 @@
       "handoff": "domains/comet-classic/classic-handoff-entry.ts",
       "archive": "domains/comet-classic/classic-archive-entry.ts",
       "hookGuard": "domains/comet-classic/classic-hook-guard-entry.ts",
-      "intent": "domains/comet-classic/classic-intent-entry.ts"
+      "intent": "domains/comet-classic/classic-intent-entry.ts",
+      "resume-probe": "domains/comet-classic/classic-resume-probe-entry.ts"
     },
     "outputs": {
       "runtime": "assets/skills/comet/scripts/comet-runtime.mjs",
@@ -24,7 +25,8 @@
       "handoff": "assets/skills/comet/scripts/comet-handoff.mjs",
       "archive": "assets/skills/comet/scripts/comet-archive.mjs",
       "hookGuard": "assets/skills/comet/scripts/comet-hook-guard.mjs",
-      "intent": "assets/skills/comet/scripts/comet-intent.mjs"
+      "intent": "assets/skills/comet/scripts/comet-intent.mjs",
+      "resume-probe": "assets/skills/comet/scripts/comet-resume-probe.mjs"
     }
   },
   "allowedTopLevelEntries": [

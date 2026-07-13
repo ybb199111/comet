@@ -4,7 +4,7 @@ import { promises as fs } from 'fs';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import { select } from '@inquirer/prompts';
-import { fileExists, readDir, readJson } from '../../platform/fs/file-system.js';
+import { fileExists, readJson } from '../../platform/fs/file-system.js';
 import { getBaseDir } from '../../platform/install/detect.js';
 import {
   copyCometSkillsForPlatform,
@@ -13,11 +13,22 @@ import {
   getManifestSkills,
   mergeProjectConfig,
 } from '../../domains/skill/platform-install.js';
+import { removeLegacyCometSkillsForPlatform } from '../../domains/skill/uninstall.js';
+import { installCometProjectInstructions } from '../../domains/skill/project-instructions.js';
+import { LANGUAGES } from '../../domains/skill/languages.js';
 import {
   PLATFORMS,
   getPlatformSkillsDir,
+  getPlatformSkillsDirs,
   type Platform,
 } from '../../platform/install/platforms.js';
+import { hasPlatformDetectionPath } from '../../platform/install/detect.js';
+import {
+  listProjectRegistryEntries,
+  removeProjectInstallation,
+  upsertProjectInstallation,
+  type ProjectRegistryEntry,
+} from '../../platform/install/project-registry.js';
 import {
   hasCodegraphProjectIndex,
   installCodegraph,
@@ -25,6 +36,7 @@ import {
 import type { InstallScope, InstallMode } from '../../platform/install/types.js';
 import { printVersionInfo } from '../../platform/version/version.js';
 import { t, type TranslationKey } from './i18n.js';
+import { assertProjectScopeOptions, resolveProjectScopeMode } from './project-scope-selection.js';
 
 const PACKAGE_NAME = '@rpamis/comet';
 const OFFICIAL_REGISTRY = 'https://registry.npmjs.org';
@@ -35,9 +47,30 @@ interface UpdateOptions {
   scope?: InstallScope;
   skipNpm?: boolean;
   installMode?: InstallMode;
+  allProjects?: boolean;
+  currentProject?: boolean;
+  targetScopes?: InstallScope[];
+  skipGlobalNpmUpdate?: boolean;
+  failOnNpmFailure?: boolean;
 }
 
 type SkillLanguage = 'en' | 'zh';
+type NpmStatus = 'updated' | 'failed' | 'skipped';
+type CodegraphStatus = 'installed' | 'failed' | 'skipped';
+
+interface NpmUpdateFailure extends Error {
+  npmScope: InstallScope;
+}
+
+function createNpmUpdateFailure(scope: InstallScope): NpmUpdateFailure {
+  const error = new Error(`npm package update failed (${scope} scope)`) as NpmUpdateFailure;
+  error.npmScope = scope;
+  return error;
+}
+
+function isGlobalNpmUpdateFailure(error: unknown): boolean {
+  return (error as Partial<NpmUpdateFailure> | undefined)?.npmScope === 'global';
+}
 
 interface InstalledCometTarget {
   scope: InstallScope;
@@ -45,9 +78,57 @@ interface InstalledCometTarget {
   language: SkillLanguage;
 }
 
+interface SingleProjectUpdateResult {
+  projectPath: string;
+  npm: {
+    scope: InstallScope | 'skipped';
+    status: NpmStatus;
+    command: string | null;
+  };
+  skills: {
+    totalCopied: number;
+    cleanupFailed: number;
+    installMode?: InstallMode;
+    targets: Array<{
+      scope: InstallScope;
+      platform: string;
+      platformName: string;
+      language: SkillLanguage;
+      source: string;
+      copied: number;
+      skipped: number;
+      cleanupFailed: number;
+      command: string;
+    }>;
+  };
+  rules: { totalCopied: number };
+  hooks: { totalInstalled: number };
+  projectInstructions: { updated: number };
+  codegraph: CodegraphStatus;
+}
+
+interface AllProjectsUpdateResult {
+  projectPath: string;
+  status: 'updated' | 'skipped' | 'failed';
+  reason?: string;
+  targets: Array<{
+    scope: InstallScope;
+    platform: string;
+    platformName: string;
+    language: SkillLanguage;
+  }>;
+  summary?: {
+    skillsCopied: number;
+    rulesCopied: number;
+    hooksInstalled: number;
+    projectInstructionsUpdated: number;
+  };
+}
+
 interface DetectTargetsOptions {
   scopes?: InstallScope[];
   globalBaseDir?: string;
+  respectDetectionPaths?: boolean;
 }
 
 function resolveTargetLanguage(
@@ -59,6 +140,10 @@ function resolveTargetLanguage(
 
 function languageToSkillsDir(languageId: SkillLanguage): string {
   return languageId === 'zh' ? 'skills-zh' : 'skills';
+}
+
+function languageToArtifactLanguage(languageId: SkillLanguage): 'en' | 'zh-CN' {
+  return LANGUAGES.find((entry) => entry.id === languageId)!.artifactLanguage;
 }
 
 function getScopedBaseDir(
@@ -74,11 +159,35 @@ function getInstalledCometSkillsDirs(
   platform: Platform,
   scope: InstallScope = 'project',
 ): string[] {
-  const dirs = [path.join(baseDir, getPlatformSkillsDir(platform, scope), 'skills')];
-  if (scope === 'global' && platform.id === 'pi') {
-    dirs.push(path.join(baseDir, platform.skillsDir, 'skills'));
+  const skillsDirs = [
+    ...getPlatformSkillsDirs(platform, scope),
+    ...(scope === 'global' && platform.id === 'pi' ? [platform.skillsDir] : []),
+  ];
+  return [...new Set(skillsDirs)].map((skillsDir) => path.join(baseDir, skillsDir, 'skills'));
+}
+
+function isMissingInspectionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+async function targetPathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (error) {
+    if (isMissingInspectionError(error)) return false;
+    throw error;
   }
-  return [...new Set(dirs)];
+}
+
+async function readTargetDir(dirPath: string): Promise<string[]> {
+  try {
+    return await fs.readdir(dirPath);
+  } catch (error) {
+    if (isMissingInspectionError(error)) return [];
+    throw error;
+  }
 }
 
 async function hasLocalCometSkills(
@@ -87,8 +196,8 @@ async function hasLocalCometSkills(
   scope: InstallScope,
 ): Promise<boolean> {
   for (const skillsDir of getInstalledCometSkillsDirs(baseDir, platform, scope)) {
-    if (!(await fileExists(skillsDir))) continue;
-    const entries = await readDir(skillsDir);
+    if (!(await targetPathExists(skillsDir))) continue;
+    const entries = await readTargetDir(skillsDir);
     if (entries.some((entry) => entry.startsWith('comet'))) return true;
   }
   return false;
@@ -100,18 +209,18 @@ async function detectInstalledCometLanguage(
   scope: InstallScope = 'project',
 ): Promise<SkillLanguage> {
   for (const skillsDir of getInstalledCometSkillsDirs(baseDir, platform, scope)) {
-    if (!(await fileExists(skillsDir))) continue;
-    const entries = (await readDir(skillsDir)).filter((entry) => entry.startsWith('comet'));
+    if (!(await targetPathExists(skillsDir))) continue;
+    const entries = (await readTargetDir(skillsDir)).filter((entry) => entry.startsWith('comet'));
 
     for (const entry of entries) {
       const skillPath = path.join(skillsDir, entry, 'SKILL.md');
-      if (!(await fileExists(skillPath))) continue;
+      if (!(await targetPathExists(skillPath))) continue;
 
       try {
         const content = await fs.readFile(skillPath, 'utf-8');
         if (/[㐀-鿿]/u.test(content)) return 'zh';
-      } catch {
-        // Fall through to the default English asset set if the file cannot be read.
+      } catch (error) {
+        if (!isMissingInspectionError(error)) throw error;
       }
     }
   }
@@ -130,6 +239,12 @@ async function detectInstalledCometTargets(
     const baseDir = getScopedBaseDir(scope, projectPath, options.globalBaseDir);
 
     for (const platform of PLATFORMS) {
+      if (
+        options.respectDetectionPaths !== false &&
+        !(await hasPlatformDetectionPath(baseDir, platform))
+      ) {
+        continue;
+      }
       if (!(await hasLocalCometSkills(baseDir, platform, scope))) continue;
 
       targets.push({
@@ -193,7 +308,7 @@ function formatSkillUpdateCommand(
 ): string {
   const destPrefix = scope === 'global' ? '~/' : '';
   if (installMode === 'symlink') {
-    return `symlink .comet/skills/ -> ${destPrefix}${getPlatformSkillsDir(platform, scope)}/skills/ (${scope})`;
+    return `symlink via .comet/skills/ in ${destPrefix}${getPlatformSkillsDir(platform, scope)}/skills/ (${scope})`;
   }
   return `copy assets/${languageSkillsDir} -> ${destPrefix}${getPlatformSkillsDir(platform, scope)}/skills/ (${scope})`;
 }
@@ -259,24 +374,75 @@ async function promptCodegraphInstall(lang: string): Promise<boolean> {
   });
 }
 
-export async function updateCommand(
-  targetPath: string,
-  options: UpdateOptions = {},
+function currentProjectJson(result: SingleProjectUpdateResult): Record<string, unknown> {
+  return {
+    npm: result.npm,
+    skills: {
+      totalCopied: result.skills.totalCopied,
+      cleanupFailed: result.skills.cleanupFailed,
+      installMode: result.skills.installMode,
+      targets: result.skills.targets,
+    },
+    rules: result.rules,
+    hooks: result.hooks,
+    projectInstructions: result.projectInstructions,
+    codegraph: result.codegraph,
+  };
+}
+
+function summarizeTargets(targets: InstalledCometTarget[]): AllProjectsUpdateResult['targets'] {
+  return targets.map((target) => ({
+    scope: target.scope,
+    platform: target.platform.id,
+    platformName: target.platform.name,
+    language: target.language,
+  }));
+}
+
+function summarizeUpdatedTargets(
+  targets: SingleProjectUpdateResult['skills']['targets'],
+): AllProjectsUpdateResult['targets'] {
+  return targets.map((target) => ({
+    scope: target.scope,
+    platform: target.platform,
+    platformName: target.platformName,
+    language: target.language,
+  }));
+}
+
+async function upsertUpdatedProjectTargets(
+  projectPath: string,
+  result: SingleProjectUpdateResult,
 ): Promise<void> {
-  const projectPath = path.resolve(targetPath);
-  const log = options.json ? () => undefined : console.log;
+  const projectTargets = result.skills.targets.filter((target) => target.scope === 'project');
+  if (projectTargets.length === 0) return;
 
+  await upsertProjectInstallation(
+    projectPath,
+    projectTargets.map((target) => ({
+      platform: target.platform,
+      language: target.language,
+    })),
+    'update',
+  );
+}
+
+async function updateSingleProject(
+  projectPath: string,
+  options: UpdateOptions,
+  log: (message: string) => void,
+): Promise<SingleProjectUpdateResult> {
   const lang = options.language ?? 'en';
-
-  log(`\n  ${t(lang, 'updateTitle')}`);
-  if (!options.json) {
-    await printVersionInfo(log);
-  }
-  log('');
-
-  const packageScope = options.scope ?? (await detectCometPackageScope(projectPath));
-  let npmStatus: 'updated' | 'failed' | 'skipped' = 'skipped';
-  if (!options.skipNpm) {
+  const packageScope =
+    options.scope && !options.targetScopes
+      ? options.scope
+      : await detectCometPackageScope(projectPath);
+  let npmStatus: NpmStatus = 'skipped';
+  const skipRepeatedGlobalNpm =
+    !options.skipNpm && packageScope === 'global' && options.skipGlobalNpmUpdate === true;
+  if (skipRepeatedGlobalNpm) {
+    log(`  ${t(lang, 'updatingNpmPackage')}: skipped (global scope already attempted)`);
+  } else if (!options.skipNpm) {
     log(`  ${t(lang, 'updatingNpmPackage')} (${packageScope} scope)...`);
     log(`    $ ${formatNpmUpdateCommand(packageScope)}`);
     const npmUpdated = await updateCometNpmPackage(
@@ -290,39 +456,37 @@ export async function updateCommand(
       log(`  ${t(lang, 'npmPackageUpdated')} ${PACKAGE_NAME}`);
     } else {
       npmStatus = 'failed';
-      log(`  ${t(lang, 'npmPackageFailed')}`);
+      log(
+        `  ${t(lang, options.failOnNpmFailure ? 'npmPackageFailedBlocking' : 'npmPackageFailed')}`,
+      );
+      if (options.failOnNpmFailure) {
+        throw createNpmUpdateFailure(packageScope);
+      }
     }
   }
 
   const installMode = await selectInstallMode(options, lang);
 
   const targets = await detectInstalledCometTargets(projectPath, {
-    scopes: options.scope ? [options.scope] : undefined,
+    scopes: options.targetScopes ?? (options.scope ? [options.scope] : undefined),
+    respectDetectionPaths: options.scope === undefined,
   });
 
   if (targets.length === 0) {
-    if (options.json) {
-      console.log(
-        JSON.stringify(
-          {
-            npm: {
-              scope: options.skipNpm ? 'skipped' : packageScope,
-              status: npmStatus,
-              command: options.skipNpm ? null : formatNpmUpdateCommand(packageScope),
-            },
-            skills: { totalCopied: 0, targets: [] },
-            rules: { totalCopied: 0 },
-            hooks: { totalInstalled: 0 },
-            codegraph: 'skipped',
-          },
-          null,
-          2,
-        ),
-      );
-      return;
-    }
-    log(`\n  ${t(lang, 'noInstallsFound')}\n`);
-    return;
+    return {
+      projectPath,
+      npm: {
+        scope: options.skipNpm ? 'skipped' : packageScope,
+        status: npmStatus,
+        command:
+          options.skipNpm || skipRepeatedGlobalNpm ? null : formatNpmUpdateCommand(packageScope),
+      },
+      skills: { totalCopied: 0, cleanupFailed: 0, targets: [] },
+      rules: { totalCopied: 0 },
+      hooks: { totalInstalled: 0 },
+      projectInstructions: { updated: 0 },
+      codegraph: 'skipped',
+    };
   }
 
   log(`\n  ${t(lang, 'updatingSkillsOnTargets')} ${targets.length} target(s):`);
@@ -342,14 +506,16 @@ export async function updateCommand(
   );
 
   let totalCopied = 0;
+  let totalCleanupFailed = 0;
   let totalRulesCopied = 0;
   let totalHooksInstalled = 0;
-  const targetResults = [];
+  let projectInstructionsUpdated = 0;
+  const targetResults: SingleProjectUpdateResult['skills']['targets'] = [];
   for (const target of targets) {
     const baseDir = getBaseDir(target.scope, projectPath);
     const languageId = resolveTargetLanguage(options.language, target.language);
     const languageSkillsDir = languageToSkillsDir(languageId);
-    const { copied, skipped } = await copyCometSkillsForPlatform(
+    const { copied, skipped, failed } = await copyCometSkillsForPlatform(
       baseDir,
       target.platform,
       true,
@@ -357,15 +523,21 @@ export async function updateCommand(
       target.scope,
       installMode,
     );
+    const cleanupResult =
+      failed === 0
+        ? await removeLegacyCometSkillsForPlatform(baseDir, target.platform, target.scope)
+        : { removed: 0, failed: 0 };
+    totalCleanupFailed += cleanupResult.failed;
     totalCopied += copied;
     targetResults.push({
       scope: target.scope,
       platform: target.platform.id,
       platformName: target.platform.name,
-      language: options.language ?? target.language,
+      language: languageId,
       source: languageSkillsDir,
       copied,
       skipped,
+      cleanupFailed: cleanupResult.failed,
       command: formatSkillUpdateCommand(
         target.scope,
         target.platform,
@@ -376,6 +548,11 @@ export async function updateCommand(
     log(
       `  ${target.platform.name} (${target.scope}, ${languageSkillsDir}): ${copied} ${t(lang, 'skillsCopiedSkipped')} ${skipped} skipped`,
     );
+    if (cleanupResult.failed > 0) {
+      log(
+        `  ${target.platform.name} (${target.scope}): legacy Skill cleanup failed; update incomplete`,
+      );
+    }
 
     try {
       const { copied: ruleCopied } = await copyCometRulesForPlatform(
@@ -416,13 +593,43 @@ export async function updateCommand(
     }
   }
 
-  const hasProjectTargets = targets.some((target) => target.scope === 'project');
-  if (hasProjectTargets) {
-    await mergeProjectConfig(projectPath);
+  for (const scope of ['project', 'global'] as const) {
+    const scopeTargets = targets.filter((candidate) => candidate.scope === scope);
+    if (scopeTargets.length === 0) continue;
+    // An explicit --language always wins. Otherwise only force the persisted language when
+    // every platform installed at this scope agrees — if two platforms disagree (e.g. one
+    // installed with English skills, another with Chinese) and the user didn't say which one
+    // they mean, guessing from array order would silently override whatever language they
+    // (or a prior install) already configured. Pass null in that case so mergeProjectConfig
+    // preserves the existing config's language instead of guessing.
+    const agreedLanguage = scopeTargets.every((t) => t.language === scopeTargets[0].language)
+      ? scopeTargets[0].language
+      : undefined;
+    const languageId = options.language
+      ? resolveTargetLanguage(options.language, scopeTargets[0].language)
+      : agreedLanguage;
+    const configRoot = getBaseDir(scope, projectPath);
+    await mergeProjectConfig(
+      configRoot,
+      languageId ? languageToArtifactLanguage(languageId) : null,
+    );
     log(`  ${t(lang, 'configMerged')}`);
   }
 
-  let codegraphStatus: 'installed' | 'failed' | 'skipped' = 'skipped';
+  const projectTarget = targets.find((target) => target.scope === 'project');
+  if (projectTarget) {
+    const projectLanguageId = resolveTargetLanguage(options.language, projectTarget.language);
+    const projectInstructionResult = await installCometProjectInstructions(
+      projectPath,
+      projectLanguageId,
+    );
+    projectInstructionsUpdated = projectInstructionResult.changed;
+    if (projectInstructionsUpdated > 0) {
+      log(`  Comet project instructions -> ${projectInstructionsUpdated} file(s) updated`);
+    }
+  }
+
+  let codegraphStatus: CodegraphStatus = 'skipped';
   const primaryScope = targets[0]?.scope ?? 'project';
   const codegraphAlreadyIndexed = hasCodegraphProjectIndex(projectPath);
 
@@ -442,23 +649,189 @@ export async function updateCommand(
     }
   }
 
+  return {
+    projectPath,
+    npm: {
+      scope: options.skipNpm ? 'skipped' : packageScope,
+      status: npmStatus,
+      command:
+        options.skipNpm || skipRepeatedGlobalNpm ? null : formatNpmUpdateCommand(packageScope),
+    },
+    skills: {
+      totalCopied,
+      cleanupFailed: totalCleanupFailed,
+      installMode,
+      targets: targetResults,
+    },
+    rules: { totalCopied: totalRulesCopied },
+    hooks: { totalInstalled: totalHooksInstalled },
+    projectInstructions: { updated: projectInstructionsUpdated },
+    codegraph: codegraphStatus,
+  };
+}
+
+function logSingleProjectSummary(
+  result: SingleProjectUpdateResult,
+  options: UpdateOptions,
+  log: (message: string) => void,
+): void {
+  const lang = options.language ?? 'en';
+  const languages = [...new Set(result.skills.targets.map((target) => target.language))].join(', ');
+  const scopes = [...new Set(result.skills.targets.map((target) => target.scope))].join(', ');
+  log(`\n  ${t(lang, 'summary')}`);
+  log(
+    `    ${t(lang, 'summaryNpm')} ${result.npm.status}${
+      options.skipNpm ? '' : ` (${result.npm.scope})`
+    }`,
+  );
+  log(
+    `    ${t(lang, 'summarySkills')} ${result.skills.targets.length} target(s), ${result.skills.totalCopied} files updated`,
+  );
+  if (result.skills.cleanupFailed > 0) {
+    log(`    Skill cleanup failures: ${result.skills.cleanupFailed} (update incomplete)`);
+  }
+  log(`    ${t(lang, 'summaryCodegraph')} ${result.codegraph}`);
+  log(`    ${t(lang, 'summaryScope')} ${scopes}`);
+  log(`    ${t(lang, 'summaryLanguage')} ${languages}`);
+  if (result.skills.cleanupFailed > 0) {
+    log(`\n  Update incomplete. Canonical Skills were installed, but legacy cleanup failed.\n`);
+  } else {
+    log(`\n  ${t(lang, 'updateComplete')}\n`);
+  }
+}
+
+async function updateAllIndexedProjects(
+  registryProjects: ProjectRegistryEntry[],
+  options: UpdateOptions,
+  log: (message: string) => void,
+): Promise<void> {
+  const lang = options.language ?? 'en';
+  const results: AllProjectsUpdateResult[] = [];
+  const runnableProjects: Array<{ projectPath: string; targets: InstalledCometTarget[] }> = [];
+  let staleRemoved = 0;
+
+  for (const project of registryProjects) {
+    const projectPath = project.path;
+    try {
+      const targets = await detectInstalledCometTargets(projectPath, { scopes: ['project'] });
+      if (targets.length === 0) {
+        if (await removeProjectInstallation(projectPath)) staleRemoved++;
+        results.push({
+          projectPath,
+          status: 'skipped',
+          reason: 'no project-scope Comet install detected',
+          targets: [],
+        });
+        continue;
+      }
+      runnableProjects.push({ projectPath, targets });
+    } catch (error) {
+      results.push({
+        projectPath,
+        status: 'skipped',
+        reason: `unable to inspect project: ${(error as Error).message}`,
+        targets: [],
+      });
+    }
+  }
+
+  if (!options.json) {
+    log(`  Comet will update ${runnableProjects.length} indexed project(s):`);
+    for (const project of runnableProjects) {
+      log(`    - ${project.projectPath}`);
+      log(`      ${project.targets.map((target) => target.platform.name).join(', ')}`);
+    }
+    const confirmed = await select({
+      message: t(lang, 'updateAllProjectsPrompt'),
+      choices: [
+        { name: t(lang, 'updateAllProjectsYes'), value: true },
+        { name: t(lang, 'updateAllProjectsNo'), value: false },
+      ],
+    });
+    if (!confirmed) {
+      log(`\n  ${t(lang, 'cancelled')}\n`);
+      return;
+    }
+  }
+
+  const runOptions: UpdateOptions = {
+    ...options,
+    scope: undefined,
+    targetScopes: ['project'],
+    currentProject: true,
+    allProjects: false,
+    failOnNpmFailure: true,
+  };
+  if (!options.json && !runOptions.installMode) {
+    runOptions.installMode = await selectInstallMode(options, lang);
+  }
+
+  let globalNpmAttempted = false;
+  for (const project of runnableProjects) {
+    const { projectPath, targets } = project;
+    try {
+      const result = await updateSingleProject(
+        projectPath,
+        { ...runOptions, skipGlobalNpmUpdate: globalNpmAttempted },
+        log,
+      );
+      if (result.npm.scope === 'global' && result.npm.status !== 'skipped') {
+        globalNpmAttempted = true;
+      }
+      if (result.skills.targets.length === 0) {
+        if (await removeProjectInstallation(projectPath)) staleRemoved++;
+        results.push({
+          projectPath,
+          status: 'skipped',
+          reason: 'no project-scope Comet install detected',
+          targets: [],
+        });
+        continue;
+      }
+
+      if (result.skills.cleanupFailed > 0) {
+        results.push({
+          projectPath,
+          status: 'failed',
+          reason: `legacy Skill cleanup failed (${result.skills.cleanupFailed})`,
+          targets: summarizeUpdatedTargets(result.skills.targets),
+        });
+        continue;
+      }
+
+      await upsertUpdatedProjectTargets(projectPath, result);
+      results.push({
+        projectPath,
+        status: 'updated',
+        targets: summarizeUpdatedTargets(result.skills.targets),
+        summary: {
+          skillsCopied: result.skills.totalCopied,
+          rulesCopied: result.rules.totalCopied,
+          hooksInstalled: result.hooks.totalInstalled,
+          projectInstructionsUpdated: result.projectInstructions.updated,
+        },
+      });
+    } catch (error) {
+      results.push({
+        projectPath,
+        status: 'failed',
+        reason: (error as Error).message,
+        targets: summarizeTargets(targets),
+      });
+      if (isGlobalNpmUpdateFailure(error)) break;
+    }
+  }
+
   if (options.json) {
     console.log(
       JSON.stringify(
         {
-          npm: {
-            scope: options.skipNpm ? 'skipped' : packageScope,
-            status: npmStatus,
-            command: options.skipNpm ? null : formatNpmUpdateCommand(packageScope),
+          mode: 'all-projects',
+          registry: {
+            projectsFound: registryProjects.length,
+            staleRemoved,
           },
-          skills: {
-            totalCopied,
-            installMode,
-            targets: targetResults,
-          },
-          rules: { totalCopied: totalRulesCopied },
-          hooks: { totalInstalled: totalHooksInstalled },
-          codegraph: codegraphStatus,
+          projects: results,
         },
         null,
         2,
@@ -467,15 +840,56 @@ export async function updateCommand(
     return;
   }
 
-  const languages = [...new Set(targetResults.map((target) => target.language))].join(', ');
-  const scopes = [...new Set(targetResults.map((target) => target.scope))].join(', ');
-  log(`\n  ${t(lang, 'summary')}`);
-  log(`    ${t(lang, 'summaryNpm')} ${npmStatus}${options.skipNpm ? '' : ` (${packageScope})`}`);
-  log(`    ${t(lang, 'summarySkills')} ${targets.length} target(s), ${totalCopied} files updated`);
-  log(`    ${t(lang, 'summaryCodegraph')} ${codegraphStatus}`);
-  log(`    ${t(lang, 'summaryScope')} ${scopes}`);
-  log(`    ${t(lang, 'summaryLanguage')} ${languages}`);
-  log(`\n  ${t(lang, 'updateComplete')}\n`);
+  log(
+    `\n  Updated ${results.filter((result) => result.status === 'updated').length} indexed project(s).`,
+  );
+}
+
+export async function updateCommand(
+  targetPath: string,
+  options: UpdateOptions = {},
+): Promise<void> {
+  const projectPath = path.resolve(targetPath);
+  const log = options.json ? () => undefined : console.log;
+  const lang = options.language ?? 'en';
+
+  assertProjectScopeOptions(options);
+  const registryProjects = await listProjectRegistryEntries({
+    strict: options.allProjects === true,
+  });
+
+  log(`\n  ${t(lang, 'updateTitle')}`);
+  if (!options.json) {
+    await printVersionInfo(log);
+  }
+  log('');
+
+  const scopeMode = await resolveProjectScopeMode('update', options, registryProjects.length);
+  if (scopeMode === 'all-projects') {
+    await updateAllIndexedProjects(registryProjects, options, log);
+    return;
+  }
+
+  const result = await updateSingleProject(projectPath, options, log);
+  if (result.skills.targets.length === 0) {
+    if (options.json) {
+      console.log(JSON.stringify(currentProjectJson(result), null, 2));
+      return;
+    }
+    log(`\n  ${t(lang, 'noInstallsFound')}\n`);
+    return;
+  }
+
+  if (result.skills.cleanupFailed === 0) {
+    await upsertUpdatedProjectTargets(projectPath, result);
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(currentProjectJson(result), null, 2));
+    return;
+  }
+
+  logSingleProjectSummary(result, options, log);
 }
 
 export {

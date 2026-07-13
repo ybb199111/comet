@@ -2,7 +2,7 @@
 
 规范路径：`comet/reference/comet-yaml-fields.md`
 
-本文件是 `openspec/changes/<name>/` 下每个 change 级 `.comet.yaml` 状态文件的字段参考。按需查阅，不随 skill 一次性加载。项目级默认配置只放在 `.comet/config.yaml`。
+本文件是 `openspec/changes/<name>/` 下每个 change 级 `.comet.yaml` 状态文件的字段参考。按需查阅，不随 skill 一次性加载。项目级默认配置放在 `.comet/config.yaml`，全局默认配置放在 `~/.comet/config.yaml`；项目配置优先于全局配置。
 
 ## 示例
 
@@ -26,6 +26,7 @@ verification_report: null
 branch_status: pending
 created_at: 2026-05-26
 verified_at: null
+archive_confirmation: null
 archived: false
 ```
 
@@ -34,7 +35,7 @@ archived: false
 | 字段 | 含义 |
 |------|------|
 | `workflow` | `full`、`hotfix` 或 `tweak` |
-| `language` | 产物语言，仅支持 `en` 或 `zh-CN`。由 `comet init` 的初始化语言写入 `.comet/config.yaml`，创建 change 时快照到 `.comet.yaml`，用于约束 OpenSpec / Superpowers 产物主语言 |
+| `language` | 产物语言，仅支持 `en` 或 `zh-CN`。由 `comet init` 按安装范围写入项目或全局 `.comet/config.yaml`，创建 change 时按“项目优先、全局回退”快照到 `.comet.yaml`，用于约束 OpenSpec / Superpowers 产物主语言 |
 | `phase` | 当前阶段：`open`、`design`、`build`、`verify`、`archive`（init 统一设为 `open`，guard 负责过渡） |
 | `design_doc` | 关联的 Superpowers Design Doc 路径，可为空 |
 | `plan` | 关联的 Superpowers Plan 路径，可为空 |
@@ -52,6 +53,7 @@ archived: false
 | `branch_status` | `pending` 或 `handled`，分支处理完成后设为 `handled` |
 | `created_at` | change 创建日期（init 时自动写入），格式 `YYYY-MM-DD` |
 | `verified_at` | 验证通过时间，可为空 |
+| `archive_confirmation` | `null`、`pending` 或 `confirmed`。`verify-pass` 进入 archive 阶段时写入 `pending`；用户在 `/comet-archive` 最终确认选择「确认归档」后，`archive-confirm` transition 写入 `confirmed`；`archive-reopen` 会清空该字段，防止复用旧确认 |
 | `archived` | change 是否已归档 |
 
 ## 可选字段
@@ -70,4 +72,5 @@ archived: false
 - `build_mode: direct` 默认只允许 `hotfix` / `tweak`；full workflow 需要 `direct_override: true`
 - `build_pause` 不是执行方式，不得写入 `build_mode`
 - 这些约束同时存在于 `comet-guard.mjs build --apply` 和 `comet-state.mjs transition <name> build-complete`
+- `archive_confirmation` 是 machine-owned 字段，只能由 `verify-pass`、`archive-confirm` 和 `archive-reopen` transition 更新，不能通过 `set` 直接伪造确认；`archived` transition 和真实归档命令都要求其值为 `confirmed`
 - `preset-escalate` 事件：仅允许 `hotfix`/`tweak` workflow 在 `phase: build` 时调用，原子地把 `workflow`/`classic_profile` 置为 `full`、`phase` 回退到 `design`、清空 `design_doc`（满足 comet-design 入口要求）。这是预设升级到 full 的唯一合法通道——直接 `set phase design` 会被状态机硬拦截，`set classic_profile` 属于 machine-owned 字段不可手动设置

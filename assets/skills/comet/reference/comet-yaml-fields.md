@@ -3,7 +3,7 @@
 Canonical path: `comet/reference/comet-yaml-fields.md`
 
 This file is the field reference for each change-level `.comet.yaml` state file under `openspec/changes/<name>/`.
-Consult on demand; not loaded inline with skills. Project defaults live in `.comet/config.yaml`.
+Consult on demand; not loaded inline with skills. Project defaults live in `.comet/config.yaml`, global defaults live in `~/.comet/config.yaml`, and project values take precedence.
 
 ## Example
 
@@ -27,6 +27,7 @@ verification_report: null
 branch_status: pending
 created_at: 2026-05-26
 verified_at: null
+archive_confirmation: null
 archived: false
 ```
 
@@ -35,7 +36,7 @@ archived: false
 | Field | Meaning |
 |-------|---------|
 | `workflow` | `full`, `hotfix`, or `tweak` |
-| `language` | Artifact language, `en` or `zh-CN`. Written to `.comet/config.yaml` by `comet init`, snapshotted into `.comet.yaml` when a change is created, and used as the main-language constraint for OpenSpec / Superpowers artifacts |
+| `language` | Artifact language, `en` or `zh-CN`. Written to the project or global `.comet/config.yaml` according to install scope, snapshotted into `.comet.yaml` with project-over-global precedence when a change is created, and used as the main-language constraint for OpenSpec / Superpowers artifacts |
 | `phase` | Current phase: `open`, `design`, `build`, `verify`, `archive` (init sets `open`; guard handles transitions) |
 | `design_doc` | Associated Superpowers Design Doc path; may be empty |
 | `plan` | Associated Superpowers Plan path; may be empty |
@@ -53,6 +54,7 @@ archived: false
 | `branch_status` | `pending` or `handled`; set to `handled` after branch handling completes |
 | `created_at` | Change creation date (auto-written at init), format `YYYY-MM-DD` |
 | `verified_at` | Verification pass timestamp; may be empty |
+| `archive_confirmation` | `null`, `pending`, or `confirmed`. `verify-pass` writes `pending` when entering the archive phase; after the user selects "Confirm archive" in `/comet-archive`, the `archive-confirm` transition writes `confirmed`; `archive-reopen` clears the field so an earlier confirmation cannot be reused |
 | `archived` | Whether the change has been archived |
 
 ## Optional Fields
@@ -71,4 +73,5 @@ archived: false
 - `build_mode: direct` defaults to `hotfix`/`tweak` only; full workflow requires `direct_override: true`
 - `build_pause` is not an execution mode; must not be written to `build_mode`
 - These constraints exist in both `comet-guard.mjs build --apply` and `comet-state.mjs transition <name> build-complete`
+- `archive_confirmation` is machine-owned and can only be updated by the `verify-pass`, `archive-confirm`, and `archive-reopen` transitions; it cannot be forged with `set`, and both the `archived` transition and the mutating archive command require `confirmed`
 - `preset-escalate` event: only allows `hotfix`/`tweak` workflow at `phase: build`; atomically sets `workflow`/`classic_profile` to `full`, rewinds `phase` to `design`, and clears `design_doc` (satisfying the comet-design entry requirement). This is the only legal channel for a preset → full upgrade — direct `set phase design` is hard-blocked by the state machine, and `set classic_profile` is a machine-owned field that cannot be set manually
