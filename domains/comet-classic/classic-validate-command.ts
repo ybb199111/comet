@@ -31,7 +31,7 @@ const ENUMS: Record<string, readonly string[]> = {
   subagent_dispatch: ['confirmed'],
   tdd_mode: ['tdd', 'direct'],
   review_mode: ['off', 'standard', 'thorough'],
-  isolation: ['branch', 'worktree'],
+  isolation: ['current', 'branch', 'worktree'],
   verify_mode: ['light', 'full'],
   auto_transition: ['true', 'false'],
   verify_result: ['pending', 'pass', 'fail'],
@@ -129,6 +129,18 @@ export const classicValidateCommand: ClassicCommandHandler = async (args) => {
     }
     if (!values.includes(value)) {
       fail(`${field}='${value}' is not valid. Expected: ${values.join(' ')}`);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(record, 'bound_branch')) {
+    const value = record.bound_branch;
+    if (value !== null && typeof value !== 'string') {
+      fail(`bound_branch='${text(value)}' is not a string or null`);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(record, 'verify_failures')) {
+    const value = record.verify_failures;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      fail(`verify_failures='${text(value)}' is not a non-negative integer`);
     }
   }
   for (const field of ['design_doc', 'plan', 'handoff_context'] as const) {

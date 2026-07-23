@@ -10,11 +10,7 @@ const cli = path.join(repositoryRoot, 'bin', 'comet.js');
 const stateScript = path.resolve('assets', 'skills', 'comet', 'scripts', 'comet-state.mjs');
 const activeChange = 'resume-probe-change';
 
-function runCli(
-  cwd: string,
-  args: string[],
-  input?: string,
-): ReturnType<typeof spawnSync> {
+function runCli(cwd: string, args: string[], input?: string): ReturnType<typeof spawnSync> {
   return spawnSync(process.execPath, [cli, ...args], {
     cwd,
     encoding: 'utf8',
@@ -39,6 +35,9 @@ function parseResult(stdout: string) {
   return JSON.parse(stdout) as {
     action: string;
     schema_version: string;
+    workflow: string | null;
+    skill: string | null;
+    entrySource: string | null;
     changeName: string | null;
     phase: string | null;
     confidence: string;
@@ -76,16 +75,94 @@ describe('resumeProbe command', () => {
   });
 
   it('returns JSON using top-level CLI invocation and --utterance', () => {
+    const result = runCli(tmpDir, ['resume-probe', tmpDir, '--utterance', '继续', '--json']);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(parseResult(result.stdout)).toMatchObject({
+      schema_version: 'comet.resume_probe.v2',
+      workflow: 'classic',
+      skill: 'comet-classic',
+      entrySource: 'legacy-fallback',
+      action: 'auto_resume',
+      nextCommand: '/comet-classic',
+    });
+  });
+
+  it('renders the resolved workflow and permanent entry in text mode', () => {
+    const result = runCli(tmpDir, ['resume-probe', tmpDir, '--utterance', '继续']);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('workflow: classic');
+    expect(result.stdout).toContain('skill: comet-classic');
+    expect(result.stdout).toContain('next: /comet-classic');
+  });
+
+  it('honors ambient_resume: false in a legacy Classic project config', async () => {
+    await fs.writeFile(
+      path.join(tmpDir, '.comet', 'config.yaml'),
+      'language: en\nambient_resume: false\n',
+      'utf8',
+    );
+
+    const result = runCli(tmpDir, ['resume-probe', tmpDir, '--utterance', '继续', '--json']);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(parseResult(result.stdout)).toMatchObject({
+      workflow: null,
+      skill: null,
+      action: 'out_of_scope',
+      reason: 'Ambient Resume is disabled by .comet/config.yaml',
+      nextCommand: null,
+    });
+  });
+
+  it('routes a configured Native project without considering Classic changes', async () => {
+    const initialized = runCli(tmpDir, ['native', 'init', '--language', 'en']);
+    expect(initialized.status, initialized.stderr).toBe(0);
+    const created = runCli(tmpDir, ['native', 'new', 'native-resume']);
+    expect(created.status, created.stderr).toBe(0);
+    const changeDir = path.join(tmpDir, 'docs', 'comet', 'changes', 'native-resume');
+    await fs.writeFile(
+      path.join(changeDir, 'brief.md'),
+      [
+        '# Outcome',
+        'Resume Native.',
+        '# Scope',
+        'One change.',
+        '# Non-goals',
+        'No Classic work.',
+        '# Acceptance examples',
+        '- Resume the selected change.',
+        '# Constraints and invariants',
+        'Keep workflows separate.',
+        '# Decisions',
+        'Use Native.',
+        '# Open questions',
+        'None.',
+        '# Verification expectations',
+        'Run focused tests.',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
     const result = runCli(tmpDir, [
       'resume-probe',
       tmpDir,
       '--utterance',
-      '继续',
+      '继续 native-resume',
       '--json',
     ]);
 
     expect(result.status, result.stderr).toBe(0);
-    expect(parseResult(result.stdout).action).toBe('auto_resume');
+    expect(parseResult(result.stdout)).toMatchObject({
+      workflow: 'native',
+      skill: 'comet-native',
+      entrySource: 'project-config',
+      action: 'auto_resume',
+      changeName: 'native-resume',
+      nextCommand: '/comet-native',
+    });
   });
 
   it('uses stdin over --utterance when --stdin is set', () => {

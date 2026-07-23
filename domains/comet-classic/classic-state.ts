@@ -12,7 +12,7 @@ const BUILD_PAUSES = ['plan-ready'] as const;
 const SUBAGENT_DISPATCH = ['confirmed'] as const;
 const TDD_MODES = ['tdd', 'direct'] as const;
 const REVIEW_MODES = ['off', 'standard', 'thorough'] as const;
-const ISOLATIONS = ['branch', 'worktree'] as const;
+const ISOLATIONS = ['current', 'branch', 'worktree'] as const;
 const VERIFY_MODES = ['light', 'full'] as const;
 const VERIFY_RESULTS = ['pending', 'pass', 'fail'] as const;
 const BRANCH_STATUSES = ['pending', 'handled'] as const;
@@ -33,12 +33,14 @@ export interface ClassicState {
   tddMode: (typeof TDD_MODES)[number] | null;
   reviewMode: (typeof REVIEW_MODES)[number] | null;
   isolation: (typeof ISOLATIONS)[number] | null;
+  boundBranch: string | null;
   verifyMode: (typeof VERIFY_MODES)[number] | null;
   autoTransition: boolean | null;
   baseRef: string | null;
   designDoc: string | null;
   plan: string | null;
   verifyResult: (typeof VERIFY_RESULTS)[number];
+  verifyFailures: number;
   verificationReport: string | null;
   branchStatus: (typeof BRANCH_STATUSES)[number] | null;
   createdAt: string | null;
@@ -69,12 +71,14 @@ export const CLASSIC_WIRE_KEYS = [
   'tdd_mode',
   'review_mode',
   'isolation',
+  'bound_branch',
   'verify_mode',
   'auto_transition',
   'base_ref',
   'design_doc',
   'plan',
   'verify_result',
+  'verify_failures',
   'verification_report',
   'branch_status',
   'created_at',
@@ -153,6 +157,15 @@ function booleanValue(doc: StateDocument, key: string, nullable = true): boolean
   return value;
 }
 
+function nonNegativeInteger(doc: StateDocument, key: string, fallback = 0): number {
+  const value = doc[key];
+  if (value === null || value === undefined || value === '') return fallback;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(`Invalid Classic state: ${key} must be a non-negative integer`);
+  }
+  return value;
+}
+
 function relativePath(doc: StateDocument, key: string): string | null {
   const value = nullableString(doc, key);
   if (value === null) return null;
@@ -200,12 +213,14 @@ function classicStateFromDocument(doc: StateDocument): ClassicState | null {
     tddMode: enumValue(doc, 'tdd_mode', TDD_MODES),
     reviewMode: enumValue(doc, 'review_mode', REVIEW_MODES),
     isolation: enumValue(doc, 'isolation', ISOLATIONS),
+    boundBranch: nullableString(doc, 'bound_branch'),
     verifyMode: enumValue(doc, 'verify_mode', VERIFY_MODES),
     autoTransition: booleanValue(doc, 'auto_transition'),
     baseRef: nullableString(doc, 'base_ref'),
     designDoc: relativePath(doc, 'design_doc'),
     plan: relativePath(doc, 'plan'),
     verifyResult: enumValue(doc, 'verify_result', VERIFY_RESULTS, false)!,
+    verifyFailures: nonNegativeInteger(doc, 'verify_failures'),
     verificationReport: relativePath(doc, 'verification_report'),
     branchStatus: enumValue(doc, 'branch_status', BRANCH_STATUSES),
     createdAt: nullableString(doc, 'created_at'),
@@ -288,12 +303,14 @@ export function classicStateToDocument(state: ClassicState): StateDocument {
     tdd_mode: state.tddMode,
     review_mode: state.reviewMode,
     isolation: state.isolation,
+    bound_branch: state.boundBranch,
     verify_mode: state.verifyMode,
     auto_transition: state.autoTransition,
     base_ref: state.baseRef,
     design_doc: state.designDoc,
     plan: state.plan,
     verify_result: state.verifyResult,
+    verify_failures: state.verifyFailures,
     verification_report: state.verificationReport,
     branch_status: state.branchStatus,
     created_at: state.createdAt,

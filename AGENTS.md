@@ -4,22 +4,31 @@
 
 ## 测试
 
+验证范围必须与改动风险相匹配，不要在每次编辑后默认运行全量测试。
+
+- 每轮先运行覆盖当前改动的最小相关测试。
+- 纯文档或 Skill 内容修改：运行相关契约测试和受影响文件的 Prettier 检查。
+- 单一 `app/`、`domains/` 或 `platform/` 模块修改：运行对应测试；涉及编译、Runtime 或生成物时再运行 build。
+- 跨模块、Runtime、安装/路由、发布准备或其他高风险修改：最终交付前运行一次全量测试。
+- 全量测试失败或超时时，先定位原因；只有修正了明确原因后才重跑，不盲目重复。
+- CI 已覆盖全量检查时，可以在本地只运行相关验证，但交付时必须明确说明未在本地运行的检查。
+
 ```bash
-npx vitest run test/domains/comet-classic/comet-scripts.test.ts   # shell 脚本测试
-npx vitest run                                   # 全量测试
+npx vitest run <相关测试文件>                     # 默认：最小相关测试
+npx vitest run                                   # 高风险修改或最终交付前的全量测试
 ```
 
 ## 提交前检查
 
-仓库已配置 Git pre-commit 钩子（husky + lint-staged），每次 `git commit` 会自动对 `app/`、`domains/`、`platform/` 下的暂存源文件运行 `prettier --write`（与 CI `format:check` 范围一致），编辑器无关，所有贡献者生效。
+仓库已配置 Git pre-commit 钩子（husky + lint-staged），每次 `git commit` 会自动对 `app/`、`domains/`、`platform/`、`scripts/`、`test/`、`.github/`、`config/` 下的暂存源文件运行 `prettier --write`（与 CI `format:check` 范围一致；冻结的 `test/fixtures/` 除外），编辑器无关，所有贡献者生效。
 
-提交前建议手动确认（CI 会强制检查）：
+根据改动范围选择提交前检查；不要求每个提交机械地运行全部命令（CI 会执行完整检查）：
 
 ```bash
-pnpm format:check   # Prettier 格式检查
-pnpm lint           # ESLint
-pnpm build          # TypeScript 构建
-pnpm test           # 单元测试
+pnpm format:check   # 大范围格式检查；小范围可只检查受影响文件
+pnpm lint           # 修改源码、测试、脚本或配置时
+pnpm build          # 涉及编译、Runtime、生成物或发布资产时
+pnpm test           # 高风险修改或最终交付前需要本地全量验证时
 ```
 
 注：本地 Windows 若 `core.autocrlf=true`，未改动的旧文件可能因 CRLF 被 `prettier --check` 误报；钩子只处理暂存文件，不受影响，旧文件下次编辑时会自动转为 LF。
@@ -41,7 +50,7 @@ pnpm test           # 单元测试
 当前源码目录按责任分层：
 
 - `app/`：CLI 入口、命令编排和用户交互层。只能组合 domain/platform 能力，不承载领域规则。
-- `domains/`：业务领域模块。每个子目录是一个可独立维护的领域模块，例如 `domains/bundle/`、`domains/comet-classic/`、`domains/dashboard/`、`domains/skill/`。
+- `domains/`：业务领域模块。每个子目录是一个可独立维护的领域模块，例如 `domains/bundle/`、`domains/comet-classic/`、`domains/comet-native/`、`domains/comet-entry/`、`domains/dashboard/`、`domains/skill/`、`domains/workflow-contract/`。
 - `platform/`：文件系统、进程、安装平台、版本、路径等平台适配能力。domain 不应直接散落平台差异逻辑。
 - `scripts/`：构建、发布、benchmark、lint 等仓库自动化脚本。可调用源码模块，但不要成为运行时业务入口。
 - `assets/`：发布资产和内置 Skill 内容。修改 runtime 源码后必须通过构建同步生成资产，不要把业务逻辑只写在生成物里。
@@ -56,7 +65,7 @@ pnpm test           # 单元测试
 - `test/fixtures/` 和 `test/helpers/` 只放测试数据与测试工具。
 - 禁止新增或恢复 `test/ts/` 这种横向桶；旧文件应迁移到上面对应目录。
 
-架构约束由 `pnpm run lint:architecture` 校验，并已接入 `pnpm lint`。它会检查顶层目录白名单、活跃源码根、app/domain/platform 子模块、脚本模块、Classic runtime 入口/生成物、内置 Skill 根目录、测试归属和禁止旧目录回归。如果确实需要新增顶层目录、源码模块、测试根目录或例外，必须先更新 `config/repository-layout.json`、架构 linter 和本节说明。
+架构约束由 `pnpm run lint:architecture` 校验，并已接入 `pnpm lint`。它会检查顶层目录白名单、活跃源码根、app/domain/platform 子模块、脚本模块、Classic/Native/Entry runtime 入口与生成物、内置 Skill 根目录、测试归属和禁止旧目录回归。如果确实需要新增顶层目录、源码模块、测试根目录或例外，必须先更新 `config/repository-layout.json`、架构 linter 和本节说明。
 
 ## Classic runtime 脚本规范
 
@@ -66,6 +75,16 @@ pnpm test           # 单元测试
 - launcher 必须保持薄封装，只 import `./comet-runtime.mjs` 并调用对应命令；不要把业务逻辑写回 launcher
 - 不再新增 `.sh` runtime；测试 fixture `test/fixtures/classic-0.3.9/` 是冻结参考实现，只用于差分兼容
 - 新增 launcher 或 runtime 文件必须加入 `test/domains/comet-classic/comet-scripts.test.ts` 的 `beforeEach` 拷贝列表和 `assets/manifest.json`
+- `comet-hook-guard.mjs` 是 Classic Guard launcher，不再作为平台 Hook 直接安装；平台统一安装的 Hook 入口是 `comet-hook-router.mjs`
+
+## Native 与 Entry runtime 规范
+
+- Native 运行时源码位于 `domains/comet-native/`，修改后必须运行 `pnpm build:native-runtime` 同步 `assets/skills/comet-native/scripts/comet-native-runtime.mjs`
+- `comet-native-hook-guard.mjs` 是调用 Native runtime 的薄 Guard launcher，不作为平台 Hook 直接安装；Native 主流程与 Guard 都不得依赖外部 Skill
+- 共享入口与 Hook Router 源码位于 `domains/comet-entry/`，修改后必须运行 `pnpm build:entry-runtime`，同步 `comet-entry-runtime.mjs` 与 `comet-hook-router.mjs`
+- 每个平台只安装一份 `comet-workflow-guard` Rule；支持 Hook 的平台只安装一个 `comet-hook-router.mjs`
+- Router 通过 `.comet/current-change.json` 的 `workflow + change` 确定当前需求归属，一次写入最多调用一个 workflow Guard；Native 与 Classic 的 phase、目录、schema 和 Guard 逻辑保持独立
+- 新增或重命名 runtime 入口/生成物时，同步 `config/repository-layout.json`、`assets/manifest.json` 和对应的 `test/repository/*-runtime-assets.test.ts`
 
 ## 脚本依赖关系
 
@@ -76,10 +95,14 @@ comet-guard.mjs ← comet-runtime.mjs
 comet-handoff.mjs ← comet-runtime.mjs (写入 handoff_context/handoff_hash)
 comet-archive.mjs ← comet-runtime.mjs
 comet-yaml-validate.mjs ← comet-runtime.mjs
-comet-hook-guard.mjs ← comet-runtime.mjs
+comet-hook-guard.mjs ← comet-runtime.mjs (Classic Guard launcher，不直接安装为平台 Hook)
+comet-native-runtime.mjs ← domains/comet-native/*
+comet-native-hook-guard.mjs ← comet-native-runtime.mjs (Native Guard launcher，不直接安装为平台 Hook)
+comet-entry-runtime.mjs ← domains/comet-entry/*
+comet-hook-router.mjs ← domains/comet-entry/* (平台唯一 Hook 入口，路由一个 workflow Guard)
 ```
 
-新增共享工具函数时（如 archive 目录解析、change name 校验、hash、yaml 解析），优先放在 `domains/comet-classic/` 的共享模块中，再重新生成 runtime，避免多个命令漂移。
+Classic launcher 之间新增共享工具函数时（如 archive 目录解析、change name 校验、hash、yaml 解析），优先放在 `domains/comet-classic/` 的共享模块中，再重新生成 runtime，避免多个命令漂移。跨 workflow 的稳定契约放在 `domains/workflow-contract/`，入口归属与路由放在 `domains/comet-entry/`；不要为了复用而合并 Native 与 Classic 的状态机或 Guard。
 
 ## .comet.yaml 状态机
 
@@ -201,3 +224,19 @@ Changelog写英文
 ## README改动
 
 先写中文，再写英文，当feature更新后，更新README应该保持克制，确定是否是必要的需要列在READMD的内容，这部分要用户阅读友好，必要的亮点特性应该以文档引用的形式存在docs目录下
+
+<comet-ambient-resume>
+<!-- Managed by Comet. Edits inside this block may be replaced by comet init/update. -->
+<!-- Contract: comet.resume_probe.v2 -->
+
+## Comet Ambient Resume
+
+在这个仓库中，开始处理需要改动或调查的任务前，如果可能存在活跃 Comet workflow，把当前用户请求传入只读探针：`comet resume-probe . --stdin --json`。
+
+- 只信任返回的 `workflow`、`skill` 和 `entrySource`；它们只由项目配置或无配置兼容回退决定。不得扫描或切换另一套 workflow。
+- 如果 probe 返回 `auto_resume`，简短说明选中的 active change，并进入 `nextCommand` 指向的永久入口。不要把状态命令当作恢复入口直接推进。
+- 如果 probe 返回 `ask_user`，只问一个简短问题并等待用户回复。
+- 如果 probe 返回 `out_of_scope` 或 `none`，不要进入 Comet workflow。
+- 如果配置或状态无效且没有 `nextCommand`，停止并报告原因；不要猜测另一个 workflow。
+- 不能只因为存在 active change 就把无关任务挂到该 change。Native 的未提交改动由 Native 入口检查，不由探针自动归因。
+</comet-ambient-resume>

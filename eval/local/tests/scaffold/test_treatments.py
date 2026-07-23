@@ -92,15 +92,20 @@ def test_build_treatment_skills_rejects_path_without_skill_md(tmp_path: Path):
     skill_dir.mkdir()
 
     with pytest.raises(FileNotFoundError, match="SKILL.md"):
-        build_treatment_skills(
-            [{"name": "broken-skill", "source": "path", "path": str(skill_dir)}]
-        )
+        build_treatment_skills([{"name": "broken-skill", "source": "path", "path": str(skill_dir)}])
 
 
 def test_load_treatments_keeps_comet_core_categories_only():
     treatments = load_treatments()
 
-    assert set(treatments) == {"CONTROL", "COMET_FULL_040_BETA", "COMET_FULL_039"}
+    assert set(treatments) == {
+        "CONTROL",
+        "COMET_FULL_040_BETA",
+        "COMET_FULL_039",
+        "COMET_NATIVE_BATCH",
+        "COMET_NATIVE_PHASE1",
+        "COMET_NATIVE_SEQUENTIAL",
+    }
     assert all(isinstance(treatment, TreatmentConfig) for treatment in treatments.values())
 
 
@@ -149,14 +154,52 @@ def test_comet_full_039_includes_same_dependency_snapshot():
     assert names.issuperset(_benchmark_child_names("dependency", "superpowers"))
 
 
+def test_comet_native_phase1_is_self_contained():
+    treatment = load_treatments()["COMET_NATIVE_PHASE1"]
+
+    assert {skill["name"] for skill in treatment.skills} == {"comet-native"}
+    assert treatment.skills[0]["source"] == "path"
+    assert "assets/skills/comet-native" in treatment.skills[0]["path"]
+    assert treatment.skills[0]["profile"] == "generic"
+    assert treatment.skills[0]["required_skills"] == ["comet-native"]
+    assert treatment.skills[0]["require_skill_invocation"] is True
+    assert "Shape, Build, Verify, and Archive" in treatment.claude_md
+    assert "OpenSpec" in treatment.claude_md
+    normalized_claude_md = " ".join(treatment.claude_md.split())
+    assert "continue automatically while no user decision is unresolved" in normalized_claude_md
+    assert "explicit execution boundary" in normalized_claude_md
+    assert "takes priority over automatic progression" in normalized_claude_md
+    assert "material user decision" not in normalized_claude_md
+
+    skills = build_treatment_skills(treatment.skills)
+    assert set(skills) == {"comet-native"}
+    assert skills["comet-native"]["scripts_dir"].name == "scripts"
+    assert skills["comet-native"]["source_dir"].name == "comet-native"
+
+
+@pytest.mark.parametrize(
+    ("name", "mode"),
+    [
+        ("COMET_NATIVE_SEQUENTIAL", "sequential"),
+        ("COMET_NATIVE_BATCH", "batch"),
+    ],
+)
+def test_comet_native_clarification_treatments_are_self_contained(name: str, mode: str):
+    treatment = load_treatments()[name]
+
+    assert {skill["name"] for skill in treatment.skills} == {"comet-native"}
+    assert treatment.skills[0]["source"] == "path"
+    assert treatment.skills[0]["profile"] == "generic"
+    assert f"clarification_mode `{mode}`" in treatment.claude_md
+    assert "Do not change the configured clarification mode" in treatment.claude_md
+
+
 def test_comet_treatments_point_at_versioned_comet_snapshots():
     COMET_FULL_040_BETA = load_treatments()["COMET_FULL_040_BETA"]
     comet_039 = load_treatments()["COMET_FULL_039"]
 
     assert {
-        skill["skill"]
-        for skill in COMET_FULL_040_BETA.skills
-        if skill["name"].startswith("comet")
+        skill["skill"] for skill in COMET_FULL_040_BETA.skills if skill["name"].startswith("comet")
     } == {
         "040-beta/comet",
         "040-beta/comet-open",
@@ -167,11 +210,7 @@ def test_comet_treatments_point_at_versioned_comet_snapshots():
         "040-beta/comet-hotfix",
         "040-beta/comet-tweak",
     }
-    assert {
-        skill["skill"]
-        for skill in comet_039.skills
-        if skill["name"].startswith("comet")
-    } == {
+    assert {skill["skill"] for skill in comet_039.skills if skill["name"].startswith("comet")} == {
         "039-release/comet-classic-039",
         "039-release/comet-classic-039-open",
         "039-release/comet-classic-039-design",
@@ -241,4 +280,11 @@ def test_comet_full_040_beta_dependency_paths_are_loadable():
 
 
 def test_list_treatments_is_sorted_for_stable_cli_output():
-    assert list_treatments() == ["COMET_FULL_039", "COMET_FULL_040_BETA", "CONTROL"]
+    assert list_treatments() == [
+        "COMET_FULL_039",
+        "COMET_FULL_040_BETA",
+        "COMET_NATIVE_BATCH",
+        "COMET_NATIVE_PHASE1",
+        "COMET_NATIVE_SEQUENTIAL",
+        "CONTROL",
+    ]

@@ -54,6 +54,7 @@ def write_report_outputs(
     config: ReportOutputConfig,
     *,
     title: str,
+    html_markdown: str | None = None,
 ) -> dict[str, Path]:
     """Write enabled report formats and return paths by format name."""
     written: dict[str, Path] = {}
@@ -66,7 +67,10 @@ def write_report_outputs(
     if config.html:
         html_path = markdown_path.with_suffix(".html")
         html_path.parent.mkdir(parents=True, exist_ok=True)
-        html_path.write_text(render_markdown_html(markdown, title=title), encoding="utf-8")
+        html_path.write_text(
+            render_markdown_html(html_markdown or markdown, title=title),
+            encoding="utf-8",
+        )
         written["html"] = html_path
 
     return written
@@ -418,7 +422,11 @@ def _render_paper_abstract(markdown: str, *, lang: str) -> str:
         )
         label = "摘要。"
     else:
-        scope = f"This report compares {treatments}" if treatments else "This report compares the baselines"
+        scope = (
+            f"This report compares {treatments}"
+            if treatments
+            else "This report compares the baselines"
+        )
         experiment_text = f" for experiment {experiment}" if experiment else ""
         text = (
             f"{scope}{experiment_text}. It reports business completion, workflow completion, "
@@ -745,9 +753,7 @@ def _rubric_delta_svg(data: list[tuple[str, float]], *, lang: str) -> str:
     zero_x = x0 + (0 - x_min) * scale
     title = "Rubric 维度差异" if lang == "zh" else "Rubric dimension deltas"
     subtitle = (
-        "当前 workflow 减去 0.3.9 基线"
-        if lang == "zh"
-        else "Current workflow minus 0.3.9 baseline"
+        "当前 workflow 减去 0.3.9 基线" if lang == "zh" else "Current workflow minus 0.3.9 baseline"
     )
     parts = _svg_header(
         width,
@@ -759,8 +765,7 @@ def _rubric_delta_svg(data: list[tuple[str, float]], *, lang: str) -> str:
         x = x0 + (tick - x_min) * scale
         klass = "axis" if abs(tick) < 0.0001 else "grid"
         parts.append(
-            f'<line class="{klass}" x1="{x:.1f}" y1="68" '
-            f'x2="{x:.1f}" y2="{height - 58}" />'
+            f'<line class="{klass}" x1="{x:.1f}" y1="68" x2="{x:.1f}" y2="{height - 58}" />'
         )
         parts.append(
             f'<text class="tick" x="{x:.1f}" y="{height - 26}" '
@@ -777,8 +782,7 @@ def _rubric_delta_svg(data: list[tuple[str, float]], *, lang: str) -> str:
         )
         parts.append(f'<circle cx="{x:.1f}" cy="{y}" r="5.2" fill="{color}" />')
         parts.append(
-            f'<text class="value" x="850" y="{y + 4}" '
-            f'text-anchor="end">{delta:+.2f}</text>'
+            f'<text class="value" x="850" y="{y + 4}" text-anchor="end">{delta:+.2f}</text>'
         )
     parts.append("</svg>")
     return "\n".join(parts)
@@ -794,22 +798,18 @@ def _quality_cost_svg(points: list[tuple[str, float, float, float]], *, lang: st
     for tick in _linear_ticks(0, max_tokens, 4):
         x = left + (tick / max_tokens) * plot_w
         parts.append(
-            f'<line class="grid" x1="{x:.1f}" y1="{top}" '
-            f'x2="{x:.1f}" y2="{top + plot_h}" />'
+            f'<line class="grid" x1="{x:.1f}" y1="{top}" x2="{x:.1f}" y2="{top + plot_h}" />'
         )
         parts.append(
-            f'<text class="tick" x="{x:.1f}" y="402" '
-            f'text-anchor="middle">{tick:.1f}M</text>'
+            f'<text class="tick" x="{x:.1f}" y="402" text-anchor="middle">{tick:.1f}M</text>'
         )
     for tick in (0.3, 0.5, 0.7, 0.9):
         y = top + (0.9 - tick) / 0.6 * plot_h
         parts.append(
-            f'<line class="grid" x1="{left}" y1="{y:.1f}" '
-            f'x2="{left + plot_w}" y2="{y:.1f}" />'
+            f'<line class="grid" x1="{left}" y1="{y:.1f}" x2="{left + plot_w}" y2="{y:.1f}" />'
         )
         parts.append(
-            f'<text class="tick" x="60" y="{y + 4:.1f}" '
-            f'text-anchor="end">{tick:.1f}</text>'
+            f'<text class="tick" x="60" y="{y + 4:.1f}" text-anchor="end">{tick:.1f}</text>'
         )
     parts.append(
         f'<line class="axis" x1="{left}" y1="{top + plot_h}" '
@@ -833,11 +833,7 @@ def _quality_cost_svg(points: list[tuple[str, float, float, float]], *, lang: st
         color = CURRENT if is_current else BASELINE
         anchor = "end" if x > left + plot_w * 0.72 else "start"
         text_x = x - 14 if anchor == "end" else x + 14
-        display_label = (
-            ("当前 workflow" if is_current else "0.3.9 基线")
-            if lang == "zh"
-            else label
-        )
+        display_label = ("当前 workflow" if is_current else "0.3.9 基线") if lang == "zh" else label
         parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="8" fill="{color}" />')
         parts.append(
             f'<text class="value" x="{text_x:.1f}" y="{y - 10:.1f}" '
@@ -868,9 +864,7 @@ def _task_outcomes_svg(tasks: list[tuple[str, bool | None, bool | None]], *, lan
     subtitle = "绿色表示通过；红色表示失败" if lang == "zh" else "Green means pass; red means fail"
     parts = _svg_header(width, height, title, subtitle)
     column_labels = (
-        ("当前 workflow", "0.3.9 基线")
-        if lang == "zh"
-        else ("Current workflow", "0.3.9 baseline")
+        ("当前 workflow", "0.3.9 基线") if lang == "zh" else ("Current workflow", "0.3.9 baseline")
     )
     for i, label in enumerate(column_labels):
         x = left + i * (cell_w + 28) + cell_w / 2
@@ -888,8 +882,7 @@ def _task_outcomes_svg(tasks: list[tuple[str, bool | None, bool | None]], *, lan
             else:
                 status = "PASS" if passed else "FAIL"
             parts.append(
-                f'<rect x="{x}" y="{y}" width="{cell_w}" height="{cell_h}" '
-                f'rx="2" fill="{color}" />'
+                f'<rect x="{x}" y="{y}" width="{cell_w}" height="{cell_h}" rx="2" fill="{color}" />'
             )
             parts.append(
                 f'<text x="{x + cell_w / 2:.1f}" y="{y + 22}" '
@@ -980,6 +973,122 @@ def _indent(text: str, spaces: int) -> str:
 def _localize_eval_markdown(markdown: str) -> str:
     """Translate the human-facing eval report shell for HTML display only."""
     replacements = [
+        ("# Comet Aligned Experiment Comparison Report", "# Comet 对齐实验对比报告"),
+        ("- Candidate:", "- 候选模式："),
+        ("- Baseline:", "- 基准模式："),
+        ("- Requested k:", "- 请求的 k："),
+        (
+            "## Alignment contract",
+            "> 数据清洗：超时、缺失完整 report 或无法组成同 repetition 严格配对的样本已剔除，不进入成功率和效率指标。已完成但验证失败的样本仍作为有效失败保留，避免人为抬高成功率。\n\n## 对齐规则",
+        ),
+        (
+            "- Runs pair only when `task` and repetition match. Two v2 records must also match the full execution-bound `case_hash`; when either side is historical v1, only the shared task-core hash can be checked and the limitation is disclosed below.",
+            "- 仅当 `task` 和 repetition 相同时才配对。两个 v2 记录还必须具有相同的完整执行级 `case_hash`；若任一侧为历史 v1，则只能校验共享的 task-core hash，限制会在下文说明。",
+        ),
+        (
+            "- Expected task/repetition coverage comes from each experiment's controller-written matrix when available, not from the reports that happened to survive.",
+            "- 预期的 task/repetition 覆盖以实验控制器写入的矩阵为准，不以偶然保留下来的 report 反推。",
+        ),
+        (
+            "- Metrics are computed per task and then macro-averaged; runs are never pooled across tasks.",
+            "- 指标先按 task 计算，再做宏平均；不会把不同 task 的运行混在一起。",
+        ),
+        (
+            "- A task with fewer than k aligned repetitions is excluded from that k's task coverage; k is never reduced.",
+            "- 某 task 的对齐 repetition 少于 k 时，该 task 不纳入该 k 的统计；k 不会被自动降低。",
+        ),
+        (
+            "- Duration is reparsed from raw stdout with the current additive result-event parser. Stored historical duration fields are not mixed into this metric.",
+            "- 耗时使用当前累加式 result-event 解析器从 raw stdout 重算，不混用历史存储的 duration 字段。",
+        ),
+        ("## Alignment summary", "## 对齐摘要"),
+        (
+            "| Candidate runs | Baseline runs | Expected task/rep keys | Strictly matched pairs | Tasks | Issues |",
+            "| 发现的候选 report 数 | 发现的基准 report 数 | 预期 task/rep 键 | 有效严格配对数 | Task 数 | 剔除数 |",
+        ),
+        ("## Expected case matrix audit", "## 预期用例矩阵审计"),
+        (
+            "| Experiment | Source | Matrix hash | Target cases |",
+            "| 实验 | 来源 | 矩阵 hash | 目标用例数 |",
+        ),
+        (
+            "## pass@k / pass^k — task macro average",
+            "## pass@k / pass^k — Task 宏平均",
+        ),
+        (
+            "Each value is the mean of the per-task estimator. Coverage is shown as eligible tasks / all aligned task names.",
+            "每个值都是先按 task 计算后的平均值。覆盖率表示为可统计 task 数 / 全部对齐 task 数。",
+        ),
+        (
+            "`pass@k` uses the HumanEval at-least-one-success estimator. `pass^k` keeps Comet's observed consistency lower bound: a task contributes 1 only when all of its aligned repetitions pass.",
+            "`pass@k` 使用 HumanEval 的至少一次成功估计。`pass^k` 表示 Comet 的一致性下限：只有当某 task 的所有对齐 repetition 都通过时才记为 1。",
+        ),
+        (
+            "| Treatment | Metric |",
+            "| Treatment | 指标 |",
+        ),
+        ("| Matched pass/fail |", "| 对齐通过/失败 |"),
+        ("## Duration from raw stdout", "## 基于 raw stdout 的耗时"),
+        (
+            "Missing raw duration is reported as missing coverage and is not replaced by, or averaged with, the stored report duration.",
+            "缺失的 raw duration 只记为覆盖缺口，不使用 report 中存储的 duration 替代或混合平均。",
+        ),
+        (
+            "| Treatment | Matched runs | Duration coverage | Total | Average / covered run | Source |",
+            "| Treatment | 对齐运行数 | 耗时覆盖 | 总计 | 平均每次有效运行 | 来源 |",
+        ),
+        (
+            "Result telemetry is additive across the initial model start, deterministic user-answer resumes, and cold resumes. Token totals include cache-read tokens. Context input deduplicates streamed assistant events by message id.",
+            "Result 遥测会累加首次模型启动、用户答案恢复和冷恢复。Token 总量包含缓存读取；上下文输入会按 message id 去重流式 assistant 事件。",
+        ),
+        (
+            "This is the primary completed-task efficiency view: both candidate and baseline passed the same task repetition.",
+            "这是已完成 task 的主要效率视图：候选模式与基准模式在同一 task repetition 上都必须通过。",
+        ),
+        (
+            "> Context rows require per-assistant-message usage from both sides. Low pair coverage means the historical CLI did not preserve enough context telemetry; those rows must not be promoted as a workflow comparison.",
+            "> 上下文指标要求两侧都保留每条 assistant message 的 usage。配对覆盖率较低时，这些指标不能上升为 workflow 对比结论。",
+        ),
+        ("## Case manifest audit", "## 用例 Manifest 审计"),
+        (
+            "Hash cells show the first 12 hexadecimal characters. Full hashes remain in the source report when report-bound; fallback hashes are reproducible from the task tree.",
+            "Hash 单元格只显示前 12 位十六进制字符。report-bound 记录的完整 hash 保留在源 report 中；fallback hash 可由 task tree 重现。",
+        ),
+        (
+            "| Task | Candidate case | Baseline case | Source | Instruction | Validator | Environment | Prompt | Runner | Controller | Execution |",
+            "| Task | 候选用例 | 基准用例 | 来源 | 任务说明 | Validator | 环境 | Prompt | Runner | Controller | 执行身份 |",
+        ),
+        (
+            "## Task outcomes on strictly matched repetitions",
+            "## 严格配对 repetition 的 Task 结果",
+        ),
+        (
+            "| Task | Repetitions | Candidate | Baseline |",
+            "| Task | Repetition | 候选模式 | 基准模式 |",
+        ),
+        ("## Alignment issues", "## 已剔除的数据"),
+        ("Issue counts:", "剔除数量："),
+        (
+            "| Task | Rep | Reason | Detail |",
+            "| Task | Rep | 原因 | 详情 |",
+        ),
+        ("missing-repetition", "缺失 repetition"),
+        ("missing baseline run", "缺失基准模式运行"),
+        ("missing candidate run", "缺失候选模式运行"),
+        ("_None._", "_无。_"),
+        ("Candidate average", "候选模式平均值"),
+        ("Baseline average", "基准模式平均值"),
+        ("Candidate delta", "候选模式差异"),
+        ("Complete pairs", "完整配对"),
+        (" paired runs)", " 个配对运行)"),
+        ("% less", "% 更少"),
+        ("% more", "% 更多"),
+        ("` from `", "`，来源：`"),
+        ("| Candidate |", "| 候选模式 |"),
+        ("| Baseline |", "| 基准模式 |"),
+        ("| Treatment |", "| 模式 |"),
+        ("| Metric |", "| 指标 |"),
+        (" tasks)", " 个 task)"),
         ("# Comet Baseline Comparison Report", "# Comet 基线对比报告"),
         ("- Experiment:", "- 实验："),
         ("- Treatments with data:", "- 有数据的 Treatment："),
@@ -987,20 +1096,62 @@ def _localize_eval_markdown(markdown: str) -> str:
         ("## Metric guide", "## 指标说明"),
         ("| Metric | Meaning | Source | Report section |", "| 指标 | 含义 | 来源 | 报告位置 |"),
         ("|--------|---------|--------|----------------|", "|------|------|------|----------|"),
-        ("| `raw runs` | All discovered report JSON files before quality filtering. | report files | Data quality summary |", "| `raw runs` | 质量过滤前发现的全部 report JSON 文件。 | report files | 数据质量摘要 |"),
-        ("| `analysis set` | Runs included in comparison metrics after excluding hard infrastructure noise. | sample_quality.include_in_analysis | Data quality summary / Run counts |", "| `analysis set` | 排除硬基础设施噪音后纳入对比指标的运行集合。 | sample_quality.include_in_analysis | 数据质量摘要 / 运行次数 |"),
-        ("| `flagged` | Completed runs kept in analysis but marked as suspicious, usually harness/task/observability risk. | sample_quality.status | Data quality summary / Flagged runs |", "| `flagged` | 已完成且仍纳入分析，但带有 harness、task 或观测风险标记的运行。 | sample_quality.status | 数据质量摘要 / 已标记运行 |"),
-        ("| `excluded` | Runs removed from headline metrics, typically API, quota, auth, network, container, or runner failures before a complete result. | sample_quality.status | Data quality summary / Excluded runs |", "| `excluded` | 从核心指标中移除的运行，通常是完整结果前发生 API、额度、鉴权、网络、容器或 runner 故障。 | sample_quality.status | 数据质量摘要 / 已排除运行 |"),
-        ("| `pass@k` | Probability that at least one of k attempts succeeds; capability ceiling. | pass/fail booleans | pass@k / pass^k |", "| `pass@k` | k 次尝试中至少一次成功的概率，表示能力上限。 | pass/fail booleans | pass@k / pass^k |"),
-        ("| `pass^k` | Probability that all k attempts succeed; reliability floor. | pass/fail booleans | pass@k / pass^k |", "| `pass^k` | k 次尝试全部成功的概率，表示可靠性下限。 | pass/fail booleans | pass@k / pass^k |"),
-        ("| `overall` | Run passes when task-level `checks_failed == []`. | checks_failed | pass@k / Task outcomes |", "| `overall` | task 级 `checks_failed == []` 时视为运行通过。 | checks_failed | pass@k / 任务结果 |"),
-        ("| `business_completion` | Business validator pass rate; CONTROL is evaluated on this without requiring Comet workflow artifacts. | `[RUBRIC] business_completion` | Rubric dimensions / pass@k |", "| `business_completion` | 业务 validator 通过率；CONTROL 只按它评估，不要求 Comet workflow 产物。 | `[RUBRIC] business_completion` | Rubric 维度 / pass@k |"),
-        ("| `workflow_completion` | Comet workflow validator pass rate; `/` means not applicable for CONTROL. | `[RUBRIC] workflow_completion` | Rubric dimensions / pass@k |", "| `workflow_completion` | Comet workflow validator 通过率；`/` 表示 CONTROL 不适用。 | `[RUBRIC] workflow_completion` | Rubric 维度 / pass@k |"),
-        ("| `weighted_score` | Weighted average across applicable rubric dimensions; N/A dimensions are skipped. | `[RUBRIC] weighted_score` | Rubric dimensions / Overall |", "| `weighted_score` | 适用 Rubric 维度的加权平均；N/A 维度不参与计算。 | `[RUBRIC] weighted_score` | Rubric 维度 / Overall |"),
-        ("| `tokens` / `cost` | Total model token and USD cost telemetry for included runs. | events_summary | Spend summary |", "| `tokens` / `cost` | 纳入分析运行的模型 token 与美元成本遥测。 | events_summary | 成本摘要 |"),
-        ("| `turns` / `duration` / `tool calls` | Runtime effort telemetry for included runs; also feeds the `efficiency` rubric. | events_summary | Runtime summary / Rubric dimensions |", "| `turns` / `duration` / `tool calls` | 纳入分析运行的运行时开销遥测，也用于 `efficiency` Rubric。 | events_summary | 运行摘要 / Rubric 维度 |"),
-        ("| `run-level failed checks` | Buckets sample-level `checks_failed` entries into harness, business, workflow, task, or uncategorized causes; this is not the same as the task outcome matrix. | checks_failed / events_summary.failure_attribution | Run-level failed checks |", "| `run-level failed checks` | 将样本级 `checks_failed` 条目归入 harness、business、workflow、task 或 uncategorized；它不等同于任务结果矩阵。 | checks_failed / events_summary.failure_attribution | 样本级失败检查 |"),
-        ("| `source evidence` | Run id, quality status, profile, Skill source hashes, eval manifest, and raw report reference. | events_summary / sample_quality | Source evidence |", "| `source evidence` | run id、质量状态、profile、Skill source hash、eval manifest 和原始 report 引用。 | events_summary / sample_quality | 来源证据 |"),
+        (
+            "| `raw runs` | All discovered report JSON files before quality filtering. | report files | Data quality summary |",
+            "| `raw runs` | 质量过滤前发现的全部 report JSON 文件。 | report files | 数据质量摘要 |",
+        ),
+        (
+            "| `analysis set` | Runs included in comparison metrics after excluding hard infrastructure noise. | sample_quality.include_in_analysis | Data quality summary / Run counts |",
+            "| `analysis set` | 排除硬基础设施噪音后纳入对比指标的运行集合。 | sample_quality.include_in_analysis | 数据质量摘要 / 运行次数 |",
+        ),
+        (
+            "| `flagged` | Completed runs kept in analysis but marked as suspicious, usually harness/task/observability risk. | sample_quality.status | Data quality summary / Flagged runs |",
+            "| `flagged` | 已完成且仍纳入分析，但带有 harness、task 或观测风险标记的运行。 | sample_quality.status | 数据质量摘要 / 已标记运行 |",
+        ),
+        (
+            "| `excluded` | Runs removed from headline metrics, typically API, quota, auth, network, container, or runner failures before a complete result. | sample_quality.status | Data quality summary / Excluded runs |",
+            "| `excluded` | 从核心指标中移除的运行，通常是完整结果前发生 API、额度、鉴权、网络、容器或 runner 故障。 | sample_quality.status | 数据质量摘要 / 已排除运行 |",
+        ),
+        (
+            "| `pass@k` | Probability that at least one of k attempts succeeds; capability ceiling. | pass/fail booleans | pass@k / pass^k |",
+            "| `pass@k` | k 次尝试中至少一次成功的概率，表示能力上限。 | pass/fail booleans | pass@k / pass^k |",
+        ),
+        (
+            "| `pass^k` | Probability that all k attempts succeed; reliability floor. | pass/fail booleans | pass@k / pass^k |",
+            "| `pass^k` | k 次尝试全部成功的概率，表示可靠性下限。 | pass/fail booleans | pass@k / pass^k |",
+        ),
+        (
+            "| `overall` | Run passes when task-level `checks_failed == []`. | checks_failed | pass@k / Task outcomes |",
+            "| `overall` | task 级 `checks_failed == []` 时视为运行通过。 | checks_failed | pass@k / 任务结果 |",
+        ),
+        (
+            "| `business_completion` | Business validator pass rate; CONTROL is evaluated on this without requiring Comet workflow artifacts. | `[RUBRIC] business_completion` | Rubric dimensions / pass@k |",
+            "| `business_completion` | 业务 validator 通过率；CONTROL 只按它评估，不要求 Comet workflow 产物。 | `[RUBRIC] business_completion` | Rubric 维度 / pass@k |",
+        ),
+        (
+            "| `workflow_completion` | Comet workflow validator pass rate; `/` means not applicable for CONTROL. | `[RUBRIC] workflow_completion` | Rubric dimensions / pass@k |",
+            "| `workflow_completion` | Comet workflow validator 通过率；`/` 表示 CONTROL 不适用。 | `[RUBRIC] workflow_completion` | Rubric 维度 / pass@k |",
+        ),
+        (
+            "| `weighted_score` | Weighted average across applicable rubric dimensions; N/A dimensions are skipped. | `[RUBRIC] weighted_score` | Rubric dimensions / Overall |",
+            "| `weighted_score` | 适用 Rubric 维度的加权平均；N/A 维度不参与计算。 | `[RUBRIC] weighted_score` | Rubric 维度 / Overall |",
+        ),
+        (
+            "| `tokens` / `cost` | Total model token and USD cost telemetry for included runs. | events_summary | Spend summary |",
+            "| `tokens` / `cost` | 纳入分析运行的模型 token 与美元成本遥测。 | events_summary | 成本摘要 |",
+        ),
+        (
+            "| `turns` / `duration` / `tool calls` | Runtime effort telemetry for included runs; also feeds the `efficiency` rubric. | events_summary | Runtime summary / Rubric dimensions |",
+            "| `turns` / `duration` / `tool calls` | 纳入分析运行的运行时开销遥测，也用于 `efficiency` Rubric。 | events_summary | 运行摘要 / Rubric 维度 |",
+        ),
+        (
+            "| `run-level failed checks` | Buckets sample-level `checks_failed` entries into harness, business, workflow, task, or uncategorized causes; this is not the same as the task outcome matrix. | checks_failed / events_summary.failure_attribution | Run-level failed checks |",
+            "| `run-level failed checks` | 将样本级 `checks_failed` 条目归入 harness、business、workflow、task 或 uncategorized；它不等同于任务结果矩阵。 | checks_failed / events_summary.failure_attribution | 样本级失败检查 |",
+        ),
+        (
+            "| `source evidence` | Run id, quality status, profile, Skill source hashes, eval manifest, and raw report reference. | events_summary / sample_quality | Source evidence |",
+            "| `source evidence` | run id、质量状态、profile、Skill source hash、eval manifest 和原始 report 引用。 | events_summary / sample_quality | 来源证据 |",
+        ),
         ("## Data quality summary", "## 数据质量摘要"),
         ("## Run counts", "## 运行次数"),
         (
@@ -1038,12 +1189,34 @@ def _localize_eval_markdown(markdown: str) -> str:
         ("## Task outcomes", "## 任务结果"),
         ("## Spend summary", "## 成本摘要"),
         ("## Runtime summary", "## 运行摘要"),
+        ("## Paired task efficiency from raw stdout", "## 基于原始 stdout 的配对任务效率"),
+        ("### Strict-success intersection", "### 双方严格通过交集"),
+        ("### All aligned runs", "### 全部对齐运行"),
+        (
+            "| Metric | Complete pairs | Candidate average | Baseline average | Candidate delta |",
+            "| 指标 | 完整配对 | Candidate 平均值 | Baseline 平均值 | Candidate 差异 |",
+        ),
+        ("| Model starts/resumes |", "| 模型启动/恢复次数 |"),
+        ("| Agent turns |", "| Agent 轮次 |"),
+        ("| Tool calls |", "| 工具调用 |"),
+        ("| Wall duration |", "| 累计模型耗时 |"),
+        ("| Non-cache input tokens |", "| 非缓存输入 Token |"),
+        ("| Output tokens |", "| 输出 Token |"),
+        ("| Cache-read input tokens |", "| 缓存读取 Token |"),
+        ("| Total tokens incl. cache |", "| 总 Token（包含缓存读取） |"),
+        ("| Model cost |", "| 模型成本 |"),
+        ("| Peak context input |", "| 峰值上下文输入 |"),
+        ("| P95 context input |", "| P95 上下文输入 |"),
+        ("| Peak context occupancy |", "| 峰值上下文占用 |"),
         ("## Source evidence", "## 来源证据"),
         (
             "Use this section to trace each aggregate metric back to the raw run artifacts.",
             "使用本节可以把每个聚合指标追溯到原始运行产物。",
         ),
-        ("- `Run` is the run id or fallback report id.", "- `Run` 是 run id，缺失时使用 report id。"),
+        (
+            "- `Run` is the run id or fallback report id.",
+            "- `Run` 是 run id，缺失时使用 report id。",
+        ),
         (
             "- `Quality` is the sample-quality status used by the analysis-set filter.",
             "- `Quality` 是分析集过滤使用的样本质量状态。",
@@ -1173,6 +1346,11 @@ def _localize_eval_markdown(markdown: str) -> str:
         localized = localized.replace(source, target)
     localized = _localize_failure_attribution(localized)
     return localized
+
+
+def localize_eval_markdown(markdown: str) -> str:
+    """Return the Chinese localization used by the HTML report's default view."""
+    return _localize_eval_markdown(markdown)
 
 
 def _localize_failure_attribution(markdown: str) -> str:
@@ -1335,7 +1513,9 @@ def _render_table(lines: list[str]) -> list[str]:
 
     headers = rows[0]
     column_classes = [_column_class(header) for header in headers]
-    wide_table = any(column in {"col-evidence", "col-report", "col-run"} for column in column_classes)
+    wide_table = any(
+        column in {"col-evidence", "col-report", "col-run"} for column in column_classes
+    )
     table_class = "data-table data-table--wide" if wide_table else "data-table"
     rendered = [
         '<div class="table-scroll">',
@@ -1352,7 +1532,9 @@ def _render_table(lines: list[str]) -> list[str]:
             rendered.append("    <tr>")
             for index, cell in enumerate(row):
                 column_class = column_classes[index] if index < len(column_classes) else ""
-                rendered.append(f"      <td{_class_attr(column_class)}>{_inline_markdown(cell)}</td>")
+                rendered.append(
+                    f"      <td{_class_attr(column_class)}>{_inline_markdown(cell)}</td>"
+                )
             rendered.append("    </tr>")
         rendered.append("  </tbody>")
     rendered.append("</table>")

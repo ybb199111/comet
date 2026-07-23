@@ -33,6 +33,37 @@ def test_rate_limit_is_excluded_from_analysis():
     assert quality.include_in_analysis is False
 
 
+def test_structured_connection_failure_outranks_rate_limit_wording_in_prompt():
+    stderr = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {"content": "Document rate limit behavior."},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "is_error": True,
+                    "terminal_reason": "api_error",
+                    "result": "API Error: Connection closed mid-response.",
+                }
+            ),
+        ]
+    )
+
+    quality = infer_sample_quality(
+        checks_failed=["Required skill not invoked"],
+        stderr=stderr,
+        returncode=1,
+    )
+
+    assert quality.status == "excluded"
+    assert quality.reason_code == "network_failure"
+    assert quality.include_in_analysis is False
+
+
 def test_container_failure_is_excluded_from_analysis():
     quality = infer_sample_quality(stderr="ERROR: Docker daemon not running")
 
@@ -91,6 +122,32 @@ def test_completed_run_with_container_wording_in_logs_stays_in_analysis():
     assert quality.status == "flagged"
     assert quality.reason_code == "completed_run_mentions_outer_failure"
     assert quality.include_in_analysis is True
+
+
+def test_completed_run_with_container_wording_only_in_result_is_valid_signal():
+    quality = infer_sample_quality(
+        events={
+            "duration_seconds": 42,
+            "total_tokens": 1000,
+            "total_cost_usd": 0.12,
+        },
+        checks_failed=[],
+        stdout=(
+            json.dumps(
+                {
+                    "type": "result",
+                    "duration_ms": 42000,
+                    "result": "The Docker container workflow completed successfully.",
+                }
+            )
+            + "\n"
+        ),
+        stderr="[loop] workflow completion detected; ending\n",
+        returncode=0,
+    )
+
+    assert quality.status == "included"
+    assert quality.reason_code == "valid_signal"
 
 
 def test_validator_failure_with_observable_run_is_included():

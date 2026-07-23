@@ -9,6 +9,16 @@ import {
   resolveCurrentChange,
   selectCurrentChange,
 } from './classic-current-change.js';
+import {
+  driftBlockedMessage,
+  evaluateBranchBinding,
+  healBoundBranch,
+  isGitWorkTree,
+  liveGitBranch,
+  requiresBranchBinding,
+  resolveBranchBinding,
+  unboundDetachedMessage,
+} from './classic-branch-binding.js';
 import { collectClassicEvidence } from './classic-evidence.js';
 import { openSpecChangeNameError, resolveClassicChangeDirectory } from './classic-paths.js';
 import { resolveClassicStepId } from './classic-resolver.js';
@@ -42,8 +52,10 @@ const EVENTS = CLASSIC_TRANSITION_EVENTS;
 const MACHINE_OWNED_FIELDS = new Set<string>([
   ...RUN_WIRE_KEYS,
   'archive_confirmation',
+  'verify_failures',
   'classic_profile',
   'classic_migration',
+  'bound_branch',
 ]);
 const SETTABLE_FIELDS = new Set<string>(
   CLASSIC_WIRE_KEYS.filter((field) => !MACHINE_OWNED_FIELDS.has(field)),
@@ -58,7 +70,7 @@ const FIELD_ENUMS: Record<string, readonly string[]> = {
   subagent_dispatch: ['null', 'confirmed'],
   tdd_mode: ['tdd', 'direct'],
   review_mode: ['off', 'standard', 'thorough'],
-  isolation: ['branch', 'worktree'],
+  isolation: ['current', 'branch', 'worktree'],
   verify_mode: ['light', 'full'],
   auto_transition: ['true', 'false'],
   verify_result: ['pending', 'pass', 'fail'],
@@ -82,6 +94,7 @@ const CLASSIC_FIELD_WIRE_NAMES: Partial<Record<keyof ClassicState, string>> = {
   verifiedAt: 'verified_at',
   archiveConfirmation: 'archive_confirmation',
   verifyResult: 'verify_result',
+  verifyFailures: 'verify_failures',
   workflow: 'workflow',
 };
 
@@ -245,6 +258,15 @@ function nullableRecordBoolean(record: Record<string, unknown>, field: string): 
   return null;
 }
 
+function nonNegativeRecordInteger(
+  record: Record<string, unknown>,
+  field: string,
+  fallback = 0,
+): number {
+  const value = record[field];
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
 function sparseClassicState(record: Record<string, unknown>): ClassicState {
   const workflow = enumRecordValue(record, 'workflow', PROFILES, 'full')!;
   return {
@@ -272,7 +294,13 @@ function sparseClassicState(record: Record<string, unknown>): ClassicState {
       ['off', 'standard', 'thorough'] as const,
       null,
     ),
-    isolation: enumRecordValue(record, 'isolation', ['branch', 'worktree'] as const, null),
+    isolation: enumRecordValue(
+      record,
+      'isolation',
+      ['current', 'branch', 'worktree'] as const,
+      null,
+    ),
+    boundBranch: nullableRecordString(record, 'bound_branch'),
     verifyMode: enumRecordValue(record, 'verify_mode', ['light', 'full'] as const, null),
     autoTransition: nullableRecordBoolean(record, 'auto_transition'),
     baseRef: nullableRecordString(record, 'base_ref'),
@@ -284,6 +312,7 @@ function sparseClassicState(record: Record<string, unknown>): ClassicState {
       ['pending', 'pass', 'fail'] as const,
       'pending',
     )!,
+    verifyFailures: nonNegativeRecordInteger(record, 'verify_failures'),
     verificationReport: nullableRecordString(record, 'verification_report'),
     branchStatus: enumRecordValue(record, 'branch_status', ['pending', 'handled'] as const, null),
     createdAt: nullableRecordString(record, 'created_at'),
@@ -426,7 +455,39 @@ async function setField(
   validateSetValue(field, value);
   const { file, directory } = await stateFile(name);
   const document = await readDocument(file);
+  const previousRecord = (document.toJS() ?? {}) as Record<string, unknown>;
   document.set(field, parsedValue(field, value));
+  if (field === 'isolation') {
+    if (requiresBranchBinding(value)) {
+      const previousIsolation =
+        typeof previousRecord.isolation === 'string' ? previousRecord.isolation : null;
+      const existing = previousRecord.bound_branch;
+      const alreadyBound = typeof existing === 'string' && existing !== '';
+      // Switching between workspace modes is an explicit new workspace
+      // decision and re-points the binding; repeating the same mode keeps
+      // the sticky binding that drift checks rely on.
+      if (!alreadyBound || previousIsolation !== value) {
+        const currentBranch = liveGitBranch(process.cwd());
+        const verdict = evaluateBranchBinding({
+          isolation: value,
+          boundBranch: null,
+          currentBranch,
+          gitWorkTree: currentBranch === null ? isGitWorkTree(process.cwd()) : true,
+        });
+        if (verdict.status === 'needs-heal') {
+          document.set('bound_branch', verdict.branch);
+        } else if (verdict.status === 'unbound-detached') {
+          fail(
+            `ERROR: cannot bind isolation=${value} while HEAD is detached; checkout a branch first`,
+          );
+        } else {
+          document.set('bound_branch', null);
+        }
+      }
+    } else {
+      document.set('bound_branch', null);
+    }
+  }
   const run = await readRunState(directory);
   const projection = parseClassicStateDocument(document.toJS() as Record<string, unknown>, run);
   if (projection.run) {
@@ -491,13 +552,14 @@ async function init(output: CommandOutput, name: string, workflow: string): Prom
     subagent_dispatch: null,
     tdd_mode: preset ? 'direct' : null,
     review_mode: reviewMode,
-    isolation: preset ? 'branch' : null,
+    isolation: null,
     verify_mode: preset ? 'light' : null,
     auto_transition: (await autoTransition()) === 'true',
     base_ref: gitOutput(['rev-parse', '--verify', 'HEAD']),
     design_doc: null,
     plan: null,
     verify_result: 'pending',
+    verify_failures: 0,
     verification_report: null,
     branch_status: 'pending',
     created_at: new Date().toISOString().slice(0, 10),
@@ -524,9 +586,10 @@ async function requireBuildDecisions(name: string): Promise<void> {
   const subagentDispatch = await readField(name, 'subagent_dispatch');
   const tddMode = await readField(name, 'tdd_mode');
   const reviewMode = await readField(name, 'review_mode');
-  if (!['branch', 'worktree'].includes(isolation)) {
+  const allowedIsolation = ['current', 'branch', 'worktree'];
+  if (!allowedIsolation.includes(isolation)) {
     fail(
-      `ERROR: Cannot transition '${name}': isolation must be branch or worktree, got '${isolation || 'null'}'`,
+      `ERROR: Cannot transition '${name}': isolation must be current, branch, or worktree, got '${isolation || 'null'}'`,
     );
   }
   if (!['subagent-driven-development', 'executing-plans', 'direct'].includes(buildMode)) {
@@ -664,9 +727,6 @@ async function transition(output: CommandOutput, name: string, event: string): P
       fail(
         `ERROR: Cannot transition '${name}': verification_report must point to an existing report file`,
       );
-    }
-    if ((await readField(name, 'branch_status')) !== 'handled') {
-      fail(`ERROR: Cannot transition '${name}': branch_status must be handled`);
     }
   } else if (event === 'verify-fail') {
     await requirePhase(name, 'verify');
@@ -823,6 +883,29 @@ async function check(output: CommandOutput, name: string, phase: string): Promis
     await expectField('verify_result', 'pass');
     const archived = await readField(name, 'archived');
     (archived !== 'true' ? pass : reject)(`archived=${archived} (expected: not true)`);
+  }
+  const binding = await resolveBranchBinding(directory, { heal: true, cwd: process.cwd() });
+  if (binding.bindingRequired) {
+    switch (binding.status) {
+      case 'drift':
+        reject(driftBlockedMessage(name, binding.boundBranch, binding.currentBranch));
+        break;
+      case 'unbound-detached':
+        reject(unboundDetachedMessage(name));
+        break;
+      case 'healed':
+        pass(`bound_branch lazily set to ${binding.branch}`);
+        break;
+      case 'needs-heal':
+      case 'ok':
+      case 'not-applicable':
+        pass('bound_branch matches current branch');
+        break;
+      default: {
+        const exhaustive: never = binding;
+        throw new Error(`unhandled branch binding status: ${JSON.stringify(exhaustive)}`);
+      }
+    }
   }
   output.stdout.push('');
   if (blocked) {
@@ -1000,7 +1083,7 @@ function resolveBuildRecoveryAction(
     if (buildMode === 'subagent-driven-development' && (pending > 0 || planPending > 0)) {
       return subagentDispatch === 'confirmed'
         ? 'Recovery action: Plan-ready pause is stale because build decisions are already selected. Clear build_pause to null, then inspect the first unchecked task (OpenSpec or plan additions) against recent git history/diff. If implemented, check it off; otherwise dispatch a real background subagent. Do not execute the pending task directly in the main window.'
-        : 'Recovery action: Plan-ready pause is stale and subagent dispatch is not confirmed. Confirm a real background subagent/Task/multi-agent dispatcher and set subagent_dispatch to confirmed, or set build_mode to executing-plans before continuing.';
+        : 'Recovery action: Plan-ready pause is stale and subagent dispatch is not confirmed. Return to /comet-build Step 2 capability preflight. Confirm a real background subagent/Task/multi-agent dispatcher and set subagent_dispatch to confirmed, or remove the unavailable mode and set build_mode to executing-plans before continuing.';
     }
     if (pending > 0 || planPending > 0) {
       return 'Recovery action: Plan-ready pause is stale because build decisions are already selected. Clear build_pause to null, then continue from the first unchecked task.';
@@ -1023,7 +1106,7 @@ function resolveBuildRecoveryAction(
     if (buildMode === 'subagent-driven-development') {
       return subagentDispatch === 'confirmed'
         ? 'Recovery action: Read tasks.md and the Superpowers plan (which may include additions beyond OpenSpec), then inspect the first unchecked task against recent git history/diff. If implemented, check it off; otherwise dispatch a real background subagent. Do not execute the pending task directly in the main window.'
-        : 'Recovery action: Subagent dispatch is not confirmed. Confirm a real background subagent/Task/multi-agent dispatcher and set subagent_dispatch to confirmed, or set build_mode to executing-plans before continuing.';
+        : 'Recovery action: Subagent dispatch is not confirmed. Return to /comet-build Step 2 capability preflight. Confirm a real background subagent/Task/multi-agent dispatcher and set subagent_dispatch to confirmed, or remove the unavailable mode and set build_mode to executing-plans before continuing.';
     }
     return 'Recovery action: Read tasks.md and continue from first unchecked task.';
   }
@@ -1031,7 +1114,7 @@ function resolveBuildRecoveryAction(
     if (buildMode === 'subagent-driven-development') {
       return subagentDispatch === 'confirmed'
         ? 'Recovery action: Read the Superpowers plan, then inspect the first unchecked Superpowers plan task against recent git history/diff. If implemented, check it off; otherwise dispatch a real background subagent. Do not execute the pending task directly in the main window.'
-        : 'Recovery action: Subagent dispatch is not confirmed. Confirm a real background subagent/Task/multi-agent dispatcher and set subagent_dispatch to confirmed, or set build_mode to executing-plans before continuing.';
+        : 'Recovery action: Subagent dispatch is not confirmed. Return to /comet-build Step 2 capability preflight. Confirm a real background subagent/Task/multi-agent dispatcher and set subagent_dispatch to confirmed, or remove the unavailable mode and set build_mode to executing-plans before continuing.';
     }
     return 'Recovery action: Read the Superpowers plan and continue from the first unchecked plan task.';
   }
@@ -1040,18 +1123,22 @@ function resolveBuildRecoveryAction(
 
 async function recoverVerify(output: CommandOutput, name: string): Promise<void> {
   const result = await readField(name, 'verify_result');
+  const failures = await readField(name, 'verify_failures');
   const mode = await readField(name, 'verify_mode');
   const report = await readField(name, 'verification_report');
   const branch = await readField(name, 'branch_status');
   output.stdout.push(
     '  Verification:',
     fieldStatus('verify_result', result),
+    `  - verify_failures: ${failures || '0'}`,
     fieldStatus('verify_mode', mode),
     fieldStatus('verification_report', report, report),
-    fieldStatus('branch_status', branch),
+    branch === 'handled'
+      ? '  - branch_status: LEGACY (handled before archive; archive still owns final closure)'
+      : '  - branch_status: DEFERRED (handled after the archive commit)',
     '',
-    result === 'pass' && branch === 'handled'
-      ? 'Recovery action: Verification complete. Run guard to transition to archive.'
+    result === 'pass'
+      ? 'Recovery action: Verification complete. Continue to archive; branch handling happens after archive changes are committed.'
       : result === 'fail'
         ? 'Recovery action: Verification failed and rolled back to build. Resume from /comet-build.'
         : 'Recovery action: Verification not yet started or in progress. Run scale assessment then verify.',
@@ -1214,14 +1301,42 @@ async function selectChange(output: CommandOutput, name: string): Promise<void> 
   validateChangeName(name);
   try {
     const selection = await selectCurrentChange(process.cwd(), name);
+    const boundBranch = await readField(name, 'bound_branch');
+    const bound = boundBranch && boundBranch !== 'null' ? boundBranch : null;
     output.stderr.push(
-      green(
-        `[SELECTED] current change: ${selection.change}${selection.branch ? ` (branch: ${selection.branch})` : ''}`,
-      ),
+      green(`[SELECTED] current change: ${selection.change}${bound ? ` (branch: ${bound})` : ''}`),
     );
   } catch (error) {
     fail(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+async function rebind(output: CommandOutput, name: string): Promise<void> {
+  validateChangeName(name);
+  const { directory } = await stateFile(name);
+  const boundBranch = await readField(name, 'bound_branch');
+  if (!boundBranch || boundBranch === 'null') {
+    fail(
+      `ERROR: '${name}' is not yet bound; use 'comet state set ${name} isolation <current|branch|worktree>' to establish the first binding`,
+    );
+  }
+  const branch = liveGitBranch(process.cwd());
+  if (branch === null) {
+    fail('ERROR: cannot rebind while HEAD is detached; checkout a branch first');
+  }
+  const before = await readClassicState(directory);
+  if (!before.classic) fail('ERROR: Classic state projection is missing');
+  await healBoundBranch(directory, branch);
+  const after: ClassicState = { ...before.classic, boundBranch: branch };
+  await appendClassicStateEvent(directory, {
+    change: name,
+    event: 'rebind',
+    source: 'comet-state',
+    from: before.classic,
+    to: after,
+    effects: [{ field: 'boundBranch', from: boundBranch, to: branch }],
+  });
+  output.stderr.push(green(`[REBIND] bound_branch: ${boundBranch} → ${branch}`));
 }
 
 async function currentChange(output: CommandOutput): Promise<void> {
@@ -1278,6 +1393,9 @@ export const classicStateCommand: ClassicCommandHandler = async (args) => {
     } else if (subcommand === 'task-checkoff') {
       required(rest, 2, 'Usage: comet-state.mjs task-checkoff <file> <task-text>');
       await taskCheckoff(output, rest[0], rest[1]);
+    } else if (subcommand === 'rebind') {
+      requiredExact(rest, 1, 'Usage: comet-state.mjs rebind <change-name>');
+      await rebind(output, rest[0]);
     } else if (subcommand === 'select') {
       requiredExact(rest, 1, 'Usage: comet-state.mjs select <change-name>');
       await selectChange(output, rest[0]);

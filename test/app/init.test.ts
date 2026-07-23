@@ -9,6 +9,7 @@ import { PLATFORMS } from '../../platform/install/platforms.js';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
+import { parse } from 'yaml';
 
 describe('init command helpers', () => {
   it('can apply a single overwrite choice to all existing components on a platform', () => {
@@ -67,14 +68,26 @@ describe('init command helpers', () => {
       await createWorkingDirs(tmpDir, 'zh-CN');
 
       const config = await fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf-8');
-      expect(config).toContain('# language: en | zh-CN');
+      expect(parse(config)).toMatchObject({
+        ambient_resume: true,
+        classic: {
+          language: 'zh-CN',
+          context_compression: 'off',
+          review_mode: 'standard',
+          auto_transition: true,
+        },
+      });
+      expect(config).not.toMatch(/^(language|context_compression|review_mode|auto_transition):/mu);
+      expect(config).toContain('# Classic 工作流文档使用的产物语言');
       expect(config).toContain('language: zh-CN');
-      expect(config).toContain('# context_compression: off | beta');
+      expect(config).toContain('# 新建 Classic change 是否启用 beta 上下文压缩');
       expect(config).toContain('context_compression: off');
-      expect(config).toContain('# review_mode: off | standard | thorough');
+      expect(config).toContain('# 新建 Classic change 默认使用的审查深度');
       expect(config).toContain('review_mode: standard');
-      expect(config).toContain('# auto_transition: true | false');
+      expect(config).toContain('# Classic 阶段通过后是否自动进入下一阶段');
       expect(config).toContain('auto_transition: true');
+      expect(config).toContain('# 是否启用只读的环境感知恢复探针');
+      expect(config).toContain('ambient_resume: true');
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
@@ -155,7 +168,7 @@ describe('init command helpers', () => {
     }
   });
 
-  it('rejects invalid Pi settings without writing a command extension', async () => {
+  it('counts invalid Pi settings without writing a command extension', async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-init-pi-invalid-'));
     const piPlatform = PLATFORMS.find((platform) => platform.id === 'pi')!;
     const settingsPath = path.join(tmpDir, '.pi', 'settings.json');
@@ -165,9 +178,14 @@ describe('init command helpers', () => {
       await fs.mkdir(path.dirname(settingsPath), { recursive: true });
       await fs.writeFile(settingsPath, '{ invalid', 'utf-8');
 
-      await expect(
-        copyCometSkillsForPlatform(tmpDir, piPlatform, true, 'skills', 'project'),
-      ).rejects.toThrow(/invalid Pi settings/i);
+      const result = await copyCometSkillsForPlatform(
+        tmpDir,
+        piPlatform,
+        true,
+        'skills',
+        'project',
+      );
+      expect(result.failed).toBe(1);
       await expect(fs.readFile(settingsPath, 'utf-8')).resolves.toBe('{ invalid');
       await expect(fs.access(extensionPath)).rejects.toThrow();
     } finally {

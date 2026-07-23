@@ -54,6 +54,60 @@ describe('README assets', () => {
     expect(readmeEn).toContain('Skill platform');
   });
 
+  it('keeps the documented Node.js requirement aligned with package engines', async () => {
+    const packageJson = JSON.parse(await fs.readFile('package.json', 'utf-8')) as {
+      engines: { node: string };
+    };
+    const match = packageJson.engines.node.match(/^>=(\d+)/);
+    expect(match).not.toBeNull();
+    const minimumMajor = match![1];
+    const [readmeEn, readmeZh, contributingEn, contributingZh] = await Promise.all([
+      fs.readFile('README.md', 'utf-8'),
+      fs.readFile('README-zh.md', 'utf-8'),
+      fs.readFile('CONTRIBUTING.md', 'utf-8'),
+      fs.readFile('CONTRIBUTING-zh.md', 'utf-8'),
+    ]);
+
+    expect(readmeEn).toContain(`Node.js ${minimumMajor}+`);
+    expect(readmeZh).toContain(`Node.js ${minimumMajor}+`);
+    expect(contributingEn).toContain(`Node.js \`>=${minimumMajor}\``);
+    expect(contributingZh).toContain(`Node.js \`>=${minimumMajor}\``);
+  });
+
+  it('highlights the current beta and links the website changelog', async () => {
+    const readmeEn = await fs.readFile('README.md', 'utf-8');
+    const readmeZh = await fs.readFile('README-zh.md', 'utf-8');
+
+    expect(readmeEn).toContain('**0.4.0-beta.7**');
+    expect(readmeZh).toContain('**0.4.0-beta.7**');
+    expect(readmeEn).toContain('**0.4.0-beta.1**');
+    expect(readmeZh).toContain('**0.4.0-beta.1**');
+    expect(readmeEn).toContain('https://docs.comet.rpamis.com/en/changelog');
+    expect(readmeZh).toContain('https://docs.comet.rpamis.com/zh/changelog');
+  });
+
+  it('documents Native and Classic skills and keeps both project structures folded', async () => {
+    const readmeEn = await fs.readFile('README.md', 'utf-8');
+    const readmeZh = await fs.readFile('README-zh.md', 'utf-8');
+    const skillsEn = readmeEn.split('### Comet Skills')[1]?.split('</details>')[0] ?? '';
+    const skillsZh = readmeZh.split('### Comet 技能')[1]?.split('</details>')[0] ?? '';
+
+    expect(skillsEn).toContain('| `/comet-native`');
+    expect(skillsEn).toContain('| `/comet-classic`');
+    expect(skillsZh).toContain('| `/comet-native`');
+    expect(skillsZh).toContain('| `/comet-classic`');
+    expect(readmeEn).toContain('<summary>Native project structure');
+    expect(readmeEn).toContain('<summary>Classic project structure');
+    expect(readmeZh).toContain('<summary>Native 项目结构');
+    expect(readmeZh).toContain('<summary>Classic 项目结构');
+    expect(readmeEn).toContain('<summary>View the Native phase flow');
+    expect(readmeEn).toContain('<summary>View Native state and artifacts');
+    expect(readmeEn).toContain('<summary>View Native reliability and recovery');
+    expect(readmeZh).toContain('<summary>查看 Native 阶段流程');
+    expect(readmeZh).toContain('<summary>查看 Native 状态与产物');
+    expect(readmeZh).toContain('<summary>查看 Native 可靠性与恢复');
+  });
+
   it('documents task-first paths for comet-any and eval without making Bundle CLI the default user path', async () => {
     const readmeEn = await fs.readFile('README.md', 'utf-8');
     const readmeZh = await fs.readFile('README-zh.md', 'utf-8');

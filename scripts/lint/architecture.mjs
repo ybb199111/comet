@@ -71,13 +71,18 @@ function walkFiles(relativePath, ignoredNames = new Set(), ignoredRelativePaths 
 
     for (const entry of entries) {
       if (ignoredNames.has(entry)) continue;
-      if (entry.startsWith('.pytest-tmp-')) continue;
-      if (entry.startsWith('.pytest-basetemp-')) continue;
-      if (entry.startsWith('.pytest_cache')) continue;
+      if (entry.startsWith('.pytest')) continue;
+      if (entry === '.cache') continue;
       const entryAbsolutePath = path.join(currentAbsolutePath, entry);
       const entryRelativePath = path.join(currentRelativePath, entry).replaceAll(path.sep, '/');
       if (ignoredRelativePaths.has(entryRelativePath)) continue;
-      if (entryRelativePath === 'eval/local/logs' || entryRelativePath === 'eval/.venv') continue;
+      if (
+        entryRelativePath === 'eval/local/logs' ||
+        entryRelativePath === 'eval/langsmith/logs' ||
+        entryRelativePath === 'eval/.venv'
+      ) {
+        continue;
+      }
       const stats = statSync(entryAbsolutePath);
       if (stats.isDirectory()) {
         visit(entryAbsolutePath, entryRelativePath);
@@ -163,6 +168,26 @@ for (const [name, output] of Object.entries(layout.classicRuntime.outputs ?? {})
     fail(`classic runtime output "${name}" -> "${output}" is missing`);
   }
 }
+for (const [name, entry] of Object.entries(layout.nativeRuntime?.entries ?? {})) {
+  if (!isFile(entry)) {
+    fail(`native runtime entry "${name}" -> "${entry}" is missing`);
+  }
+}
+for (const [name, output] of Object.entries(layout.nativeRuntime?.outputs ?? {})) {
+  if (!isFile(output)) {
+    fail(`native runtime output "${name}" -> "${output}" is missing`);
+  }
+}
+for (const [name, entry] of Object.entries(layout.entryRuntime?.entries ?? {})) {
+  if (!isFile(entry)) {
+    fail(`entry resolver runtime entry "${name}" -> "${entry}" is missing`);
+  }
+}
+for (const [name, output] of Object.entries(layout.entryRuntime?.outputs ?? {})) {
+  if (!isFile(output)) {
+    fail(`entry resolver runtime output "${name}" -> "${output}" is missing`);
+  }
+}
 if (!isFile(layout.manifestPath)) {
   fail(`asset manifest "${layout.manifestPath}" is missing`);
 }
@@ -223,11 +248,20 @@ for (const file of walkFiles('.', ignoredGeneratedTrees, ignoredGeneratedRelativ
     normalized.startsWith('scripts/') ||
     normalized.startsWith('test/') ||
     normalized.startsWith('assets/skills/comet/scripts/') ||
+    normalized.startsWith('assets/skills/comet-native/scripts/') ||
     normalized.startsWith('eval/local/skills/') ||
     normalized === 'bin/comet.js' ||
     allowedRootSourceFiles.has(normalized);
   if (!allowed) {
     fail(`${normalized} is code outside an approved code root`);
+  }
+}
+
+for (const file of walkFiles('domains/comet-native')) {
+  if (!/\.ts$/u.test(file)) continue;
+  const content = readFileSync(path.join(root, file), 'utf8');
+  if (/\bfrom\s+['"][^'"]*comet-classic[^'"]*['"]/u.test(content)) {
+    fail(`${file} must not import the Classic domain`);
   }
 }
 

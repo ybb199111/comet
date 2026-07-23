@@ -25,6 +25,28 @@ describe('repository layout registry', () => {
     expect(resolveRepositoryPath(layout.classicRuntime.outputs.state)).toBe(
       path.resolve('assets', 'skills', 'comet', 'scripts', 'comet-state.mjs'),
     );
+    expect(layout.nativeRuntime).toEqual({
+      entries: { runtime: 'domains/comet-native/native-cli-entry.ts' },
+      outputs: {
+        runtime: 'assets/skills/comet-native/scripts/comet-native-runtime.mjs',
+      },
+    });
+    expect(resolveRepositoryPath(layout.nativeRuntime.outputs.runtime)).toBe(
+      path.resolve('assets', 'skills', 'comet-native', 'scripts', 'comet-native-runtime.mjs'),
+    );
+    expect(layout.entryRuntime).toEqual({
+      entries: {
+        runtime: 'domains/comet-entry/entry-runtime-entry.ts',
+        hookRouter: 'domains/comet-entry/hook-router-entry.ts',
+      },
+      outputs: {
+        runtime: 'assets/skills/comet/scripts/comet-entry-runtime.mjs',
+        hookRouter: 'assets/skills/comet/scripts/comet-hook-router.mjs',
+      },
+    });
+    expect(resolveRepositoryPath(layout.entryRuntime.outputs.runtime)).toBe(
+      path.resolve('assets', 'skills', 'comet', 'scripts', 'comet-entry-runtime.mjs'),
+    );
   });
 
   it('tracks active source roots', () => {
@@ -35,6 +57,8 @@ describe('repository layout registry', () => {
     expect(layout.domainModules).toEqual([
       'bundle',
       'comet-classic',
+      'comet-entry',
+      'comet-native',
       'dashboard',
       'engine',
       'eval',
@@ -56,6 +80,7 @@ describe('repository layout registry', () => {
     expect(layout.allowedTopLevelEntries).toContain('domains');
     expect(layout.allowedTopLevelEntries).toContain('platform');
     expect(layout.allowedTopLevelEntries).toContain('.superpowers');
+    expect(layout.allowedTopLevelEntries).toContain('codecov.yml');
     expect(layout.allowedTopLevelEntries).not.toContain('src');
   });
 });

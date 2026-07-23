@@ -29,6 +29,24 @@
       "resume-probe": "assets/skills/comet/scripts/comet-resume-probe.mjs"
     }
   },
+  "nativeRuntime": {
+    "entries": {
+      "runtime": "domains/comet-native/native-cli-entry.ts"
+    },
+    "outputs": {
+      "runtime": "assets/skills/comet-native/scripts/comet-native-runtime.mjs"
+    }
+  },
+  "entryRuntime": {
+    "entries": {
+      "runtime": "domains/comet-entry/entry-runtime-entry.ts",
+      "hookRouter": "domains/comet-entry/hook-router-entry.ts"
+    },
+    "outputs": {
+      "runtime": "assets/skills/comet/scripts/comet-entry-runtime.mjs",
+      "hookRouter": "assets/skills/comet/scripts/comet-hook-router.mjs"
+    }
+  },
   "allowedTopLevelEntries": [
     ".agents",
     ".claude",
@@ -54,6 +72,7 @@
     "build.js",
     "CHANGELOG.md",
     "CLAUDE.md",
+    "codecov.yml",
     "config",
     "CONTRIBUTING-zh.md",
     "CONTRIBUTING.md",
@@ -65,7 +84,6 @@
     "eval",
     "img",
     "LICENSE",
-    "NEWS.md",
     "node_modules",
     "nul",
     "package-lock.json",
@@ -86,6 +104,8 @@
   "domainModules": [
     "bundle",
     "comet-classic",
+    "comet-entry",
+    "comet-native",
     "dashboard",
     "engine",
     "eval",

@@ -9,6 +9,7 @@ import { quoteArgsForShell } from '../../platform/process/shell-quote.js';
 import type { InstallScope } from '../../platform/install/types.js';
 
 const VALID_TOOL_IDS = new Set(PLATFORMS.map((p) => p.openspecToolId));
+const MINIMUM_OPENSPEC_VERSION = '1.5.0';
 const ALL_OPENSPEC_WORKFLOWS = [
   'propose',
   'explore',
@@ -156,13 +157,63 @@ function isCommandAvailable(command: string): boolean {
   }
 }
 
+interface SemanticVersion {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: string | null;
+}
+
+function parseSemanticVersion(value: string): SemanticVersion | null {
+  const match = value.match(/(?:^|[^0-9])v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/u);
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ?? null,
+  };
+}
+
+function isOpenSpecVersionCompatible(versionOutput: string): boolean {
+  const actual = parseSemanticVersion(versionOutput);
+  const minimum = parseSemanticVersion(MINIMUM_OPENSPEC_VERSION);
+  if (!actual || !minimum) return false;
+  for (const field of ['major', 'minor', 'patch'] as const) {
+    if (actual[field] > minimum[field]) return true;
+    if (actual[field] < minimum[field]) return false;
+  }
+  return actual.prerelease === null;
+}
+
+function getOpenSpecVersion(): string | null {
+  try {
+    return execFileSync('openspec', ['--version'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 10_000,
+      shell: process.platform === 'win32',
+    })
+      .toString()
+      .trim();
+  } catch {
+    return null;
+  }
+}
+
 async function ensureOpenSpecCli(
   projectPath: string,
   shouldInstall = true,
-): Promise<'ready' | 'missing' | 'failed'> {
+): Promise<'ready' | 'missing' | 'incompatible' | 'failed'> {
   const alreadyInstalled = isCommandAvailable('openspec');
   if (!shouldInstall) {
-    return alreadyInstalled ? 'ready' : 'missing';
+    if (!alreadyInstalled) return 'missing';
+    const version = getOpenSpecVersion();
+    if (version && isOpenSpecVersionCompatible(version)) return 'ready';
+    console.error(
+      `    OpenSpec ${version || 'version unknown'} is incompatible; Comet requires >= ${MINIMUM_OPENSPEC_VERSION}. The OpenSpec upgrade was not selected; rerun comet init and select OpenSpec, or run: npm install -g @fission-ai/openspec@latest`,
+    );
+    return 'incompatible';
   }
   const label = alreadyInstalled ? 'Upgrading' : 'Installing';
   console.warn(`    ${label} OpenSpec CLI...`);
@@ -176,13 +227,25 @@ async function ensureOpenSpecCli(
       timeout: 120_000,
       shell: process.platform === 'win32',
     });
-    return isCommandAvailable('openspec') ? 'ready' : 'failed';
+    if (isCommandAvailable('openspec')) return 'ready';
+    console.error(
+      '    OpenSpec CLI installation completed, but the command is still unavailable on PATH. Restart the terminal or install manually: npm install -g @fission-ai/openspec@latest',
+    );
+    return 'failed';
   } catch (error) {
     if (alreadyInstalled) {
-      console.warn(
-        `    OpenSpec upgrade failed, using existing version: ${(error as Error).message}`,
+      const version = getOpenSpecVersion();
+      if (version && isOpenSpecVersionCompatible(version)) {
+        console.warn(
+          `    OpenSpec upgrade failed, using compatible existing version ${version}: ${(error as Error).message}`,
+        );
+        return 'ready';
+      }
+      console.error(
+        `    OpenSpec upgrade failed and existing ${version || 'version could not be read'} is incompatible; Comet requires >= ${MINIMUM_OPENSPEC_VERSION}.`,
       );
-      return 'ready';
+      printCommandErrorDetails(error);
+      return 'incompatible';
     }
     console.error(`    Failed to install OpenSpec CLI: ${(error as Error).message}`);
     printCommandErrorDetails(error);
@@ -314,10 +377,7 @@ async function installOpenSpec(
   mirrorOpenCodePlatformIds: string[] = [],
 ): Promise<'installed' | 'failed' | 'skipped'> {
   const cliStatus = await ensureOpenSpecCli(projectPath, shouldInstallCli);
-  if (cliStatus === 'failed') {
-    console.error(
-      `    OpenSpec CLI not available. Install manually: npm install -g @fission-ai/openspec@latest`,
-    );
+  if (cliStatus === 'failed' || cliStatus === 'incompatible') {
     return 'failed';
   }
   if (cliStatus === 'missing') {
@@ -406,8 +466,11 @@ async function installOpenSpec(
 }
 
 export {
+  MINIMUM_OPENSPEC_VERSION,
   installOpenSpec,
   isCommandAvailable,
+  isOpenSpecVersionCompatible,
+  getOpenSpecVersion,
   buildOpenSpecInitInvocation,
   getNpmExecutable,
   migrateOpenCodeOpenSpecPaths,

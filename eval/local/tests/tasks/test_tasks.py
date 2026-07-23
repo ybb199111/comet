@@ -21,25 +21,25 @@ import pytest
 import conftest
 from conftest import get_fixtures
 
-from scaffold import NoiseTask, Treatment
+from scaffold import Treatment
 from scaffold.python import extract_events, parse_output
+from scaffold.python.aligned_comparison import build_case_manifest, case_manifest_payload
+from scaffold.python.native_eval import (
+    adapt_checks_for_native,
+    adapt_prompt_for_native,
+    filter_control_workflow_checks as _filter_control_workflow_checks,
+    is_control_business_only_run as _is_control_business_only_run,
+    split_comet_completion_checks as _split_comet_completion_checks,
+)
 from scaffold.python.profiles import resolve_profile_name, run_profile_rubric
 from scaffold.python.tasks import list_tasks, load_task
 from scaffold.python.treatments import TreatmentConfig, build_treatment_skills, load_treatments
 from scaffold.python.validation import run_validators
 
 # Timeouts
-CLAUDE_TIMEOUT = 1500  # 25 minutes for Claude to complete task (multi-turn loop)
-PYTEST_TIMEOUT = 1800  # 30 minutes total including setup/teardown
+CLAUDE_TIMEOUT = 1500  # Default floor for Claude to complete a multi-turn task
+PYTEST_TIMEOUT = 3000  # 50 minutes total including task-specific runtime and teardown
 MANIFEST_DYNAMIC_ONLY_TASKS = {"workflow-overlay-contract"}
-CONTROL_BUSINESS_ONLY_TREATMENTS = {"CONTROL"}
-COMET_WORKFLOW_ONLY_CHECK_PREFIXES = (
-    "openspec_artifacts",
-    "comet_state",
-    "workflow_phases",
-    "tests_written",
-    "tests_exist",
-)
 
 
 # =============================================================================
@@ -98,9 +98,7 @@ def generate_test_params(task_filter: str | None, treatment_filter: str | None, 
         treatment_list = expand_treatment_patterns(patterns, all_treatments)
     elif dynamic and manifest_tasks:
         treatment_list = [
-            treatment
-            for treatment in manifest_baseline_treatments
-            if treatment in all_treatments
+            treatment for treatment in manifest_baseline_treatments if treatment in all_treatments
         ]
         if dynamic.name not in treatment_list:
             treatment_list.append(dynamic.name)
@@ -128,52 +126,6 @@ def generate_test_params(task_filter: str | None, treatment_filter: str | None, 
                     params.append((task_name, treatment_name))
 
     return params
-
-
-def _is_control_business_only_run(profile_name: str, treatment_name: str) -> bool:
-    return profile_name == "comet-workflow" and treatment_name in CONTROL_BUSINESS_ONLY_TREATMENTS
-
-
-def _filter_control_workflow_checks(
-    profile_name: str,
-    treatment_name: str,
-    passed: list[str],
-    failed: list[str],
-) -> tuple[list[str], list[str]]:
-    """For CONTROL, evaluate comet tasks by business outcome only.
-
-    CONTROL intentionally has no Skill mounted. OpenSpec/Comet state, phase
-    evidence, and workflow-test discipline are reported by the rubric as
-    non-applicable instead of counted as task failures.
-    """
-    if not _is_control_business_only_run(profile_name, treatment_name):
-        return passed, failed
-
-    def keep(check: str) -> bool:
-        return not any(check.startswith(prefix) for prefix in COMET_WORKFLOW_ONLY_CHECK_PREFIXES)
-
-    return [check for check in passed if keep(check)], [check for check in failed if keep(check)]
-
-
-def _split_comet_completion_checks(
-    passed: list[str],
-    failed: list[str],
-) -> dict[str, dict[str, list[str]]]:
-    """Split validator results into business and workflow completion buckets."""
-
-    def is_workflow_check(check: str) -> bool:
-        return any(check.startswith(prefix) for prefix in COMET_WORKFLOW_ONLY_CHECK_PREFIXES)
-
-    return {
-        "business_completion": {
-            "passed": [check for check in passed if not is_workflow_check(check)],
-            "failed": [check for check in failed if not is_workflow_check(check)],
-        },
-        "workflow_completion": {
-            "passed": [check for check in passed if is_workflow_check(check)],
-            "failed": [check for check in failed if is_workflow_check(check)],
-        },
-    }
 
 
 def test_eval_manifest_baselines_extend_dynamic_treatment_list(tmp_path, monkeypatch):
@@ -215,7 +167,9 @@ interaction:
         "load_treatments",
         lambda: {
             "CONTROL": TreatmentConfig(name="CONTROL", description="Control"),
-            "COMET_FULL_040_BETA": TreatmentConfig(name="COMET_FULL_040_BETA", description="Comet full"),
+            "COMET_FULL_040_BETA": TreatmentConfig(
+                name="COMET_FULL_040_BETA", description="Comet full"
+            ),
         },
     )
 
@@ -242,13 +196,23 @@ def test_control_comet_workflow_filters_workflow_only_checks():
     passed, failed = _filter_control_workflow_checks(
         "comet-workflow",
         "CONTROL",
-        ["sentence_feature", "tests_written: ok", "workflow_phases: 5/5", "tests_exist"],
+        [
+            "sentence_feature",
+            "tests_written: ok",
+            "workflow_phases: 5/5",
+            "tests_exist",
+            "native_skill_invocation",
+            "native_artifacts",
+            "native_trajectory",
+        ],
         [
             "openspec_artifacts: openspec/changes/ directory not found",
             "comet_state: No .comet.yaml found",
             "workflow_phases: Only 1/5 phases",
             "tests_written: No test files written by the agent",
             "tests_exist: No test files found",
+            "native_state: no terminal Native archive exists",
+            "native_isolation: Classic or hidden workflow artifacts exist",
             "sentence_feature: --sentences flag not found",
         ],
     )
@@ -259,10 +223,19 @@ def test_control_comet_workflow_filters_workflow_only_checks():
 
 def test_split_comet_completion_checks_separates_business_and_workflow():
     completion = _split_comet_completion_checks(
-        ["sentence_feature", "tests_exist", "workflow_phases: 5/5"],
+        [
+            "sentence_feature",
+            "tests_exist",
+            "workflow_phases: 5/5",
+            "native_skill_invocation",
+            "native_artifacts",
+            "native_trajectory",
+        ],
         [
             "openspec_artifacts: missing",
             "comet_state: missing",
+            "native_state: incomplete",
+            "native_isolation: forbidden artifacts",
             "business_rule: failed",
         ],
     )
@@ -272,8 +245,19 @@ def test_split_comet_completion_checks_separates_business_and_workflow():
         "failed": ["business_rule: failed"],
     }
     assert completion["workflow_completion"] == {
-        "passed": ["tests_exist", "workflow_phases: 5/5"],
-        "failed": ["openspec_artifacts: missing", "comet_state: missing"],
+        "passed": [
+            "tests_exist",
+            "workflow_phases: 5/5",
+            "native_skill_invocation",
+            "native_artifacts",
+            "native_trajectory",
+        ],
+        "failed": [
+            "openspec_artifacts: missing",
+            "comet_state: missing",
+            "native_state: incomplete",
+            "native_isolation: forbidden artifacts",
+        ],
     }
 
 
@@ -300,13 +284,19 @@ def pytest_generate_tests(metafunc):
         treatment_filter = metafunc.config.getoption("--treatment")
         count = int(metafunc.config.getoption("--count") or 1)
         base_params = generate_test_params(task_filter, treatment_filter, metafunc.config)
-        # pytest ids stay (task, treatment); the rep number is tracked separately
-        # by the experiment plugin's get_rep_number per treatment. To force N
-        # distinct test invocations we append a rep suffix to the param id.
+        # The explicit marker is the controller-owned repetition identity used
+        # to persist a complete matrix before any model run begins.
         params = []
         for rep in range(count):
             for task_name, treatment_name in base_params:
-                params.append(pytest.param(task_name, treatment_name, id=f"{task_name}-{treatment_name}-r{rep+1}"))
+                params.append(
+                    pytest.param(
+                        task_name,
+                        treatment_name,
+                        id=f"{task_name}-{treatment_name}-r{rep + 1}",
+                        marks=pytest.mark.eval_case(repetition=rep + 1),
+                    )
+                )
         metafunc.parametrize("task_name,treatment_name", params)
 
 
@@ -352,7 +342,11 @@ def test_task_treatment(task_name, treatment_name):
     for var_name, var_template in task.config.setup.template_vars.items():
         template_vars[var_name] = var_template.format(run_id=run_id)
 
-    prompt = task.render_prompt(**template_vars)
+    prompt = adapt_prompt_for_native(
+        task.render_prompt(**template_vars),
+        treatment_name,
+        terminal_mode=task.config.evaluation.native_terminal,
+    )
     target_profile = None
     if treatment_cfg.skills:
         target_profile = treatment_cfg.skills[0].get("profile")
@@ -361,20 +355,39 @@ def test_task_treatment(task_name, treatment_name):
         override=fixtures.request_config.getoption("--profile"),
         target_profile=target_profile,
     )
+    interaction = conftest._resolve_interaction_config(task, profile_name, fixtures.request_config)
     fixtures.setup_test_context(
         skills=treatment.skills,
         claude_md=conftest._build_eval_claude_md(profile_name, treatment.claude_md),
         environment_dir=task.environment_dir,
     )
-    interaction = conftest._resolve_interaction_config(task, profile_name, fixtures.request_config)
-    skill_package_path = (
-        conftest._snapshot_dynamic_skill_package(fixtures.test_dir, skill_hints)
-        or skill_hints.get("path")
+    selected_model = conftest._selected_claude_model()
+    captured_execution = conftest._capture_execution_identity(
+        fixtures.test_dir,
+        model=selected_model,
+        interaction=interaction,
+    )
+    case_manifest = case_manifest_payload(
+        build_case_manifest(
+            task.name,
+            task.path.parent,
+            execution_identity=captured_execution.report_identity,
+        )
+    )
+    skill_package_path = conftest._snapshot_dynamic_skill_package(
+        fixtures.test_dir, skill_hints
+    ) or skill_hints.get("path")
+
+    result = fixtures.run_claude(
+        prompt,
+        timeout=max(CLAUDE_TIMEOUT, task.config.timeout_sec),
+        model=selected_model,
+        interaction=interaction,
+        image_id=captured_execution.runtime_image_id,
     )
 
-    result = fixtures.run_claude(prompt, timeout=CLAUDE_TIMEOUT, interaction=interaction)
-
     events = extract_events(parse_output(result.stdout))
+    loop_interaction = conftest._extract_loop_interaction(result.stderr)
     outputs = {
         "run_id": run_id,
         "treatment_name": treatment_name,
@@ -386,8 +399,10 @@ def test_task_treatment(task_name, treatment_name):
         or task.config.evaluation.required_skills,
         "expected_artifacts": skill_hints.get("expected_artifacts")
         or task.config.evaluation.expected_artifacts,
-        "require_skill_invocation": task.config.evaluation.require_skill_invocation,
+        "require_skill_invocation": skill_hints.get("require_skill_invocation")
+        or task.config.evaluation.require_skill_invocation,
         "rubric_criteria": task.config.evaluation.rubric_criteria,
+        "native_terminal": task.config.evaluation.native_terminal,
         "skill_package_path": skill_package_path,
         "generated_node_skills": skill_hints.get("generated_node_skills") or [],
         "route_conformance_task": skill_hints.get("route_conformance_task"),
@@ -402,14 +417,23 @@ def test_task_treatment(task_name, treatment_name):
         "interaction": {
             "mode": interaction.mode,
             "max_turns": interaction.max_turns,
+            **loop_interaction,
         },
+        "case_manifest": case_manifest,
     }
     events["profile"] = outputs["profile"]
     events["skill_sources"] = outputs["skill_sources"]
     events["eval_manifest"] = outputs["eval_manifest"]
     events["interaction"] = outputs["interaction"]
+    events["case_manifest"] = case_manifest
 
     passed, failed = run_validators(validators, fixtures.test_dir, outputs)
+    passed, failed = adapt_checks_for_native(
+        fixtures.test_dir,
+        outputs,
+        passed,
+        failed,
+    )
     completion_slices = _split_comet_completion_checks(passed, failed)
     passed, failed = _filter_control_workflow_checks(
         profile_name,
@@ -427,7 +451,9 @@ def test_task_treatment(task_name, treatment_name):
         rubric_outputs.update(completion_slices)
         if _is_control_business_only_run(profile_name, treatment_name):
             rubric_outputs["workflow_completion"] = {"passed": [], "failed": []}
-    rubric_passed, rubric_failed = run_profile_rubric(profile_name, fixtures.test_dir, rubric_outputs)
+    rubric_passed, rubric_failed = run_profile_rubric(
+        profile_name, fixtures.test_dir, rubric_outputs
+    )
     passed = passed + rubric_passed
     failed = failed + rubric_failed
 

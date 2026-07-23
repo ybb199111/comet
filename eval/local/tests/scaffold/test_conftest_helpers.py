@@ -1,13 +1,23 @@
 """Tests for pytest fixture helper behavior."""
 
 import importlib.util
+import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import conftest
+import pytest
 from scaffold.python.tasks import load_task
 from scaffold.python.treatments import build_treatment_skills, load_treatments
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    msvcrt = None
 
 
 def test_file_lock_context_manager_allows_exclusive_writes(tmp_path: Path):
@@ -18,6 +28,43 @@ def test_file_lock_context_manager_allows_exclusive_writes(tmp_path: Path):
         data_file.write_text("held")
 
     assert data_file.read_text() == "held"
+
+
+@pytest.mark.skipif(msvcrt is None, reason="Windows locking API only")
+def test_file_lock_waits_when_windows_lock_is_temporarily_busy(tmp_path: Path, monkeypatch):
+    lock_file = tmp_path / "coordination.lock"
+    real_locking = msvcrt.locking
+    attempts = 0
+
+    def flaky_locking(fd, mode, size):
+        nonlocal attempts
+        if mode == msvcrt.LK_NBLCK and attempts < 2:
+            attempts += 1
+            raise OSError(36, "Resource deadlock avoided")
+        return real_locking(fd, mode, size)
+
+    monkeypatch.setattr(msvcrt, "locking", flaky_locking)
+
+    with conftest.file_lock(lock_file, timeout=1):
+        assert attempts == 2
+
+
+@pytest.mark.skipif(msvcrt is None, reason="Windows locking API only")
+def test_file_lock_does_not_retry_non_contention_windows_errors(tmp_path: Path, monkeypatch):
+    lock_file = tmp_path / "coordination.lock"
+    attempts = 0
+
+    def broken_locking(_fd, _mode, _size):
+        nonlocal attempts
+        attempts += 1
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(msvcrt, "locking", broken_locking)
+
+    with pytest.raises(OSError, match="Invalid argument"):
+        with conftest.file_lock(lock_file, timeout=1):
+            pass
+    assert attempts == 1
 
 
 def test_unit_test_detection_handles_scaffold_and_script_paths():
@@ -32,6 +79,129 @@ def test_unit_test_detection_keeps_task_runs_as_experiments():
         args = ["local/tests/tasks/test_tasks.py", "--task=comet-hotfix"]
 
     assert conftest._is_unit_tests_only(Config()) is False
+
+
+def test_extract_loop_turns_reads_driver_completion_line():
+    stderr = (
+        "[loop] turn 1/4\n"
+        "[loop] decision point detected; simulating user reply\n"
+        "[loop] deterministic decision reply applied\n"
+        "[loop] workflow completion detected; ending\n"
+        "[loop] finished after 3 turns\n"
+    )
+
+    assert conftest._extract_loop_turns(stderr) == 3
+    assert conftest._extract_loop_interaction(stderr) == {
+        "actual_turns": 3,
+        "decision_points": 1,
+        "deterministic_replies": 1,
+        "completion_signals": 1,
+        "fresh_resume_boundaries": 0,
+    }
+    assert conftest._extract_loop_turns("ordinary stderr") is None
+
+
+def test_capture_execution_identity_separates_runtime_image_from_safe_report(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://private-routing.example")
+    runtime_image_id = "sha256:" + "a" * 64
+    raw = {
+        "schema": "comet.eval.execution-identity.v1",
+        "runtime_image_id": runtime_image_id,
+        "image_id_hash": "sha256:" + hashlib.sha256(runtime_image_id.encode()).hexdigest(),
+        "image_repo_digests_hash": "sha256:" + "c" * 64,
+        "image_ref_hash": "sha256:" + "d" * 64,
+        "claude_tool_version_hash": "sha256:" + "e" * 64,
+    }
+    calls = []
+
+    def fake_run_shell(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, json.dumps(raw), "")
+
+    monkeypatch.setattr(conftest, "run_shell", fake_run_shell)
+    interaction = SimpleNamespace(
+        mode="auto_user",
+        max_turns=3,
+        simulator_prompt="secret simulator text",
+        decision_patterns=[],
+        decision_reply=None,
+        continue_prompt="continue privately",
+        fresh_resume_marker=None,
+    )
+
+    captured = conftest._capture_execution_identity(
+        tmp_path,
+        model="private-model",
+        interaction=interaction,
+    )
+
+    assert captured.runtime_image_id == runtime_image_id
+    serialized = json.dumps(captured.report_identity)
+    assert runtime_image_id not in serialized
+    assert "private-model" not in serialized
+    assert "secret simulator text" not in serialized
+    assert "private-routing.example" not in serialized
+    assert captured.report_identity["claude_tool_version_hash"] == "sha256:" + "e" * 64
+    assert calls[0][0][:2] == ("docker.sh", "execution-identity")
+
+
+def test_expected_case_matrix_collection_and_xdist_safe_persistence(tmp_path: Path):
+    def item(task: str, treatment: str, rep: int):
+        marker = SimpleNamespace(kwargs={"repetition": rep})
+        return SimpleNamespace(
+            callspec=SimpleNamespace(params={"task_name": task, "treatment_name": treatment}),
+            get_closest_marker=lambda name: marker if name == "eval_case" else None,
+        )
+
+    cases = conftest._expected_cases_from_items(
+        [item("task-b", "BASE", 2), item("task-a", "CANDIDATE", 1)]
+    )
+    from scaffold.python.aligned_comparison import (
+        EXPECTED_CASE_MATRIX_FILENAME,
+        expected_case_matrix_payload,
+    )
+
+    payload = expected_case_matrix_payload(cases)
+    conftest._persist_expected_case_matrix(tmp_path, payload)
+    conftest._persist_expected_case_matrix(tmp_path, payload)
+
+    persisted = json.loads((tmp_path / EXPECTED_CASE_MATRIX_FILENAME).read_text(encoding="utf-8"))
+    assert persisted == payload
+    assert persisted["cases"] == [
+        {"task": "task-a", "treatment": "CANDIDATE", "rep": 1},
+        {"task": "task-b", "treatment": "BASE", "rep": 2},
+    ]
+
+    conflicting = expected_case_matrix_payload([("task-a", "CANDIDATE", 2)])
+    with pytest.raises(RuntimeError, match="different expected case matrices"):
+        conftest._persist_expected_case_matrix(tmp_path, conflicting)
+
+
+def test_experiment_plugin_persists_expected_matrix_from_collection(tmp_path: Path):
+    marker = SimpleNamespace(kwargs={"repetition": 3})
+    item = SimpleNamespace(
+        callspec=SimpleNamespace(params={"task_name": "task-a", "treatment_name": "NATIVE"}),
+        get_closest_marker=lambda name: marker if name == "eval_case" else None,
+    )
+    plugin = conftest.ExperimentPlugin(SimpleNamespace(option=SimpleNamespace(numprocesses=0)))
+    plugin.logger = SimpleNamespace(base_dir=tmp_path, metadata={})
+
+    plugin.pytest_collection_finish(SimpleNamespace(items=[item]))
+
+    metadata = plugin.logger.metadata["expected_case_matrix"]
+    assert metadata["case_count"] == 1
+    matrix = json.loads((tmp_path / metadata["path"]).read_text(encoding="utf-8"))
+    assert matrix["cases"] == [{"task": "task-a", "treatment": "NATIVE", "rep": 3}]
+
+
+def test_auto_user_prompt_paths_bypass_msys_path_conversion():
+    source = (Path(__file__).resolve().parents[1] / "conftest.py").read_text(encoding="utf-8")
+
+    assert '"@//workspace/.eval-task-prompt.txt"' in source
+    assert '"//workspace/.eval-simulator-prompt.txt"' in source
+    assert "interaction.simulator_prompt and not interaction.decision_reply" in source
 
 
 def test_dynamic_treatment_config_from_skill_path(tmp_path: Path):
@@ -185,7 +355,9 @@ def test_setup_test_context_configures_039_shell_hook(tmp_path: Path, setup_test
     (source_dir / "SKILL.md").write_text("---\nname: comet\n---\n\nBody.", encoding="utf-8")
     scripts_dir = source_dir / "scripts"
     scripts_dir.mkdir()
-    (scripts_dir / "comet-hook-guard.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (scripts_dir / "comet-hook-guard.sh").write_text(
+        "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
+    )
 
     setup_test_context(
         skills={
@@ -222,9 +394,7 @@ def test_setup_test_context_copies_dependency_skill_packages_with_scripts(
     assert (installed / "brainstorming" / "scripts" / "helper.js").exists()
     assert (installed / "brainstorming" / "visual-companion.md").exists()
     assert (installed / "subagent-driven-development" / "scripts" / "review-package").exists()
-    assert (
-        installed / "subagent-driven-development" / "task-reviewer-prompt.md"
-    ).exists()
+    assert (installed / "subagent-driven-development" / "task-reviewer-prompt.md").exists()
     assert (installed / "writing-skills" / "examples" / "CLAUDE_MD_TESTING.md").exists()
     assert (installed / "openspec-new-change" / "SKILL.md").exists()
 
@@ -235,7 +405,9 @@ def test_dynamic_treatment_config_from_eval_manifest(tmp_path: Path):
     (package / "SKILL.md").write_text("---\nname: manifest-skill\n---\n\nBody.", encoding="utf-8")
     stage = tmp_path / "manifest-skill-open"
     stage.mkdir()
-    (stage / "SKILL.md").write_text("---\nname: manifest-skill-open\n---\n\nStage.", encoding="utf-8")
+    (stage / "SKILL.md").write_text(
+        "---\nname: manifest-skill-open\n---\n\nStage.", encoding="utf-8"
+    )
     comet_dir = package / "comet"
     comet_dir.mkdir()
     manifest = comet_dir / "eval.yaml"
@@ -317,7 +489,9 @@ def test_snapshot_dynamic_skill_package_copies_package_and_node_skills(tmp_path:
     (package / "reference" / "workflow-protocol.json").write_text("{}", encoding="utf-8")
     stage = source_root / "manifest-skill-open"
     stage.mkdir()
-    (stage / "SKILL.md").write_text("---\nname: manifest-skill-open\n---\n\nStage.", encoding="utf-8")
+    (stage / "SKILL.md").write_text(
+        "---\nname: manifest-skill-open\n---\n\nStage.", encoding="utf-8"
+    )
     test_dir = tmp_path / "workspace"
     test_dir.mkdir()
 
@@ -497,7 +671,12 @@ def test_build_report_payload_persists_sample_quality():
         treatment_name="COMET_FULL_040_BETA",
         rep=1,
         run_id="run-1",
-        events={"duration_seconds": 10, "total_tokens": 100, "total_cost_usd": 0.01},
+        events={
+            "duration_seconds": 10,
+            "total_tokens": 100,
+            "total_cost_usd": 0.01,
+            "case_manifest": {"case_hash": "sha256:demo"},
+        },
         passed=["[RUBRIC] weighted_score: 1.00"],
         failed=[],
         scripts_used=[],
@@ -511,6 +690,7 @@ def test_build_report_payload_persists_sample_quality():
     assert report["sample_quality"]["status"] == "included"
     assert report["sample_quality"]["reason_code"] == "valid_signal"
     assert report["sample_quality"]["include_in_analysis"] is True
+    assert report["events_summary"]["case_manifest"] == {"case_hash": "sha256:demo"}
 
 
 def test_build_report_payload_marks_timeout_as_excluded():

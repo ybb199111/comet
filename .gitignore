@@ -108,12 +108,14 @@ comet-autoupdate.log
 eval/.venv/
 eval/.uv-cache/
 eval/.cache/
-eval/uv.lock
 eval/**/__pycache__/
 eval/.pytest_cache/
 eval/.pytest_cache*/
 eval/.pytest-basetemp-*/
 eval/.pytest-tmp-*/
+eval/**/.pytest*/
+eval/**/.pytest-*/
+eval/**/.pytest_*/
 eval/local/logs/
 eval/local/.pytest_docker_build.lock
 

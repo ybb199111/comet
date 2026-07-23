@@ -1,5 +1,7 @@
 import { Command, Option } from 'commander';
+import { exitCodeForCommandResult } from '../commands/command-result.js';
 import { initCommand } from '../commands/init.js';
+import { workflowResolveCommand } from '../commands/workflow.js';
 import { statusCommand } from '../commands/status.js';
 import { resumeProbeCommand } from '../commands/resume-probe.js';
 import { dashboardCommand } from '../commands/dashboard.js';
@@ -12,6 +14,7 @@ import {
   runClassicFacade,
   type PublicClassicCommand,
 } from '../commands/classic.js';
+import { runNativeFacade } from '../commands/native.js';
 import { getCurrentVersion } from '../../platform/version/version.js';
 import { COMET_TAGLINE } from './comet-banner.js';
 import {
@@ -69,16 +72,17 @@ program
   .option('--json', 'Output as JSON')
   .addOption(new Option('--scope <scope>', 'Install scope').choices(['global', 'project']))
   .addOption(new Option('--language <lang>', 'Language for skills').choices(['en', 'zh']))
+  .addOption(
+    new Option('--workflow <workflow>', 'Workflows to initialize').choices([
+      'native',
+      'classic',
+      'both',
+    ]),
+  )
+  .option('--root <artifact-root>', 'Native artifact root relative to the project')
   .action(async (targetPath = '.', options) => {
-    try {
-      await initCommand(targetPath, options);
-    } catch (error) {
-      if (error instanceof Error && error.name === 'ExitPromptError') {
-        console.log('\n  Cancelled.\n');
-        process.exit(0);
-      }
-      throw error;
-    }
+    const result = await initCommand(targetPath, { ...options, artifactRoot: options.root });
+    process.exitCode = exitCodeForCommandResult(result);
   });
 
 program
@@ -87,6 +91,16 @@ program
   .option('--json', 'Output as JSON')
   .action(async (targetPath = '.', options) => {
     await statusCommand(targetPath, options);
+  });
+
+const workflow = program.command('workflow').description('Resolve the configured Comet workflow');
+
+workflow
+  .command('resolve [path]')
+  .description('Resolve /comet to its permanent Native or Classic entry')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    await workflowResolveCommand(targetPath, options);
   });
 
 program
@@ -123,6 +137,7 @@ program
   .command('doctor [path]')
   .description('Diagnose Comet installation health')
   .option('--json', 'Output as JSON')
+  .option('--repair', 'Repair managed Hook, Rule, and deterministic selection state')
   .addOption(
     new Option('--scope <scope>', 'Install scope to diagnose').choices([
       'auto',
@@ -142,9 +157,12 @@ program
   .addOption(new Option('--scope <scope>', 'Install scope').choices(['global', 'project']))
   .option('--all-projects', 'Update all indexed project-scope Comet installs')
   .option('--current-project', 'Update only the current project')
-  .addOption(new Option('--skip-npm', 'Skip npm package self-update').hideHelp())
+  .option('--self-update', 'Update the Comet npm package before refreshing project assets')
+  .option('--skip-self-update', 'Skip the Comet npm package self-update')
+  .addOption(new Option('--skip-npm', 'Deprecated alias for --skip-self-update').hideHelp())
   .action(async (targetPath = '.', options) => {
-    await updateCommand(targetPath, options);
+    const result = await updateCommand(targetPath, options);
+    process.exitCode = exitCodeForCommandResult(result);
   });
 
 program
@@ -175,6 +193,9 @@ program
   .option('--manifest <path>', 'Path to comet/eval.yaml')
   .option('--skill-path <path>', 'Local Skill directory or SKILL.md')
   .option('--skill-name <name>', 'Skill name used with --skill-path')
+  .addOption(
+    new Option('--suite <suite>', 'Eval suite').choices(['local', 'langsmith']).default('local'),
+  )
   .option('--profile <name>', 'Eval profile override')
   .option('--task <task>', 'Explicit eval task override')
   .option('--report-config <path>', 'JSON/YAML report output config')
@@ -202,6 +223,16 @@ for (const command of PUBLIC_CLASSIC_COMMANDS) {
       process.exitCode = await runClassicFacade(command, args);
     });
 }
+
+program
+  .command('native [args...]')
+  .description('Manage the self-contained Comet Native workflow')
+  .allowUnknownOption()
+  .allowExcessArguments()
+  .helpOption(false)
+  .action(async (args: string[]) => {
+    process.exitCode = await runNativeFacade(args);
+  });
 
 const skill = program
   .command('skill')
@@ -565,4 +596,33 @@ bundle
     await bundleDistributeCommand(name, options);
   });
 
-program.parse();
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function runCli(): Promise<void> {
+  try {
+    await program.parseAsync();
+  } catch (error) {
+    const cancelled = error instanceof Error && error.name === 'ExitPromptError';
+    const message = cancelled ? 'Command cancelled by user' : errorMessage(error);
+    if (process.argv.includes('--json')) {
+      console.log(
+        JSON.stringify(
+          {
+            status: cancelled ? 'cancelled' : 'failed',
+            error: message,
+          },
+          null,
+          2,
+        ),
+      );
+      console.error(`${cancelled ? 'Cancelled' : 'Error'}: ${message}`);
+    } else {
+      console.error(`\n  ${cancelled ? 'Cancelled.' : `Error: ${message}`}\n`);
+    }
+    process.exitCode = cancelled ? 130 : 1;
+  }
+}
+
+await runCli();

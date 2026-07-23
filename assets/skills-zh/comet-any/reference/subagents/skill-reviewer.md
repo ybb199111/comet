@@ -61,15 +61,17 @@ prompt:
 - 阶段推进没有通过脚本输出 `NEXT:` 和 `SKILL:` 表达。
 - workflow protocol 声明的 `requiredSkillCalls` 没有在对应Node Skill 中明确要求加载，或 subagent 槽位没有要求子代理任务提示加载该 Skill。
 - 用户停顿点缺失，或停顿点可被默认值绕过。
+- 把确定性修复、guard 失败、状态对账、能力缺口、单一合法动作或 `NEXT: manual` 默认写成用户停顿点；或把可同时回答的相邻选择拆成连续确认。
+- entry Skill 的 frontmatter description 没有说明它是托管 workflow 的入口/恢复路由，或 internal Node Skill 的 description 允许普通任务直接触发而未限定为显式调用或 entry/runtime 路由。
 - 中文 Skill 混入英文流程句。
 - 嵌套 Skill 调用使用 provider 前缀。
 - 用户可见 `SKILL.md` 泄漏生成审计章节、source hash 或内部 metadata。
-- `/comet` 定制替换或删除了 `open / design / build / verify / archive`、`.comet.yaml`、decision point、verify-result-transition 或 archive-delta-sync。
+- `/comet-classic` 定制替换或删除了 `open / design / build / verify / archive`、`.comet.yaml`、decision point、verify-result-transition 或 archive-delta-sync。
 - 任意 Skill 组合缺少自动推进、脚本守卫、用户停顿点、恢复或当前 draft hash 的 eval evidence。
 
 ## 严重级别
 
-- Critical：会让生成 Skill 不可用、不可恢复、不可审计，或破坏 `/comet` 受保护语义。
+- Critical：会让生成 Skill 不可用、不可恢复、不可审计，或破坏 `/comet-classic` 受保护语义。
 - Important：会让阶段流程、脚本守卫、停顿点、Skill 调用或证据链不可信；必须修复后才能 ready。
 - Minor：不阻塞 ready 的清晰度、命名或维护性改进。
 

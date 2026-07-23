@@ -27,14 +27,18 @@ describe('CLI help text', () => {
     const packageLock = JSON.parse(
       readFileSync(path.join(repositoryRoot, 'package-lock.json'), 'utf8'),
     ) as { version: string; packages: { '': { version: string } } };
+    const assetsManifest = JSON.parse(
+      readFileSync(path.join(repositoryRoot, 'assets', 'manifest.json'), 'utf8'),
+    ) as { version: string };
     const tagline = 'Agent Skill Harness For Turning Ideas Into Evaluated Workflows';
 
     expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain(tagline);
     expect(packageJson.description).toBe(tagline);
-    expect(packageJson.version).toBe('0.4.0-beta.4');
-    expect(packageLock.version).toBe('0.4.0-beta.4');
-    expect(packageLock.packages[''].version).toBe('0.4.0-beta.4');
+    expect(packageJson.version).toBe('0.4.0-beta.8');
+    expect(packageLock.version).toBe('0.4.0-beta.8');
+    expect(packageLock.packages[''].version).toBe('0.4.0-beta.8');
+    expect(assetsManifest.version).toBe('0.4.0-beta.8');
   });
 
   it('marks bundle as the advanced backend and skill Engine runs as advanced', () => {
@@ -89,6 +93,19 @@ describe('CLI help text', () => {
       facadeDescriptions.filter((description) => help.stdout.includes(description)),
     ).toHaveLength(4);
     expect(help.stdout).toMatch(/^\s+resume-probe \[options\] \[path\]\s+Probe whether/mu);
+    expect(help.stdout).toContain('Manage the self-contained Comet Native workflow');
+  });
+
+  it('keeps Native behind one isolated root command', () => {
+    const help = runCli('--help');
+    const nativeHelp = runCli('native', '--help');
+
+    expect(help.status, help.stderr).toBe(0);
+    expect(nativeHelp.status, nativeHelp.stderr).toBe(0);
+    expect(help.stdout).toMatch(/^\s+native \[args\.\.\.\]\s+Manage the self-contained/mu);
+    expect(nativeHelp.stdout).toContain('Usage: comet native <command> [options]');
+    expect(nativeHelp.stdout).toContain('root move <artifact-root>');
+    expect(nativeHelp.stdout).toContain('doctor [<change-name>]');
   });
 
   it('separates repository evals from Engine Run runtime checks', () => {
@@ -99,6 +116,7 @@ describe('CLI help text', () => {
     expect(skillCheckHelp.status, skillCheckHelp.stderr).toBe(0);
     expect(evalHelp.stdout).toContain('Evaluate a Skill or eval manifest with one command');
     expect(evalHelp.stdout).toContain('Usage: comet eval [options] [target]');
+    expect(evalHelp.stdout).toContain('--suite <suite>');
     expect(evalHelp.stdout).toContain('--collect');
     expect(evalHelp.stdout).not.toContain('run [options]');
     expect(evalHelp.stdout).not.toContain('collect [options]');
@@ -116,6 +134,15 @@ describe('CLI help text', () => {
     expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain('check [options]');
     expect(help.stdout).not.toContain('eval [options]');
+  });
+
+  it('exposes explicit package self-update controls', () => {
+    const help = runCli('update', '--help');
+
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stdout).toContain('--self-update');
+    expect(help.stdout).toContain('--skip-self-update');
+    expect(help.stdout).not.toContain('--skip-npm');
   });
 
   it('keeps Skill Creator resume commands out of the publish surface', () => {

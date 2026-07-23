@@ -16,9 +16,14 @@
   <a href="https://www.npmjs.com/package/@rpamis/comet"><img alt="npm weekly download count" src="https://img.shields.io/npm/dw/@rpamis/comet?style=flat-square&label=Downloads/wk" /></a>
   <a href="https://docs.comet.rpamis.com/"><img alt="Comet Docs" src="https://img.shields.io/badge/Docs-docs.comet.rpamis.com-FFD700?style=flat-square" /></a>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" /></a>
+  <a href="https://atomgit.com/rpamis/comet"><img alt="AtomGitStars" src="https://atomgit.com/rpamis/comet/star/badge.svg" /></a>
 </p>
 
-# @rpamis/comet
+<p align="center">
+<a href="https://trendshift.io/repositories/38989?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-38989" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/38989" alt="rpamis%2Fcomet | Trendshift" width="250" height="55"/></a>
+</p>
+
+## What is Comet ?
 
 ```
  ██████╗ ██████╗ ███╗   ███╗███████╗████████╗
@@ -35,32 +40,26 @@
 
 **Comet is a resumable long-running task workflow and Skill platform for coding.**
 
-It uses a unified cross-platform runtime to connect OpenSpec artifacts, Superpowers execution methodology, Skill creation, evaluation, and release into a closed-loop workflow. 
+It provides two independent requirements workflows: Native for strong models, powered only by Comet's own runtime, and Classic, which preserves the full OpenSpec + Superpowers phase-governance model. Comet also covers Skill creation, evaluation, and release.
 
 It allows you to use a toolchain to handle everything from requirements to archiving, combine any skill to make it like Comet, evolving your skills based on scientific **Rubric**, **Pass@k**, and **Pass^k** scoring.
 
 > [!IMPORTANT]
-> **0.4.0-beta.1** — Comet has been upgraded to a pure Node runtime (no longer dependent on Bash/WSL) and brings three core capabilities: use `/comet-any` to combine **any** skill into a custom workflow, use `comet eval` to evaluate **any** skill and integrate it into the LangSmith system, and use `comet dashboard` to visualize each change in the browser.
+> **0.4.0-beta.7** — A new **high-performance, native and recoverable** Native workflow has been added. Native and Classic work independently through unified configuration, status, Guard, Dashboard, and Eval entry points. Eval alignment of experiments (16 tasks × 48 runs, selecting 41 pairs of samples that both passed) shows that **total Token has decreased by 76.8%**, **Agent rounds have dropped by 57.4%**, **time consumption has shrunk by 47.4%**, **pass^3 reaches 87.5% (+12.5pp) and pass@3 is 100%**. For more details, please refer to [Native vs. 0.4.0 Classic Real Evaluation](https://docs.comet.rpamis.com/zh/eval/comet-native-vs-040-experiment).
+> 
+> **0.4.0-beta.1** — Upgrades Comet to a pure Node runtime without Bash/WSL and adds three core capabilities: compose **any** Skill through `/comet-any`, evaluate **any** Skill through `comet eval` with LangSmith integration, and visualize every change through `comet dashboard`.
 >
 > **0.3.9** — Review mode (`off|standard|thorough`) controls Build/Verify code review with project defaults; init/update now use optional dependency prompts, broader CLI i18n, stronger phase guards, and macOS executable bits.
 >
-> **0.3.8** — Adds Kimi Code support, safe multi-platform `comet uninstall`, extended subagent dispatch, shared progressive-loading references, update checks, and pre-commit formatting.
->
-> **0.3.7** — Adds CodeGraph semantic indexing, Beta context compression, active context compression, token optimizations, `auto_transition`, phase guards, optional TDD, and safer archive/verification flow.
->
-> See [NEWS.md](NEWS.md) for details.
+> See the website [Changelog](https://docs.comet.rpamis.com/en/changelog) for details.
 
-> Combining OpenSpec and Superpowers is not Comet's ultimate goal. We hope to track long-running skills like these and find the Harness capabilities that enable stable execution of long-running skills. If you are interested in participating, you are welcome to contribute to our project or learn from our source code.
+> Native and Classic are not lightweight and heavyweight tiers, and neither upgrades into the other. Native is for strong models that can plan and verify autonomously; Classic is for scenarios that benefit from a complete phased methodology and stronger constraints.
 
 ## Why Comet
 
-- **The stable core for long-running tasks** — Comet's Classic Spec mode combines OpenSpec and Superpowers with a state
-  machine, phase guards, and scripts that connect the full lifecycle. Agents can only do the work allowed in the current
-  phase and can only exit after the phase work is complete. The core flow can advance automatically, with HITL only at
-  moments that need your confirmation.
-- **Resumable workflow and intelligent routing** — Comet uses intent recognition to route each task toward the path it
-  needs. `/comet` remembers where a change stopped, supports zero-context recovery across devices, and removes the need
-  to memorize long Skill command names: use `/comet` to advance or resume your work.
+- **Native workflow for strong models** — `/comet-native` uses a detailed brief, complete target specifications, phase checks, and recoverable archive to constrain outcomes while leaving planning, implementation, testing, and review methods to the model. It uses a configurable `comet/` artifact root and remains fully separate from Classic. See the [Native workflow guide](https://docs.comet.rpamis.com/en/native/quickstart).
+- **The stable core for long-running tasks** — Comet's Classic Spec mode combines OpenSpec and Superpowers into a five-phase flow with a state machine, phase checks, and scripts. It suits work that needs an explicit method and strong constraints; its permanent entry point is `/comet-classic`.
+- **A configuration-driven shared entry point** — `/comet` reads only the project's `.comet/config.yaml` and deterministically forwards to `/comet-native` or `/comet-classic`. It does not guess from task size or mix changes, state, or directories across workflows. `comet resume-probe` uses the same configuration to resume through the correct permanent entry point.
 - **Skill platform** — Comet can author reusable Skill packages and use `/comet-any` to organize them into distributable
   Bundles, so Skills you create can be distributed to coding platforms with one command, much like `comet init`.
 - **Eval platform** — Comet assesses your skills using scientific Rubric, Pass@k, and Pass^k scoring, ensuring skill evolution is based on scientific evidence rather than intuition. It supports integration with LangSmith assessments, bringing evaluation to real-world enterprise production environments. Its dual-agent architecture automates the assessment process in your production environment.
@@ -69,7 +68,7 @@ It allows you to use a toolchain to handle everything from requirements to archi
 
 With Comet, you only need to remember two skills and one command, covering coding, creation, and evaluation with an extremely low barrier to entry：
 
-- Use `/comet` for coding tasks
+- Use `/comet` to enter the project's configured Native or Classic workflow
 - Use `/comet-any` to compose any Skills
 - Use `comet eval` to evaluate any Skill
 
@@ -125,7 +124,7 @@ Many Comet capabilities have parallels in current industry practice.
 
 Requirements:
 
-- Node.js 20+
+- Node.js 22+
 - npm/npx
 - Git
 
@@ -138,6 +137,36 @@ npm install -g @rpamis/comet
 ```bash
 cd your-project
 comet init
+```
+
+Interactive setup explains and offers Native, Classic, or both. Native is for strong models that can implement and verify autonomously; Classic is for tasks that need full Spec/TDD phase constraints; Both installs two independent entries while keeping `/comet` on Native by default. Non-interactive new projects default to Native, and project configuration is unified at `.comet/config.yaml`:
+
+```bash
+comet init --workflow classic
+comet init --workflow both
+```
+
+Generated configuration comments follow the language selected during installation. Ambient Resume is a shared project setting for Native and Classic; disable the read-only probe with:
+
+```yaml
+# Enables the read-only Ambient Resume probe for both Native and Classic
+ambient_resume: false
+```
+
+Classic-specific defaults live under `classic:`. The next `comet init` or `comet update` migrates legacy top-level fields:
+
+```yaml
+classic:
+  language: en
+  context_compression: off
+  review_mode: standard
+  auto_transition: true
+```
+
+Native stores artifacts under `docs/comet/` by default. To use another project-relative root, specify it explicitly; for example, this uses `artifacts/comet/`:
+
+```bash
+comet init --workflow native --root artifacts
 ```
 
 ## Support for OpenClaw and Hermes, and other AI platforms
@@ -183,13 +212,15 @@ Comet Eval's automated dual-agent architecture can integrate online with LangSmi
 <details>
 <summary><code>comet init [path]</code> — Initialize Comet workflow</summary>
 
-Initializes OpenSpec, Superpowers, and Comet skills for selected AI coding platforms.
+Initializes Comet for selected AI coding platforms. Interactive setup selects Native, Classic, or both; new non-interactive projects default to self-contained Native, while projects with existing Classic state remain Classic. The workflows keep independent entries, state, artifacts, and Guards. Each platform installs one `comet-workflow-guard` Rule, and platforms with Hook support install only `comet-hook-router.mjs`. The Router uses `.comet/current-change.json` to send each write to exactly one current Native or Classic Guard. Only Classic installs OpenSpec and Superpowers; Native depends on no external Skill.
 
 | Option              | Description                                                                    |
 | ------------------- | ------------------------------------------------------------------------------ |
 | `--yes`             | Non-interactive mode, auto-select detected platforms (or all if none detected) |
 | `--scope <scope>`   | Install scope: `project` or `global`                                           |
 | `--language <lang>` | Skill language: `en` or `zh` (skips interactive language prompt)               |
+| `--workflow <mode>` | Workflows to initialize: `native`, `classic`, or `both`                        |
+| `--root <path>`     | Project-relative Native artifact root, such as `docs`                          |
 | `--skip-existing`   | Skip already installed components                                              |
 | `--overwrite`       | Overwrite already installed components                                         |
 | `--json`            | Output structured JSON                                                         |
@@ -202,8 +233,7 @@ all, skip all, or choose per component.
 <details>
 <summary><code>comet status [path]</code> — Show active changes and next workflow command</summary>
 
-Displays active changes, task progress, the recommended next Comet workflow command, the current step, runtime mode,
-and diagnostic recovery hints when a change is malformed or missing required evidence.
+Displays the configured default entry point and separate Native, Classic, and unmanaged OpenSpec sections. Native entries include phase, approval, verification, selection, and next-step data; Classic entries retain workflow, phase, runtime mode, current step, evidence, and recovery diagnostics.
 
 | Option   | Description                                                               |
 | -------- | ------------------------------------------------------------------------- |
@@ -214,9 +244,7 @@ and diagnostic recovery hints when a change is malformed or missing required evi
 <details>
 <summary><code>comet resume-probe [path]</code> — Decide whether an active Comet workflow should resume</summary>
 
-Read-only probe for active changes, `.comet.yaml`, current phase, and the user request. It returns `auto_resume`,
-`ask_user`, `out_of_scope`, or `none`. `comet init/update` merges a `<comet-ambient-resume>` managed block into
-`AGENTS.md` and `CLAUDE.md` while preserving user-authored rules.
+Read-only probe that resolves the configured default workflow and inspects only that side. It returns `auto_resume`, `ask_user`, `out_of_scope`, or `none`, and routes Native to `/comet-native` or Classic to `/comet-classic`. A malformed root configuration stops recovery instead of falling back or scanning the other workflow. `comet init/update` still merges a `<comet-ambient-resume>` managed block into `AGENTS.md` and `CLAUDE.md` while preserving user-authored rules.
 
 </details>
 
@@ -258,13 +286,17 @@ for valid changes, and runtime evidence gaps that block safe resume.
 <details>
 <summary><code>comet update [path]</code> — Update Comet package and skills</summary>
 
-Updates the npm package and refreshes installed Comet skills in detected project/global targets.
+Refreshes installed Comet skills in detected project/global targets. A current-project refresh does not mutate any npm installation, whether global or project-local, by default; pass `--self-update` explicitly when the CLI should be upgraded too. Explicit `--scope global` deterministically uses the current-project asset scope, never opens the all-projects selector, and still does not update the npm package implicitly. Self-update compares full semver values, including prereleases, refuses downgrades, and validates the candidate package's version, Workflow command, and Native command in isolation before installation. A failed install attempts to restore the exact installed version.
 
-| Option              | Description                                   |
-| ------------------- | --------------------------------------------- |
-| `--json`            | Output npm and skill update results as JSON   |
-| `--language <lang>` | Override detected skill language (`en`, `zh`) |
-| `--scope <scope>`   | Update only `global` or `project` scope       |
+| Option               | Description                                      |
+| -------------------- | ------------------------------------------------ |
+| `--json`             | Output npm and skill update results as JSON      |
+| `--language <lang>`  | Override detected skill language (`en`, `zh`)    |
+| `--scope <scope>`    | Update only the `global` or `project` install scope |
+| `--current-project`  | Refresh only the current project                 |
+| `--all-projects`     | Refresh all registered project installations     |
+| `--self-update`      | Explicitly update the Comet npm package first    |
+| `--skip-self-update` | Explicitly skip Comet npm package self-update    |
 
 </details>
 
@@ -347,23 +379,23 @@ LANGSMITH_PROJECT=comet-skill-eval
 LANGSMITH_TRACING=true
 ```
 
-Then run the same manifest:
+Then select the LangSmith suite through the same `comet eval` entry point:
 
 ```bash
-cd eval
-uv run pytest langsmith/tests/tasks/test_tasks.py \
-  --eval-manifest=/absolute/path/to/generated-skill/comet/eval.yaml -v
+comet eval ./generated-skill/comet/eval.yaml --suite langsmith --html
 ```
 
-In PowerShell, set `$env:LANGSMITH_API_KEY`, `$env:LANGSMITH_PROJECT`, and `$env:LANGSMITH_TRACING`, or place them in
-`eval/.env`. See [eval/langsmith/README.md](eval/langsmith/README.md) for plugin cache and trajectory tracing details.
+`--suite` defaults to `local`. With `langsmith`, the CLI starts the LangSmith runner, prints `Suite: langsmith` in its
+launch details, and writes reports under `eval/langsmith/logs/experiments/`. In PowerShell, set
+`$env:LANGSMITH_API_KEY`, `$env:LANGSMITH_PROJECT`, and `$env:LANGSMITH_TRACING`, or place them in `eval/.env`. See
+[eval/langsmith/README.md](eval/langsmith/README.md) for plugin cache and trajectory tracing details.
 
 ### Which Path To Use
 
 - Day-to-day development: `comet eval ./my-skill --quick --html`
 - `/comet-any` output: `comet eval ./generated-skill/comet/eval.yaml --collect`, then rerun with `--html`
 - Publish evidence: prefer the local HTML report from `comet/eval.yaml`
-- Team tracing and side-by-side comparison: run the same `comet/eval.yaml` through the LangSmith suite
+- Team tracing and side-by-side comparison: `comet eval ./generated-skill/comet/eval.yaml --suite langsmith --html`
 
 For full task, treatment, report, and troubleshooting details, see the [Eval usage guide](docs/operations/EVAL-USAGE.md).
 
@@ -420,24 +452,26 @@ does not expand the backend command list; see the [Skill creation guide](docs/op
 
 ## Skills
 
-After `comet init`, three groups of skills are installed to the selected platform's `skills/` directory:
+`comet init` installs skills for the selected workflow. Native depends only on Comet-owned skills; Classic additionally installs OpenSpec and Superpowers.
 
 ### Comet Skills
 
 <details>
 <summary>View Comet skills</summary>
 
-| Skill            | Description                                                                                           |
-| ---------------- | ----------------------------------------------------------------------------------------------------- |
-| `/comet`         | Main entry — auto-detects phase and dispatches to sub-commands                                        |
-| `/comet-open`    | Phase 1: Open a change (proposal, design, task breakdown)                                             |
-| `/comet-design`  | Phase 2: Deep design (brainstorming, Design Doc)                                                      |
-| `/comet-build`   | Phase 3: Plan and build (implementation plan, code commits)                                           |
-| `/comet-verify`  | Phase 4: Verify and finish (testing, verification report)                                             |
-| `/comet-archive` | Phase 5: Archive (delta spec sync, status annotation)                                                 |
-| `/comet-hotfix`  | Preset: Quick bug fix (skips brainstorming)                                                           |
-| `/comet-tweak`   | Preset: OpenSpec-chained medium change (delta spec is first-class, skips brainstorming and full plan) |
-| `/comet-any`     | Comet Skill Creator — Create or optimize a reusable Skill                                             |
+| Skill            | Description                                                                                  |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| `/comet`         | Shared entry — routes to the configured Native or Classic workflow from `.comet/config.yaml` |
+| `/comet-native`  | Permanent Native entry — self-contained, recoverable Shape, Build, Verify, and Archive       |
+| `/comet-classic` | Permanent Classic entry — the five-phase OpenSpec + Superpowers workflow                     |
+| `/comet-open`    | Classic phase 1: Open a change (proposal, design, task breakdown)                            |
+| `/comet-design`  | Classic phase 2: Deep design (brainstorming, Design Doc)                                     |
+| `/comet-build`   | Classic phase 3: Plan and build (implementation plan, code commits)                          |
+| `/comet-verify`  | Classic phase 4: Verify and finish (testing, verification report)                            |
+| `/comet-archive` | Classic phase 5: Archive (delta spec sync, status annotation)                                |
+| `/comet-hotfix`  | Classic preset: Quick bug fix                                                                 |
+| `/comet-tweak`   | Classic preset: OpenSpec-chained medium change                                                |
+| `/comet-any`     | Comet Skill Creator — Create or optimize a reusable Skill                                    |
 
 </details>
 
@@ -454,18 +488,86 @@ After `comet init`, three groups of skills are installed to the selected platfor
 | `comet-archive.mjs`       | One-command archive — validates state, syncs specs, moves to archive, updates status                       |
 | `comet-yaml-validate.mjs` | Schema validator — validates `.comet.yaml` structure and field values                                      |
 | `comet-state.mjs`         | Unified state management — init/set/get/check/scale, agents' exclusive YAML interface                      |
-| `comet-hook-guard.mjs`    | Phase write guard — PreToolUse hook, blocks file writes during open/design/archive phases                  |
+| `comet-hook-router.mjs`   | The platform's only Hook entry — routes by current ownership to one workflow Guard                         |
+| `comet-hook-guard.mjs`    | Classic Guard launcher — calls Classic runtime when selected by the Router                                  |
+| `comet-native-runtime.mjs` | Native state, checks, archive, and recovery runtime                                                      |
+| `comet-native-hook-guard.mjs` | Native Guard launcher — calls Native runtime when selected by the Router                               |
 
-Classic automation ships as independent Node.js command scripts generated from TypeScript. They run through `node`
-on every platform, so Comet requires only Node.js — no Bash, Git Bash, or WSL.
+Both Native and Classic runtimes are generated from TypeScript and run through `node` on every platform. Native does
+not depend on OpenSpec, Superpowers, Bash, Git Bash, or WSL.
 
 </details>
 
 ## Workflow
 
+### Native Workflow
+
+`/comet-native` uses Shape → Build → Verify → Archive. Shape owns clarification, the brief, complete target specs, and
+user approval; the agent chooses its own planning and implementation methods. Native runtime owns state, verification
+evidence, and recovery data under `docs/comet/` by default.
+
+<details>
+<summary>View the Native phase flow</summary>
+
+```text
+/comet-native (or /comet when default_workflow: native)
+  Shape  ──approve contract──>  Build  ──record scope──>  Verify  ──pass──>  Archive
+                                  ^                        │
+                                  └──────── fail ──────────┘
 ```
-/comet
-  ↓ auto-detect
+
+| Phase     | Main work                                                                                       | Required result                                                        |
+| --------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Shape     | Inspect the environment, clarify in rounds, and write the brief plus complete target specs       | No blocking questions; user approval bound to the current contract hash |
+| Build     | The agent chooses its own planning, implementation, testing, and review methods; checkpoints are optional | A computable implementation scope; ordinary source writes occur only in Build |
+| Verify    | Check stable acceptance IDs and write executions, skipped checks, risks, and evidence to `verification.md` | Pass advances to Archive; failure returns to Build through bounded repair |
+| Archive   | Run read-only preflight, check canonical-spec concurrency, then sync specs and move the complete change | The confirmed preflight is still current and the archive transaction commits |
+
+Shape supports `clarification_mode: sequential` and `clarification_mode: batch`. Sequential asks one upstream question per round; Batch asks every currently answerable question whose prerequisites are settled. In both modes, the agent investigates discoverable facts and writes user decisions back into the brief and complete target specs.
+
+</details>
+
+<details>
+<summary>View Native state and artifacts</summary>
+
+| File or directory                                  | Purpose                                                                    |
+| -------------------------------------------------- | -------------------------------------------------------------------------- |
+| `.comet/config.yaml`                               | Select enabled/default workflows, artifact root, language, and clarification mode |
+| `.comet/current-change.json`                       | Shared Native/Classic ownership; each write routes to one workflow         |
+| `docs/comet/changes/<name>/comet-state.yaml`       | Native phase, revision, approval, spec operations, and evidence references |
+| `docs/comet/changes/<name>/brief.md`               | Outcome, scope, non-goals, examples, constraints, decisions, and open questions |
+| `docs/comet/changes/<name>/specs/`                 | Complete target behavior for each capability after archive                 |
+| `docs/comet/changes/<name>/verification.md`        | Acceptance evidence, command results, skipped checks, consistency, risks, and conclusion |
+| `docs/comet/changes/<name>/runtime/`               | Baseline, Run, trajectory, checkpoints, implementation scope, and verification evidence |
+| `docs/comet/specs/` / `archive/` / `runtime/`      | Canonical specs, archived changes, locks, and recoverable transactions     |
+
+Native can keep multiple active changes at the same time. `comet status` lists the candidates, while `.comet/current-change.json` selects ownership for the current request; it does not limit the project to one change. Missing, stale, or ambiguous selection stops resume and writes for an explicit choice instead of guessing another change or switching to Classic.
+
+Runtime owns revisions, hashes, evidence references, and transaction state in `comet-state.yaml` and `runtime/`. When requirements change, update the brief or proposed specs and let commands recompute the contract; do not hand-edit phases, hashes, or JSON evidence to bypass checks.
+
+</details>
+
+<details>
+<summary>View Native reliability and recovery</summary>
+
+1. **Clarification blocking** — Shape persists unresolved implementation decisions as blocking questions. Batch mode also requires explicit shared-understanding confirmation before Build.
+2. **Approval bound to requirements** — Approval is bound to the contract hash of the brief and complete target specs; requirement changes invalidate stale approval.
+3. **Auditable implementation scope** — Creation records a complete baseline, and leaving Build derives a content-addressed implementation scope from before/after snapshots instead of agent claims.
+4. **Acceptance and verification evidence** — Runtime derives stable acceptance IDs and binds each to project evidence, a skipped reason, and optional read-only check receipts. Contract, scope, or report changes make stale evidence unusable.
+5. **In-phase recovery and repair** — Checkpoints persist progress and artifact manifests with freshness checks. Repeated no-progress failures enter a bounded repair episode, while real implementation progress resets the stall decision.
+6. **Protected files and transactions** — Run, trajectory, checkpoints, and evidence use protected I/O. Archive and artifact-root moves use recoverable transactions, CAS, and locks; doctor explicitly continues or rolls back interrupted work.
+7. **Unified guards without merged workflows** — Each platform installs one Rule and one Hook Router. The Router invokes Native Guard from current ownership; Native permits ordinary implementation writes only in Build and keeps its phases, schema, directories, and Guard independent from Classic.
+
+</details>
+
+### Classic Five-Phase Workflow
+
+<details>
+<summary>View the Classic five-phase flow</summary>
+
+```
+/comet-classic (or /comet when default_workflow: classic)
+  ↓
 /comet-open  -->  /comet-design  -->  /comet-build  -->  /comet-verify  -->  /comet-archive
 (OpenSpec)         (Superpowers)       (Superpowers)       (Both)           (OpenSpec)
 
@@ -476,7 +578,7 @@ on every platform, so Comet requires only Node.js — no Bash, Git Bash, or WSL.
   open  -->  build  -->  verify  -->  archive
 ```
 
-### Five Phases
+#### Five Phases
 
 | Phase              | Command          | Owner       | Artifacts                            |
 | ------------------ | ---------------- | ----------- | ------------------------------------ |
@@ -486,12 +588,14 @@ on every platform, so Comet requires only Node.js — no Bash, Git Bash, or WSL.
 | 4. Verify & Finish | `/comet-verify`  | Both        | Verification report, branch handling |
 | 5. Archive         | `/comet-archive` | OpenSpec    | delta→main spec sync, archive        |
 
-### State Management
+</details>
 
-Comet uses a decoupled state architecture with separate files
+### Classic State Management
+
+Classic uses a decoupled state architecture with separate files:
 
 <details>
-<summary>View State Management</summary>
+<summary>View Classic state management</summary>
 
 | File                                      | Owner    | Purpose                                             |
 | ----------------------------------------- | -------- | --------------------------------------------------- |
@@ -515,7 +619,7 @@ breakpoint recovery. Agents can use Comet commands to know which phase the curre
 </details>
 
 <details>
-<summary>View key change .comet.yaml fields</summary>
+<summary>View key Classic change .comet.yaml fields</summary>
 
 **Key Fields in change `.comet.yaml`:**
 
@@ -532,7 +636,8 @@ build_mode: subagent-driven-development                  # Build mode: subagent-
 build_pause: null                                        # `build_pause` records an internal build-phase pause point: null none, `plan-ready` means the plan has been generated
 subagent_dispatch: null                                  # Dispatch confirmation; confirm before verify
 tdd_mode: null                                           # Full-workflow build choice: tdd | direct
-isolation: branch                                        # Isolation mode: branch | worktree
+isolation: branch                                        # Isolation mode: current | branch | worktree
+bound_branch: null                                       # Git branch bound by current/branch/worktree isolation; branch drift blocks progress
 verify_mode: null                                        # Verification mode: light | full
 design_doc: docs/superpowers/specs/<design-doc>.md       # Design doc path
 plan: docs/superpowers/plans/YYYY-MM-DD-feature.md       # Implementation plan path
@@ -552,12 +657,13 @@ Current change `.comet.yaml` no longer contains `skill`; legacy Run fields in YA
 
 </details>
 
-### Reliability Features
+### Classic Reliability and Shared Guards
 
-Comet ensures agent execution reliability through automated state transitions:
+The first six items below describe Classic phase automation; the final item covers the Router/Rule boundary shared by
+Native and Classic:
 
 <details>
-<summary>View reliability features</summary>
+<summary>View Classic reliability and shared guards</summary>
 
 1. **Entry Verification** — Each phase validates preconditions before execution
    - Checks file existence, state consistency, and phase transitions
@@ -576,7 +682,8 @@ Comet ensures agent execution reliability through automated state transitions:
    - Detects unknown/typos fields
 
 4. **Build Decision Enforcement** — Guard and state transitions both block skipped build choices
-   - `isolation` must be `branch` or `worktree`
+   - `isolation` must be `current`, `branch`, or `worktree`
+   - `isolation: current`, `branch`, and `worktree` bind the current Git branch, and later entry checks block accidental branch drift
    - `build_mode` must be selected before leaving build
    - `build_pause: plan-ready` is a recoverable pause after plan generation, not a `build_mode`
    - Full workflow `build_mode: direct` requires `direct_override: true`
@@ -594,20 +701,52 @@ Comet ensures agent execution reliability through automated state transitions:
    - Supports `--dry-run` for preview
 
 7. **Anti-drift Phase Guards** — Phase awareness for long-context sessions
-   - Rule layer: `comet-phase-guard.md` injects phase awareness, Skill invocation rules, and context recovery guidance
-     each turn across platforms
-   - Hook layer: `comet-hook-guard.mjs` hard-blocks file writes during open/design/archive phases on platforms that
-     support hooks, such as Claude Code
-   - Allowlisted paths: `openspec/*`, `docs/superpowers/*`, `.superpowers/*`, `.claude/*`, and `.comet/*`
+   - Rule layer: each platform installs one `comet-workflow-guard`, resolves enabled, default, and current ownership
+     from `.comet/current-change.json`, and applies only one phase model
+   - Hook layer: platforms with Hook support install only `comet-hook-router.mjs`; one write reaches at most one Guard,
+     and ambiguous or stale selection fails closed
+   - Guard layer: Native and Classic keep independent phases and allowed paths. Native permits ordinary implementation
+     writes only in Build; Classic permits them in Build and Verify
 
 </details>
 
-## Classic Spec Mode Project Structure
+## Project Structure
+
+<details>
+<summary>Native project structure (default <code>docs/comet/</code>)</summary>
+
+```text
+your-project/
+├── .comet/
+│   ├── config.yaml                    # Shared config and Native artifact_root
+│   └── current-change.json            # Optional current ownership shared by Native and Classic
+├── .claude/skills/                    # Claude Code shown as the platform example
+│   ├── comet/SKILL.md                 # Configuration-driven shared entry
+│   └── comet-native/
+│       ├── SKILL.md                   # Permanent Native entry
+│       ├── reference/                 # Artifact, command, and recovery contracts
+│       └── scripts/                   # Native runtime and Guard launcher
+└── docs/comet/                        # native.artifact_root: docs
+    ├── specs/<capability>/spec.md     # Archived canonical specs
+    ├── changes/<name>/
+    │   ├── comet-state.yaml           # Native change state
+    │   ├── brief.md                   # Outcome, scope, decisions, and acceptance
+    │   ├── specs/<capability>/spec.md # Complete target specification
+    │   ├── verification.md            # Verification report
+    │   └── runtime/                   # Checkpoints, evidence, and recovery state
+    ├── archive/YYYY-MM-DD-<name>/     # Archived changes
+    └── runtime/                       # Locks and recoverable transactions
+```
+
+</details>
+
+<details>
+<summary>Classic project structure</summary>
 
 ```
 your-project/
 ├── .comet/
-│   └── config.yaml              # Project-level global config (context_compression, review_mode, auto_transition)
+│   └── config.yaml              # Shared project config (workflows, Ambient Resume, language, Classic defaults)
 ├── .claude/skills/              # Platform skills dir (Comet + OpenSpec + Superpowers)
 │   ├── comet/SKILL.md
 │   │   └── scripts/
@@ -616,7 +755,8 @@ your-project/
 │   │       ├── comet-handoff.mjs     # Design handoff (OpenSpec → Superpowers context tracing)
 │   │       ├── comet-archive.mjs     # One-command archive automation
 │   │       ├── comet-yaml-validate.mjs # Schema validator
-│   │       ├── comet-hook-guard.mjs   # Phase write guard (PreToolUse hook)
+│   │       ├── comet-hook-router.mjs  # The platform's only Hook entry (routes the current workflow Guard)
+│   │       ├── comet-hook-guard.mjs   # Classic Guard (not installed as a separate platform Hook)
 │   │       └── comet-state.mjs       # Unified state management (init/set/get/check/scale)
 │   ├── comet-*/SKILL.md
 │   ├── openspec-*/SKILL.md
@@ -639,8 +779,10 @@ your-project/
     └── plans/                   # Implementation plans
 ```
 
+</details>
+
 <details>
-<summary>Context Compression (Beta)</summary>
+<summary>Classic Context Compression (Beta)</summary>
 
 Comet supports context compression at the Design → Build handoff. When enabled, `comet-handoff.mjs` generates a compact
 context package that reduces Build-phase input tokens by **25–30%** without affecting implementation correctness.
@@ -656,7 +798,7 @@ Key findings from benchmark testing:
 - **Spec coverage**: 100% (off) vs 95% (beta) — minor edge-case detail loss
 - **Scaling**: Larger tasks yield higher absolute savings (up to 15,000 tokens for large-tier tasks)
 
-Enable in `.comet/config.yaml`: `context_compression: beta`
+Enable `context_compression: beta` under the `classic:` block in `.comet/config.yaml`.
 
 See [CONTEXT-COMPRESSION.md](docs/CONTEXT-COMPRESSION.md) for the full benchmark report, compression principles, and
 reproduction steps.
@@ -664,7 +806,7 @@ reproduction steps.
 </details>
 
 <details>
-<summary>Auto Transition</summary>
+<summary>Classic Auto Transition</summary>
 
 `auto_transition` controls whether Comet automatically invokes the next skill after a phase completes, or pauses for
 manual handoff. Phase advancement itself always happens — this setting only affects skill invocation.
@@ -674,8 +816,8 @@ manual handoff. Phase advancement itself always happens — this setting only af
 | `true`  | Auto-invoke the next skill after each phase (default)         |
 | `false` | Pause after each phase; user manually triggers the next skill |
 
-Three-layer configuration with precedence: `COMET_AUTO_TRANSITION` env var > `.comet/config.yaml` (project) > change
-`.comet.yaml`.
+Three-layer configuration with precedence: `COMET_AUTO_TRANSITION` env var > `classic.auto_transition` in
+`.comet/config.yaml` (project) > change `.comet.yaml`.
 
 See [AUTO-TRANSITION.md](docs/AUTO-TRANSITION.md) for configuration details, workflow mapping, and FAQ.
 
@@ -716,7 +858,7 @@ Track our development progress and upcoming features on the [Comet Roadmap](http
       <b>DouYin (Recommended)</b>
     </td>
     <td align="center" width="180">
-      <img src="https://github.com/rpamis/comet/blob/master/img/wechat.jpg" width="120" height="120"><br>
+      <img src="https://github.com/rpamis/comet/blob/master/img/wechat.png" width="120" height="120"><br>
       <b>WeChat</b>
     </td>
     <td align="center" width="180">

@@ -10,7 +10,6 @@ import { ensureClassicRuntimeRun } from '../../../domains/comet-classic/classic-
 const scriptsDir = path.resolve('assets', 'skills', 'comet', 'scripts');
 const stateScript = path.join(scriptsDir, 'comet-state.mjs');
 const validateScript = path.join(scriptsDir, 'comet-yaml-validate.mjs');
-const hookGuardScript = path.join(scriptsDir, 'comet-hook-guard.mjs');
 const buildScript = path.resolve('scripts', 'build', 'build-classic-runtime.mjs');
 const temporaryDirectories: string[] = [];
 
@@ -38,6 +37,34 @@ afterEach(async () => {
 });
 
 describe('Classic runtime CLI adapter', () => {
+  it('ignores a user-facing comet-classic wrapper when discovering the internal runtime package', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-classic-wrapper-'));
+    temporaryDirectories.push(directory);
+    const wrapper = path.join(directory, 'comet-classic');
+    await fs.mkdir(wrapper, { recursive: true });
+    await fs.writeFile(
+      path.join(wrapper, 'SKILL.md'),
+      '---\nname: comet-classic\n---\n\n# User-facing wrapper\n',
+      'utf8',
+    );
+    const previousRoot = process.env.COMET_RUNTIME_CLASSIC_ROOT;
+    const previous = process.cwd();
+    process.env.COMET_RUNTIME_CLASSIC_ROOT = wrapper;
+    process.chdir(directory);
+    try {
+      const { runClassicCli } = await import('../../../domains/comet-classic/classic-cli.js');
+      expect((await runClassicCli(['state', 'init', 'demo', 'full'])).exitCode).toBe(0);
+      const changeDir = path.join(directory, 'openspec', 'changes', 'demo');
+
+      await expect(ensureClassicRuntimeRun(changeDir)).resolves.toBeDefined();
+      await expect(readRunState(changeDir)).resolves.toMatchObject({ skill: 'comet-classic' });
+    } finally {
+      process.chdir(previous);
+      if (previousRoot === undefined) delete process.env.COMET_RUNTIME_CLASSIC_ROOT;
+      else process.env.COMET_RUNTIME_CLASSIC_ROOT = previousRoot;
+    }
+  });
+
   it('records current-Run command checks through the state dispatcher', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-record-check-'));
     temporaryDirectories.push(directory);
@@ -466,6 +493,8 @@ describe('Classic script bundles', () => {
       cwd: directory,
       encoding: 'utf8',
     });
+    const changeDir = path.join(directory, 'openspec', 'changes', 'demo');
+    await ensureClassicRuntimeRun(changeDir);
     spawnSync(process.execPath, [stateScript, 'set', 'demo', 'phase', 'build'], {
       cwd: directory,
       encoding: 'utf8',
@@ -479,15 +508,6 @@ describe('Classic script bundles', () => {
       cwd: directory,
       encoding: 'utf8',
     });
-    const hook = spawnSync(process.execPath, [hookGuardScript], {
-      cwd: directory,
-      encoding: 'utf8',
-      input: JSON.stringify({
-        tool_name: 'Write',
-        tool_input: { file_path: 'src/index.ts' },
-      }),
-    });
-    expect(hook.status).toBe(0);
     await fs.mkdir(path.join(directory, 'docs'), { recursive: true });
     await fs.writeFile(path.join(directory, 'docs', 'plan.md'), '- [ ] implement\n');
 
@@ -495,7 +515,6 @@ describe('Classic script bundles', () => {
       cwd: directory,
       encoding: 'utf8',
     });
-    const changeDir = path.join(directory, 'openspec', 'changes', 'demo');
     const runState = await readRunState(changeDir);
 
     expect(set.status).toBe(0);

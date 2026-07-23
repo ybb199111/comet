@@ -17,6 +17,24 @@ uv run pytest local/tests/tasks/test_tasks.py -v
 uv run pytest local/tests/tasks/test_tasks.py --task=generic-skill-smoke --treatment=CONTROL -v
 ```
 
+运行只安装 Comet Native、自包含且不注入 OpenSpec / Superpowers 的完整流程评估：
+
+```bash
+uv run pytest local/tests/tasks/test_tasks.py \
+  --task=comet-native-workflow \
+  --treatment=COMET_NATIVE_PHASE1 -v
+```
+
+将 Native 与 0.4.0 基线按相同的 16 个 canonical Comet 任务、每任务 3 次对齐运行：
+
+```bash
+uv run pytest local/tests/tasks/test_tasks.py::test_task_treatment \
+  --treatment=COMET_NATIVE_PHASE1 --count=3 -n 4 \
+  -k "not comet-native and not generic-skill-smoke and not authoring-skill-smoke and not workflow-route-conformance and not workflow-overlay-contract" -v
+```
+
+对齐评估保留每个任务原有的业务 validator，但会把 Classic/OpenSpec 专属流程检查替换为 Native 的 Skill 隔离、配置、终态 change、验证归档和安全 trajectory 检查。调用 `/comet` 或其他外部 Skill、留下活动 change、缺少完整规格/验证证据，都会作为真实 Native workflow failure 进入 pass@k，而不会被当成环境噪声排除。
+
 运行生成 Skill 的 authoring smoke 任务：
 
 ```bash
@@ -72,6 +90,38 @@ logs/experiments/
 uv run pytest local/tests/tasks/test_tasks.py --report-config report-config.json -v
 uv run python local/scripts/compare_baselines.py --report-config report-config.json
 ```
+
+Native 与 0.4.0 的 pass@3 来自两个独立 experiment 时，使用严格对齐模式：
+
+```bash
+uv run python local/scripts/compare_baselines.py \
+  --candidate-experiment local/logs/experiments/experiment_NATIVE \
+  --candidate-treatment COMET_NATIVE_PHASE1 \
+  --baseline-experiment langsmith/logs/experiments/experiment_040_PASS3 \
+  --baseline-treatment COMET_FULL_040_BETA \
+  --ks 1,2,3
+```
+
+pytest 会在模型运行前把收集到的 `task + treatment + repetition` 写入 experiment 的
+expected case matrix；严格比较按两侧目标 treatment 的矩阵检查 coverage，因此即使某个
+样本在两侧都没有留下 report，也会被列为缺失，而不是从报告并集中无声消失。对 v2
+报告，只有 `task + repetition + case_hash` 全部一致才会配对；`case_hash` 同时绑定任务、
+验证器、runner/controller 源码、不可变 Docker image、Claude 工具版本以及 model /
+interaction 配置。某个 task 缺少 repetition 时，报告会降低该 k 的 coverage 并列出
+缺失项，不会把 pass@3 偷换成 pass@2。
+
+历史耗时会从 raw stdout 按当前的累加 parser 重算；缺少 raw duration 的运行只计入
+缺失 coverage，不会和已有耗时混合平均。没有 expected matrix 的旧 experiment 会明确
+标为 observed-report fallback；v1 或缺失 case manifest 的运行最多只能按任务核心 hash
+兼容比较，并明确标注无法证明当时的 runner、image、tool、model 或 interaction 身份，
+不会把比较时一致误写成历史 checkout 与执行环境已被精确证明一致。
+
+严格对齐报告还会从 raw stdout 重算成对效率指标，包括模型启动/恢复次数、Agent 轮次、
+工具调用、累计耗时、输入/输出/cache token、总 token、模型成本和上下文压力。主要视图只
+统计两侧都通过的同一 `task + repetition + case_hash`，避免把未完成任务的低消耗误当成
+效率提升。多次恢复产生的顶层 `result` 按调用累加；流式 assistant 事件按 message id 去重。
+上下文指标只有在两侧都保存逐消息 usage 时才可比较，coverage 过低时报告会明确提示，不能
+据此宣传 workflow 间的上下文改进。
 
 也可以设置 `COMET_EVAL_REPORT_CONFIG=/path/to/report-config.json`。
 

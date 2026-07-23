@@ -83,6 +83,14 @@ function canonicalKey(canonicalPath: string): string {
   return process.platform === 'win32' ? canonicalPath.toLowerCase() : canonicalPath;
 }
 
+function findProjectRegistryEntryByCanonicalPath(
+  projects: ProjectRegistryEntry[],
+  canonicalPath: string,
+): ProjectRegistryEntry | undefined {
+  const key = canonicalKey(canonicalPath);
+  return projects.find((entry) => canonicalKey(entry.canonicalPath) === key);
+}
+
 function isProjectRegistrySource(value: unknown): value is ProjectRegistrySource {
   return value === 'init' || value === 'update' || value === 'repair';
 }
@@ -195,6 +203,14 @@ async function resolveProjectPath(projectPath: string): Promise<{
   }
 }
 
+export async function findProjectRegistryEntry(
+  projectPath: string,
+  projects: ProjectRegistryEntry[],
+): Promise<ProjectRegistryEntry | undefined> {
+  const resolved = await resolveProjectPath(projectPath);
+  return findProjectRegistryEntryByCanonicalPath(projects, resolved.canonicalPath);
+}
+
 async function writeProjectRegistry(
   registry: ProjectRegistry,
   registryPath: string,
@@ -256,10 +272,13 @@ export async function upsertProjectInstallation(
 ): Promise<ProjectRegistryEntry> {
   const registryPath = getProjectRegistryPath(options.homeDir);
   const timestamp = nowIso(options);
-  const registry = await readProjectRegistry({ ...options, strict: false });
+  const registry = await readProjectRegistry({ ...options, strict: true });
   const resolved = await resolveProjectPath(projectPath);
+  const existing = findProjectRegistryEntryByCanonicalPath(
+    registry.projects,
+    resolved.canonicalPath,
+  );
   const key = canonicalKey(resolved.canonicalPath);
-  const existing = registry.projects.find((entry) => canonicalKey(entry.canonicalPath) === key);
   const entry: ProjectRegistryEntry = {
     path: resolved.path,
     canonicalPath: resolved.canonicalPath,
@@ -292,7 +311,7 @@ export async function removeProjectInstallation(
   options: ProjectRegistryOptions = {},
 ): Promise<boolean> {
   const registryPath = getProjectRegistryPath(options.homeDir);
-  const registry = await readProjectRegistry({ ...options, strict: false });
+  const registry = await readProjectRegistry({ ...options, strict: true });
   const resolved = await resolveProjectPath(projectPath);
   const key = canonicalKey(resolved.canonicalPath);
   const projects = registry.projects.filter(

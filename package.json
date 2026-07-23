@@ -1,6 +1,6 @@
 {
   "name": "@rpamis/comet",
-  "version": "0.4.0-beta.4",
+  "version": "0.4.0-beta.8",
   "description": "Agent Skill Harness For Turning Ideas Into Evaluated Workflows",
   "keywords": [
     "comet",
@@ -23,6 +23,8 @@
     "bin",
     "assets",
     "eval",
+    "!eval/.env*",
+    "!eval/**/.env*",
     "!eval/.venv",
     "!eval/.uv-cache",
     "!eval/.cache",
@@ -42,6 +44,7 @@
     "!eval/**/.tmp",
     "!eval/**/.pytest_cache",
     "!eval/**/.pytest_cache*",
+    "!eval/**/.pytest*",
     "!eval/**/.pytest-basetemp-*",
     "!eval/**/.pytest-tmp-*",
     "scripts/install/postinstall.js",
@@ -53,16 +56,22 @@
     "build:dashboard": "vite build --config domains/dashboard/web/vite.config.mjs",
     "dev:dashboard": "node scripts/dev-dashboard.mjs",
     "build:classic-runtime": "node scripts/build/build-classic-runtime.mjs",
+    "build:native-runtime": "node scripts/build/build-native-runtime.mjs",
+    "build:entry-runtime": "node scripts/build/build-entry-runtime.mjs",
+    "check:generated": "node scripts/build/build-classic-runtime.mjs --check && node scripts/build/build-native-runtime.mjs --check && node scripts/build/build-entry-runtime.mjs --check",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:script-smoke": "vitest run test/domains/comet-classic/comet-scripts.test.ts",
+    "test:runtime-smoke": "vitest run test/domains/comet-classic/comet-scripts.test.ts test/repository/native-runtime-assets.test.ts test/repository/comet-entry-runtime-assets.test.ts test/app/cli-smoke.test.ts",
+    "test:package-e2e": "node scripts/release/package-e2e.mjs",
+    "test:dashboard-e2e": "playwright test --config test/domains/dashboard/playwright.config.ts",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "lint": "eslint app/ domains/ platform/ && pnpm run lint:architecture",
     "lint:architecture": "node scripts/lint/architecture.mjs",
     "lint:fix": "eslint app/ domains/ platform/ --fix",
-    "format": "prettier --write app/ domains/ platform/",
-    "format:check": "prettier --check app/ domains/ platform/",
+    "format": "prettier --write app/ domains/ platform/ scripts/ test/ .github/ config/ package.json vitest.config.ts build.js tsconfig.json",
+    "format:check": "prettier --check app/ domains/ platform/ scripts/ test/ .github/ config/ package.json vitest.config.ts build.js tsconfig.json",
     "benchmark:context": "node scripts/benchmark/context-compression-benchmark.mjs",
     "benchmark:execution": "node scripts/benchmark/context-execution-benchmark.mjs",
     "benchmark:classic": "node scripts/benchmark/classic-baseline-regression.mjs",
@@ -74,17 +83,29 @@
   "lint-staged": {
     "app/**/*.{ts,tsx,js,mjs,cjs,json,md,yaml,yml}": "prettier --write",
     "domains/**/*.{ts,tsx,js,mjs,cjs,json,md,yaml,yml}": "prettier --write",
-    "platform/**/*.{ts,tsx,js,mjs,cjs,json,md,yaml,yml}": "prettier --write"
+    "platform/**/*.{ts,tsx,js,mjs,cjs,json,md,yaml,yml}": "prettier --write",
+    "scripts/**/*.{ts,tsx,js,mjs,cjs,json,md,yaml,yml}": "prettier --write",
+    "test/**/*.{ts,tsx,js,mjs,cjs,json,md,yaml,yml}": "prettier --write",
+    ".github/**/*.{json,md,yaml,yml}": "prettier --write",
+    "config/**/*.{json,md,yaml,yml}": "prettier --write"
   },
   "packageManager": "pnpm@10.18.3",
   "overrides": {
+    "brace-expansion": "5.0.7",
     "esbuild": "0.28.1"
   },
+  "pnpm": {
+    "overrides": {
+      "brace-expansion": "5.0.7",
+      "esbuild": "0.28.1"
+    }
+  },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.3.1",
     "@types/node": "^24.2.0",
     "@types/react": "^19.2.17",
@@ -94,6 +115,7 @@
     "esbuild": "0.28.1",
     "eslint": "^10.4.0",
     "husky": "^9.1.7",
+    "jsdom": "^29.1.1",
     "lint-staged": "^17.0.7",
     "prettier": "^3.8.3",
     "react": "^19.2.7",
@@ -112,6 +134,10 @@
     "@inquirer/prompts": "^8.4.3",
     "@inquirer/type": "^4.0.5",
     "commander": "^14.0.0",
+    "dompurify": "^3.4.12",
+    "highlight.js": "^11.11.1",
+    "marked": "^18.0.4",
+    "mermaid": "11.15.0",
     "yaml": "^2.9.0"
   }
 }

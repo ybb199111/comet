@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from scaffold.python.logging import (
     ExperimentLogger,
     TreatmentResult,
@@ -31,6 +33,21 @@ def test_save_artifacts_excludes_nested_git_metadata(tmp_path: Path):
     snapshot = tmp_path / "artifacts" / "comet_full_040_beta_rep1" / "claude"
     assert (snapshot / "result.md").read_text(encoding="utf-8") == "ok"
     assert not (snapshot / ".git").exists()
+
+
+def test_save_artifacts_excludes_controller_cli_snapshot(tmp_path: Path):
+    from conftest import _save_artifacts
+
+    workspace = tmp_path / "workspace"
+    (workspace / "_eval_current_comet/dist").mkdir(parents=True)
+    (workspace / "_eval_current_comet/dist/index.js").write_text("export {};\n", encoding="utf-8")
+    (workspace / "result.md").write_text("ok", encoding="utf-8")
+
+    _save_artifacts(tmp_path, "COMET_NATIVE_PHASE1", 1, workspace)
+
+    snapshot = tmp_path / "artifacts/comet_native_phase1_rep1/claude"
+    assert (snapshot / "result.md").is_file()
+    assert not (snapshot / "_eval_current_comet").exists()
 
 
 def test_extract_events_captures_token_usage_and_cost():
@@ -65,6 +82,8 @@ def test_extract_events_captures_token_usage_and_cost():
 
     events = extract_events(parse_output(stdout))
 
+    assert events["duration_seconds"] == 1.2
+    assert events["num_turns"] == 3
     assert events["input_tokens"] == 100
     assert events["output_tokens"] == 25
     assert events["cache_read_input_tokens"] == 300
@@ -72,6 +91,115 @@ def test_extract_events_captures_token_usage_and_cost():
     assert events["total_tokens"] == 475
     assert events["total_cost_usd"] == 0.123456
     assert events["model_usage"]["mimo-v2.5-pro"]["costUSD"] == 0.123456
+
+
+def test_extract_events_accumulates_duration_across_results():
+    stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "result",
+                    "duration_ms": 1200,
+                    "num_turns": 2,
+                    "total_cost_usd": 0.1,
+                    "usage": {"input_tokens": 100, "output_tokens": 20},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "duration_ms": 800,
+                    "num_turns": 4,
+                    "total_cost_usd": 0.2,
+                    "usage": {"input_tokens": 200, "output_tokens": 40},
+                }
+            ),
+        ]
+    )
+
+    events = extract_events(parse_output(stdout))
+
+    assert events["duration_seconds"] == 2.0
+    assert events["subject_invocations"] == 2
+    assert events["num_turns"] == 6
+    assert events["input_tokens"] == 300
+    assert events["output_tokens"] == 60
+    assert events["total_tokens"] == 360
+    assert events["total_cost_usd"] == pytest.approx(0.3)
+
+
+def test_extract_events_reports_deduplicated_context_pressure():
+    assistant = {
+        "type": "assistant",
+        "message": {
+            "id": "message-1",
+            "model": "mimo-v2.5-pro",
+            "content": [],
+            "usage": {
+                "input_tokens": 2_000,
+                "cache_read_input_tokens": 8_000,
+                "cache_creation_input_tokens": 0,
+            },
+        },
+    }
+    stdout = "\n".join(
+        [
+            json.dumps(assistant),
+            json.dumps(assistant),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "message-2",
+                        "model": "mimo-v2.5-pro",
+                        "content": [],
+                        "usage": {
+                            "input_tokens": 1_000,
+                            "cache_read_input_tokens": 4_000,
+                        },
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "modelUsage": {
+                        "mimo-v2.5-pro": {
+                            "contextWindow": 200_000,
+                            "inputTokens": 3_000,
+                        }
+                    },
+                }
+            ),
+        ]
+    )
+
+    events = extract_events(parse_output(stdout))
+
+    assert events["peak_context_input_tokens"] == 10_000
+    assert events["p95_context_input_tokens"] == 10_000
+    assert events["average_context_input_tokens"] == 7_500
+    assert events["peak_context_window_tokens"] == 200_000
+    assert events["peak_context_occupancy_pct"] == 5
+
+
+def test_extract_events_ignores_missing_result_duration():
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "result", "duration_ms": 1200}),
+            json.dumps({"type": "result"}),
+        ]
+    )
+
+    events = extract_events(parse_output(stdout))
+
+    assert events["duration_seconds"] == 1.2
+
+
+def test_extract_events_keeps_duration_missing_without_observed_value():
+    events = extract_events(parse_output(json.dumps({"type": "result"})))
+
+    assert events["duration_seconds"] is None
 
 
 def test_extract_events_normalizes_openspec_skill_aliases():
@@ -233,7 +361,13 @@ def test_treatment_result_exposes_eval_metadata():
             "eval_manifest": "demo/comet/eval.yaml",
             "interaction": {"mode": "none"},
             "artifact_references": {"report": "logs/reports/demo_report.json"},
-            "failure_attribution": [{"bucket": "task", "check": "validator missing", "reason": "task or validator path assumption failed"}],
+            "failure_attribution": [
+                {
+                    "bucket": "task",
+                    "check": "validator missing",
+                    "reason": "task or validator path assumption failed",
+                }
+            ],
         },
     )
 

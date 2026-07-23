@@ -12,17 +12,17 @@ import {
   installCometHooksForPlatform,
   getManifestSkills,
   mergeProjectConfig,
+  prepareManagedSkillCopyTarget,
 } from '../../domains/skill/platform-install.js';
 import { removeLegacyCometSkillsForPlatform } from '../../domains/skill/uninstall.js';
 import { installCometProjectInstructions } from '../../domains/skill/project-instructions.js';
 import { LANGUAGES } from '../../domains/skill/languages.js';
 import {
-  PLATFORMS,
   getPlatformSkillsDir,
   getPlatformSkillsDirs,
   type Platform,
 } from '../../platform/install/platforms.js';
-import { hasPlatformDetectionPath } from '../../platform/install/detect.js';
+import { resolveCanonicalSkillRootOwners } from '../../platform/install/skill-root-owner.js';
 import {
   listProjectRegistryEntries,
   removeProjectInstallation,
@@ -33,10 +33,16 @@ import {
   hasCodegraphProjectIndex,
   installCodegraph,
 } from '../../domains/integrations/codegraph.js';
+import { discoverNativeProject } from '../../domains/comet-native/native-paths.js';
+import { readProjectConfig } from '../../domains/comet-native/native-config.js';
+import { resolveCometEntry } from '../../domains/comet-entry/resolve-entry.js';
+import type { InitWorkflowSelection } from '../../domains/comet-entry/types.js';
+import { migrateLegacyClassicSelection } from '../../domains/comet-entry/current-selection.js';
 import type { InstallScope, InstallMode } from '../../platform/install/types.js';
-import { printVersionInfo } from '../../platform/version/version.js';
+import { getLatestVersion, printVersionInfo } from '../../platform/version/version.js';
 import { t, type TranslationKey } from './i18n.js';
 import { assertProjectScopeOptions, resolveProjectScopeMode } from './project-scope-selection.js';
+import type { CommandExecutionResult } from './command-result.js';
 
 const PACKAGE_NAME = '@rpamis/comet';
 const OFFICIAL_REGISTRY = 'https://registry.npmjs.org';
@@ -46,12 +52,16 @@ interface UpdateOptions {
   language?: string;
   scope?: InstallScope;
   skipNpm?: boolean;
+  skipSelfUpdate?: boolean;
+  selfUpdate?: boolean;
   installMode?: InstallMode;
   allProjects?: boolean;
   currentProject?: boolean;
   targetScopes?: InstallScope[];
   skipGlobalNpmUpdate?: boolean;
   failOnNpmFailure?: boolean;
+  npmSkipReason?: string;
+  skipPackageSelfUpdate?: boolean;
 }
 
 type SkillLanguage = 'en' | 'zh';
@@ -62,8 +72,61 @@ interface NpmUpdateFailure extends Error {
   npmScope: InstallScope;
 }
 
-function createNpmUpdateFailure(scope: InstallScope): NpmUpdateFailure {
-  const error = new Error(`npm package update failed (${scope} scope)`) as NpmUpdateFailure;
+type NpmSelfUpdatePlan =
+  | { action: 'update'; version: string }
+  | { action: 'skip'; reason: string }
+  | { action: 'fail'; reason: string };
+
+interface CapturedProcessResult {
+  success: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  reason?: string;
+}
+
+interface CapturedProcessLimits {
+  timeoutMs: number;
+  maxOutputBytes: number;
+}
+
+const CANDIDATE_COMMAND_LIMITS: CapturedProcessLimits = {
+  timeoutMs: 15_000,
+  maxOutputBytes: 256 * 1024,
+};
+
+const NPM_INSPECTION_LIMITS: CapturedProcessLimits = {
+  timeoutMs: 15_000,
+  maxOutputBytes: 64 * 1024,
+};
+
+const CANDIDATE_INSTALL_LIMITS: CapturedProcessLimits = {
+  timeoutMs: 3 * 60_000,
+  maxOutputBytes: 4 * 1024 * 1024,
+};
+
+const NPM_MUTATION_LIMITS: CapturedProcessLimits = {
+  timeoutMs: 10 * 60_000,
+  maxOutputBytes: 8 * 1024 * 1024,
+};
+
+interface InstalledCometPackage {
+  packageRoot: string;
+  version: string;
+  binPath: string;
+  projectMetadataRoots?: string[];
+}
+
+interface FileSnapshot {
+  filePath: string;
+  content: Buffer | null;
+}
+
+function createNpmUpdateFailure(scope: InstallScope, reason?: string): NpmUpdateFailure {
+  const detail = reason ? `: ${reason}` : '';
+  const error = new Error(
+    `npm package update failed (${scope} scope)${detail}`,
+  ) as NpmUpdateFailure;
   error.npmScope = scope;
   return error;
 }
@@ -84,9 +147,12 @@ interface SingleProjectUpdateResult {
     scope: InstallScope | 'skipped';
     status: NpmStatus;
     command: string | null;
+    exitCode: number | null;
+    reason?: string;
   };
   skills: {
     totalCopied: number;
+    totalFailed: number;
     cleanupFailed: number;
     installMode?: InstallMode;
     targets: Array<{
@@ -97,19 +163,64 @@ interface SingleProjectUpdateResult {
       source: string;
       copied: number;
       skipped: number;
+      failed: number;
+      reason?: string;
       cleanupFailed: number;
       command: string;
     }>;
   };
-  rules: { totalCopied: number };
-  hooks: { totalInstalled: number };
+  rules: {
+    totalCopied: number;
+    totalFailed: number;
+    targets: Array<{
+      scope: InstallScope;
+      platform: string;
+      platformName: string;
+      copied: number;
+      skipped: number;
+      failed: number;
+      status: 'copied' | 'skipped' | 'failed';
+      reason?: string;
+    }>;
+  };
+  hooks: {
+    totalInstalled: number;
+    totalFailed: number;
+    targets: Array<{
+      scope: InstallScope;
+      platform: string;
+      platformName: string;
+      failed: number;
+      status: 'installed' | 'skipped' | 'failed';
+      reason?: string;
+    }>;
+  };
   projectInstructions: { updated: number };
   codegraph: CodegraphStatus;
 }
 
+interface ComponentFailureDetail {
+  scope: InstallScope;
+  platform: string;
+  platformName: string;
+  component: 'Skill' | 'Rule' | 'Hook';
+  status: 'failed';
+  failed: number;
+  reason: string;
+}
+
+interface CommandFailureDetail {
+  component: 'npm' | 'CodeGraph' | 'Skill' | 'Rule' | 'Hook';
+  reason: string;
+  scope?: InstallScope;
+  platform?: string;
+  platformName?: string;
+  failed?: number;
+}
+
 interface AllProjectsUpdateResult {
   projectPath: string;
-  status: 'updated' | 'skipped' | 'failed';
+  status: 'updated' | 'skipped' | 'failed' | 'not_attempted';
   reason?: string;
   targets: Array<{
     scope: InstallScope;
@@ -117,6 +228,7 @@ interface AllProjectsUpdateResult {
     platformName: string;
     language: SkillLanguage;
   }>;
+  failures?: CommandFailureDetail[];
   summary?: {
     skillsCopied: number;
     rulesCopied: number;
@@ -238,13 +350,10 @@ async function detectInstalledCometTargets(
   for (const scope of scopes) {
     const baseDir = getScopedBaseDir(scope, projectPath, options.globalBaseDir);
 
-    for (const platform of PLATFORMS) {
-      if (
-        options.respectDetectionPaths !== false &&
-        !(await hasPlatformDetectionPath(baseDir, platform))
-      ) {
-        continue;
-      }
+    const owners = await resolveCanonicalSkillRootOwners(baseDir, scope, {
+      respectDetectionPaths: options.respectDetectionPaths,
+    });
+    for (const { platform } of owners) {
       if (!(await hasLocalCometSkills(baseDir, platform, scope))) continue;
 
       targets.push({
@@ -290,14 +399,97 @@ async function detectCometPackageScope(
   return 'global';
 }
 
-function buildNpmUpdateArgs(scope: InstallScope): string[] {
+function buildNpmUpdateArgs(scope: InstallScope, version = 'latest'): string[] {
+  const packageSpec = `${PACKAGE_NAME}@${version}`;
   return scope === 'global'
-    ? ['install', '-g', `${PACKAGE_NAME}@latest`, '--registry', OFFICIAL_REGISTRY]
-    : ['install', `${PACKAGE_NAME}@latest`, '--registry', OFFICIAL_REGISTRY];
+    ? ['install', '-g', packageSpec, '--registry', OFFICIAL_REGISTRY]
+    : ['install', packageSpec, '--registry', OFFICIAL_REGISTRY];
 }
 
-function formatNpmUpdateCommand(scope: InstallScope): string {
-  return ['npm', ...buildNpmUpdateArgs(scope)].join(' ');
+function formatNpmUpdateCommand(scope: InstallScope, version = 'latest'): string {
+  return ['npm', ...buildNpmUpdateArgs(scope, version)].join(' ');
+}
+
+interface ParsedSemver {
+  major: number;
+  minor: number;
+  patch: number;
+  prerelease: string[];
+}
+
+function parseSemver(version: string): ParsedSemver | null {
+  const match =
+    /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(
+      version,
+    );
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4]?.split('.') ?? [],
+  };
+}
+
+function comparePrereleaseIdentifiers(left: string[], right: string[]): number {
+  if (left.length === 0 || right.length === 0) {
+    if (left.length === right.length) return 0;
+    return left.length === 0 ? 1 : -1;
+  }
+
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const leftPart = left[index];
+    const rightPart = right[index];
+    if (leftPart === undefined) return -1;
+    if (rightPart === undefined) return 1;
+    if (leftPart === rightPart) continue;
+
+    const leftNumeric = /^\d+$/u.test(leftPart);
+    const rightNumeric = /^\d+$/u.test(rightPart);
+    if (leftNumeric && rightNumeric) return Number(leftPart) - Number(rightPart);
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftPart < rightPart ? -1 : 1;
+  }
+  return 0;
+}
+
+function compareSemverVersions(left: ParsedSemver, right: ParsedSemver): number {
+  for (const field of ['major', 'minor', 'patch'] as const) {
+    if (left[field] !== right[field]) return left[field] - right[field];
+  }
+  return comparePrereleaseIdentifiers(left.prerelease, right.prerelease);
+}
+
+function resolveNpmSelfUpdatePlan(
+  currentVersion: string,
+  registryVersion: string,
+): NpmSelfUpdatePlan {
+  const current = parseSemver(currentVersion);
+  const registry = parseSemver(registryVersion);
+  if (!current) {
+    return {
+      action: 'fail',
+      reason: `current Comet version is not valid semver: ${currentVersion}`,
+    };
+  }
+  if (!registry) {
+    return {
+      action: 'fail',
+      reason: `registry Comet version is not valid semver: ${registryVersion}`,
+    };
+  }
+
+  const comparison = compareSemverVersions(registry, current);
+  if (comparison < 0) {
+    return {
+      action: 'skip',
+      reason: `registry version ${registryVersion} is older than current version ${currentVersion}`,
+    };
+  }
+  if (comparison === 0) {
+    return { action: 'skip', reason: `Comet ${currentVersion} is already installed` };
+  }
+  return { action: 'update', version: registryVersion };
 }
 
 function formatSkillUpdateCommand(
@@ -326,42 +518,478 @@ async function selectInstallMode(options: UpdateOptions, lang: string): Promise<
   });
 }
 
-function getNpmExecutable(): string {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+async function resolveNpmCliPath(): Promise<string> {
+  const candidates = new Set<string>();
+  const addStandardCandidates = (baseDir: string) => {
+    candidates.add(path.join(baseDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'));
+    candidates.add(path.resolve(baseDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'));
+  };
+
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath && path.basename(npmExecPath).toLowerCase() === 'npm-cli.js') {
+    candidates.add(path.resolve(npmExecPath));
+  }
+  addStandardCandidates(path.dirname(process.execPath));
+
+  const pathValue = process.env.PATH ?? process.env.Path ?? '';
+  for (const entry of pathValue.split(path.delimiter).filter(Boolean)) {
+    addStandardCandidates(entry);
+    const npmExecutable = path.join(entry, process.platform === 'win32' ? 'npm.cmd' : 'npm');
+    try {
+      const resolved = await fs.realpath(npmExecutable);
+      if (path.basename(resolved).toLowerCase() === 'npm-cli.js') candidates.add(resolved);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return await resolveRegularContainedFile(
+        candidate,
+        path.resolve(candidate, '..', '..'),
+        'npm CLI',
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  throw new Error('Unable to locate npm CLI (npm-cli.js) without using a shell');
+}
+
+function runCapturedProcess(
+  command: string,
+  args: string[],
+  cwd: string,
+  limits?: CapturedProcessLimits,
+): Promise<CapturedProcessResult> {
+  return new Promise((resolve) => {
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let capturedBytes = 0;
+    let spawnError: Error | null = null;
+    let limitReason: string | null = null;
+    let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+    const child = spawn(command, args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+    });
+    const terminate = (reason: string) => {
+      if (limitReason !== null) return;
+      limitReason = reason;
+      child.kill();
+      forceKillTimer = setTimeout(() => child.kill('SIGKILL'), 1_000);
+      forceKillTimer.unref?.();
+    };
+    const capture = (target: Buffer[], chunk: unknown) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      if (!limits) {
+        target.push(bytes);
+        return;
+      }
+      const remaining = Math.max(0, limits.maxOutputBytes - capturedBytes);
+      if (remaining > 0) target.push(bytes.subarray(0, remaining));
+      capturedBytes += bytes.length;
+      if (capturedBytes > limits.maxOutputBytes) {
+        terminate(`process output exceeded ${limits.maxOutputBytes} bytes`);
+      }
+    };
+    child.stdout?.on('data', (chunk) => capture(stdoutChunks, chunk));
+    child.stderr?.on('data', (chunk) => capture(stderrChunks, chunk));
+    child.on('error', (error) => {
+      spawnError = error;
+    });
+    const timeout = limits
+      ? setTimeout(
+          () => terminate(`process timed out after ${limits.timeoutMs}ms`),
+          limits.timeoutMs,
+        )
+      : null;
+    timeout?.unref?.();
+    child.on('close', (exitCode) => {
+      if (timeout) clearTimeout(timeout);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8');
+      const success = spawnError === null && limitReason === null && exitCode === 0;
+      const captured = (stderr.trim() || stdout.trim()).slice(-4000);
+      resolve({
+        success,
+        exitCode,
+        stdout,
+        stderr,
+        reason: success
+          ? undefined
+          : (limitReason ??
+            (spawnError
+              ? `failed to launch ${command}: ${spawnError.message}`
+              : captured || `${command} exited with code ${exitCode ?? 'unknown'}`)),
+      });
+    });
+  });
+}
+
+function runNpmCli(
+  npmCliPath: string,
+  args: string[],
+  cwd: string,
+  limits: CapturedProcessLimits = NPM_INSPECTION_LIMITS,
+): Promise<CapturedProcessResult> {
+  return runCapturedProcess(process.execPath, [npmCliPath, ...args], cwd, limits);
+}
+
+async function removeDirectoryWithRetry(directory: string, attempts = 3): Promise<Error | null> {
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await fs.rm(directory, { recursive: true, force: true });
+      return null;
+    } catch (error) {
+      lastError = error as Error;
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 25));
+      }
+    }
+  }
+  return lastError;
+}
+
+async function resolveRegularContainedFile(
+  file: string,
+  root: string,
+  label: string,
+): Promise<string> {
+  const [realRoot, realFile] = await Promise.all([fs.realpath(root), fs.realpath(file)]);
+  const stat = await fs.lstat(realFile);
+  if (!stat.isFile() || stat.isSymbolicLink() || !isSameOrInside(realFile, realRoot)) {
+    throw new Error(`${label} must be a regular file inside ${realRoot}`);
+  }
+  return realFile;
+}
+
+async function readCometPackage(packageRoot: string): Promise<InstalledCometPackage> {
+  const resolvedPackageRoot = path.resolve(packageRoot);
+  const realPackageRoot = await fs.realpath(resolvedPackageRoot);
+  const packageRootStat = await fs.lstat(realPackageRoot);
+  if (!packageRootStat.isDirectory() || packageRootStat.isSymbolicLink()) {
+    throw new Error(`Comet package root is not a real directory: ${packageRoot}`);
+  }
+  const packageJsonPath = await resolveRegularContainedFile(
+    path.join(resolvedPackageRoot, 'package.json'),
+    resolvedPackageRoot,
+    'Comet package.json',
+  );
+  const pkg = await readJson<{ version?: unknown; bin?: string | Record<string, string> }>(
+    packageJsonPath,
+  );
+  if (typeof pkg.version !== 'string') {
+    throw new Error(`Comet package has no valid version: ${packageJsonPath}`);
+  }
+  const binReference = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.comet;
+  if (!binReference) throw new Error(`Comet package has no comet bin: ${packageJsonPath}`);
+  const binPath = path.resolve(resolvedPackageRoot, binReference);
+  if (!isSameOrInside(binPath, resolvedPackageRoot)) {
+    throw new Error(`Comet package bin is invalid: ${binReference}`);
+  }
+  let realBinPath: string;
+  try {
+    realBinPath = await resolveRegularContainedFile(
+      binPath,
+      resolvedPackageRoot,
+      'Comet package bin',
+    );
+  } catch (error) {
+    throw new Error(`Comet package bin is invalid: ${binReference}`, { cause: error });
+  }
+  return { packageRoot: resolvedPackageRoot, version: pkg.version, binPath: realBinPath };
+}
+
+async function readInstalledCometPackage(
+  scope: InstallScope,
+  projectPath: string,
+  npmCliPath: string,
+): Promise<InstalledCometPackage> {
+  if (scope === 'project') {
+    const [rootResult, prefixResult] = await Promise.all([
+      runNpmCli(npmCliPath, ['root'], projectPath),
+      runNpmCli(npmCliPath, ['prefix'], projectPath),
+    ]);
+    const npmRoot = parseNpmAbsolutePath(rootResult, 'npm root');
+    const npmPrefix = parseNpmAbsolutePath(prefixResult, 'npm prefix');
+    const installedPackage = await readCometPackage(path.join(npmRoot, '@rpamis', 'comet'));
+    return {
+      ...installedPackage,
+      projectMetadataRoots: [...new Set([path.resolve(projectPath), npmPrefix])],
+    };
+  }
+
+  const rootResult = await runNpmCli(npmCliPath, ['root', '--global'], projectPath);
+  const npmRoot = parseNpmAbsolutePath(rootResult, 'npm root --global');
+  return readCometPackage(path.join(npmRoot, '@rpamis', 'comet'));
+}
+
+function parseNpmAbsolutePath(result: CapturedProcessResult, command: string): string {
+  if (!result.success) {
+    throw new Error(`Unable to resolve ${command}: ${result.reason ?? 'unknown error'}`);
+  }
+  const outputPath = result.stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (!outputPath || !path.isAbsolute(outputPath)) {
+    throw new Error(`${command} returned an invalid path: ${outputPath ?? '<empty>'}`);
+  }
+  return path.resolve(outputPath);
+}
+
+async function validateCometPackageCommands(
+  candidate: InstalledCometPackage,
+  expectedVersion: string,
+): Promise<CapturedProcessResult> {
+  const checks: Array<{
+    args: string[];
+    accepts: (stdout: string) => boolean;
+    label: string;
+  }> = [
+    {
+      args: ['--version'],
+      accepts: (stdout) => stdout.trim() === expectedVersion,
+      label: 'version command',
+    },
+    {
+      args: ['workflow', 'resolve', '--help'],
+      accepts: (stdout) => stdout.includes('Usage: comet workflow resolve'),
+      label: 'workflow resolve command',
+    },
+    {
+      args: ['native', '--help'],
+      accepts: (stdout) => stdout.includes('Usage: comet native'),
+      label: 'native command',
+    },
+  ];
+
+  for (const check of checks) {
+    const result = await runCapturedProcess(
+      process.execPath,
+      [candidate.binPath, ...check.args],
+      candidate.packageRoot,
+      CANDIDATE_COMMAND_LIMITS,
+    );
+    if (!result.success || !check.accepts(result.stdout)) {
+      return {
+        ...result,
+        success: false,
+        reason: `candidate ${check.label} failed: ${result.reason ?? 'unexpected command contract'}`,
+      };
+    }
+  }
+  return { success: true, exitCode: 0, stdout: '', stderr: '' };
+}
+
+async function validateRegistryCometPackage(
+  version: string,
+  npmCliPath: string,
+): Promise<CapturedProcessResult> {
+  let validationDir: string;
+  try {
+    validationDir = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-self-update-'));
+  } catch (error) {
+    return {
+      success: false,
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+      reason: `unable to create candidate prefix: ${(error as Error).message}`,
+    };
+  }
+
+  let result: CapturedProcessResult;
+  try {
+    const install = await runNpmCli(
+      npmCliPath,
+      [
+        'install',
+        '--prefix',
+        validationDir,
+        '--ignore-scripts',
+        '--no-save',
+        '--package-lock=false',
+        `${PACKAGE_NAME}@${version}`,
+        '--registry',
+        OFFICIAL_REGISTRY,
+      ],
+      validationDir,
+      CANDIDATE_INSTALL_LIMITS,
+    );
+    if (!install.success) {
+      result = {
+        ...install,
+        reason: `candidate package install failed: ${install.reason ?? 'unknown error'}`,
+      };
+    } else {
+      const candidate = await readCometPackage(
+        path.join(validationDir, 'node_modules', '@rpamis', 'comet'),
+      );
+      if (candidate.version !== version) {
+        result = {
+          success: false,
+          exitCode: null,
+          stdout: '',
+          stderr: '',
+          reason: `candidate package version mismatch: expected ${version}, got ${candidate.version}`,
+        };
+      } else {
+        result = await validateCometPackageCommands(candidate, version);
+      }
+    }
+  } catch (error) {
+    result = {
+      success: false,
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+      reason: `candidate package validation failed: ${(error as Error).message}`,
+    };
+  }
+
+  const cleanupError = await removeDirectoryWithRetry(validationDir);
+  if (!cleanupError) return result;
+  return {
+    ...result,
+    success: false,
+    reason: result.reason
+      ? `${result.reason}; temporary cleanup failed: ${cleanupError.message}`
+      : `candidate validation temporary cleanup failed: ${cleanupError.message}`,
+  };
+}
+
+const PROJECT_INSTALL_METADATA = [
+  'package.json',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+] as const;
+
+async function snapshotProjectInstallMetadata(metadataRoots: string[]): Promise<FileSnapshot[]> {
+  const filePaths = [
+    ...new Set(
+      metadataRoots.flatMap((metadataRoot) =>
+        PROJECT_INSTALL_METADATA.map((relativePath) => path.join(metadataRoot, relativePath)),
+      ),
+    ),
+  ];
+  return Promise.all(
+    filePaths.map(async (filePath): Promise<FileSnapshot> => {
+      try {
+        return { filePath, content: await fs.readFile(filePath) };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { filePath, content: null };
+        throw error;
+      }
+    }),
+  );
+}
+
+async function restoreProjectInstallMetadata(snapshots: FileSnapshot[]): Promise<string | null> {
+  const failures: string[] = [];
+  for (const snapshot of snapshots) {
+    try {
+      if (snapshot.content === null) {
+        await fs.rm(snapshot.filePath, { force: true });
+      } else {
+        await fs.writeFile(snapshot.filePath, snapshot.content);
+      }
+    } catch (error) {
+      failures.push(`${path.basename(snapshot.filePath)}: ${(error as Error).message}`);
+    }
+  }
+  return failures.length > 0 ? failures.join('; ') : null;
+}
+
+async function installCometNpmVersion(
+  npmCliPath: string,
+  scope: InstallScope,
+  projectPath: string,
+  version: string,
+): Promise<CapturedProcessResult> {
+  const cwd = scope === 'global' ? process.cwd() : projectPath;
+  return runNpmCli(npmCliPath, buildNpmUpdateArgs(scope, version), cwd, NPM_MUTATION_LIMITS);
 }
 
 async function updateCometNpmPackage(
+  npmCliPath: string,
   scope: InstallScope,
   projectPath: string,
+  targetVersion: string,
+  installedPackage: InstalledCometPackage,
   log: (message: string) => void,
-  jsonMode = false,
-): Promise<boolean> {
-  const args = buildNpmUpdateArgs(scope);
-  const cwd = scope === 'global' ? process.cwd() : projectPath;
+): Promise<{ success: boolean; exitCode: number | null; reason?: string }> {
+  const validation = await validateRegistryCometPackage(targetVersion, npmCliPath);
+  if (!validation.success) {
+    log(`  npm package: candidate validation failed: ${validation.reason}`);
+    return { success: false, exitCode: validation.exitCode, reason: validation.reason };
+  }
 
-  return new Promise((resolve) => {
-    // In JSON mode, discard npm's stdout/stderr so it cannot corrupt the JSON
-    // document emitted on stdout. 'ignore' avoids the pipe backpressure a
-    // verbose npm install could otherwise cause.
-    const child = spawn(getNpmExecutable(), args, {
-      cwd,
-      stdio: jsonMode ? 'ignore' : 'inherit',
-      shell: true,
-    });
-    child.on('error', (err) => {
-      log(`  npm package: failed to launch npm — ${err.message}`);
-      resolve(false);
-    });
-    child.on('exit', (code) => {
-      if (code !== 0) {
-        log(
-          `  npm package: update failed (exit code ${code}). Unable to reach the official npm registry at ${OFFICIAL_REGISTRY}.`,
-        );
-        log(`  Check your network connection or firewall settings and try again.`);
+  let metadata: FileSnapshot[] | undefined;
+  if (scope === 'project') {
+    try {
+      metadata = await snapshotProjectInstallMetadata(
+        installedPackage.projectMetadataRoots ?? [projectPath],
+      );
+    } catch (error) {
+      return {
+        success: false,
+        exitCode: null,
+        reason: `unable to snapshot project package metadata: ${(error as Error).message}`,
+      };
+    }
+  }
+  const install = await installCometNpmVersion(npmCliPath, scope, projectPath, targetVersion);
+  let installReason = install.reason;
+  if (install.success) {
+    try {
+      const installedAfterUpdate = await readCometPackage(installedPackage.packageRoot);
+      if (installedAfterUpdate.version === targetVersion) {
+        return { success: true, exitCode: install.exitCode };
       }
-      resolve(code === 0);
-    });
-  });
+      installReason = `installed package version mismatch: expected ${targetVersion}, got ${installedAfterUpdate.version}`;
+    } catch (error) {
+      installReason = `unable to verify installed package: ${(error as Error).message}`;
+    }
+  }
+
+  const primaryReason = installReason ?? 'npm package installation failed';
+  log(`  npm package: update failed; restoring ${installedPackage.version}...`);
+  const rollback = await installCometNpmVersion(
+    npmCliPath,
+    scope,
+    projectPath,
+    installedPackage.version,
+  );
+  let rollbackReason: string | null = rollback.reason ?? null;
+  if (rollback.success) {
+    try {
+      const restored = await readCometPackage(installedPackage.packageRoot);
+      if (restored.version !== installedPackage.version) {
+        rollbackReason = `restored package version mismatch: expected ${installedPackage.version}, got ${restored.version}`;
+      }
+    } catch (error) {
+      rollbackReason = `unable to verify restored package: ${(error as Error).message}`;
+    }
+  }
+
+  const metadataRestoreError = metadata ? await restoreProjectInstallMetadata(metadata) : null;
+  const details = [
+    primaryReason,
+    rollbackReason
+      ? `rollback to ${installedPackage.version} failed: ${rollbackReason}`
+      : `restored ${installedPackage.version}`,
+    metadataRestoreError ? `project metadata restore failed: ${metadataRestoreError}` : null,
+  ].filter((detail): detail is string => detail !== null);
+  return { success: false, exitCode: install.exitCode, reason: details.join('; ') };
 }
 
 async function promptCodegraphInstall(lang: string): Promise<boolean> {
@@ -376,9 +1004,12 @@ async function promptCodegraphInstall(lang: string): Promise<boolean> {
 
 function currentProjectJson(result: SingleProjectUpdateResult): Record<string, unknown> {
   return {
+    status: hasUpdateFailures(result) ? 'incomplete' : 'complete',
+    failures: collectCommandFailures(result),
     npm: result.npm,
     skills: {
       totalCopied: result.skills.totalCopied,
+      totalFailed: result.skills.totalFailed,
       cleanupFailed: result.skills.cleanupFailed,
       installMode: result.skills.installMode,
       targets: result.skills.targets,
@@ -388,6 +1019,84 @@ function currentProjectJson(result: SingleProjectUpdateResult): Record<string, u
     projectInstructions: result.projectInstructions,
     codegraph: result.codegraph,
   };
+}
+
+function hasComponentFailures(result: SingleProjectUpdateResult): boolean {
+  return (
+    result.skills.totalFailed > 0 ||
+    result.skills.cleanupFailed > 0 ||
+    result.rules.totalFailed > 0 ||
+    result.hooks.totalFailed > 0
+  );
+}
+
+function hasUpdateFailures(result: SingleProjectUpdateResult): boolean {
+  return (
+    result.npm.status === 'failed' || result.codegraph === 'failed' || hasComponentFailures(result)
+  );
+}
+
+function collectComponentFailures(result: SingleProjectUpdateResult): ComponentFailureDetail[] {
+  const skillFailures = result.skills.targets.flatMap((target): ComponentFailureDetail[] => {
+    const failed = target.failed + target.cleanupFailed;
+    if (failed === 0 || !target.reason) return [];
+    return [
+      {
+        scope: target.scope,
+        platform: target.platform,
+        platformName: target.platformName,
+        component: 'Skill',
+        status: 'failed',
+        failed,
+        reason: target.reason,
+      },
+    ];
+  });
+  const ruleFailures = result.rules.targets.flatMap((target): ComponentFailureDetail[] => {
+    if (target.failed === 0 || !target.reason) return [];
+    return [
+      {
+        scope: target.scope,
+        platform: target.platform,
+        platformName: target.platformName,
+        component: 'Rule',
+        status: 'failed',
+        failed: target.failed,
+        reason: target.reason,
+      },
+    ];
+  });
+  const hookFailures = result.hooks.targets.flatMap((target): ComponentFailureDetail[] => {
+    if (target.failed === 0 || !target.reason) return [];
+    return [
+      {
+        scope: target.scope,
+        platform: target.platform,
+        platformName: target.platformName,
+        component: 'Hook',
+        status: 'failed',
+        failed: target.failed,
+        reason: target.reason,
+      },
+    ];
+  });
+  return [...skillFailures, ...ruleFailures, ...hookFailures];
+}
+
+function collectCommandFailures(result: SingleProjectUpdateResult): CommandFailureDetail[] {
+  const failures: CommandFailureDetail[] = [];
+  if (result.npm.status === 'failed') {
+    failures.push({
+      component: 'npm',
+      scope: result.npm.scope === 'skipped' ? undefined : result.npm.scope,
+      reason: result.npm.reason ?? 'npm package update failed',
+    });
+  }
+  failures.push(...collectComponentFailures(result));
+  if (result.codegraph === 'failed') {
+    failures.push({ component: 'CodeGraph', reason: 'CodeGraph installation failed' });
+  }
+  return failures;
 }
 
 function summarizeTargets(targets: InstalledCometTarget[]): AllProjectsUpdateResult['targets'] {
@@ -428,44 +1137,96 @@ async function upsertUpdatedProjectTargets(
 }
 
 async function updateSingleProject(
-  projectPath: string,
+  startPath: string,
   options: UpdateOptions,
   log: (message: string) => void,
 ): Promise<SingleProjectUpdateResult> {
   const lang = options.language ?? 'en';
+  const includesProjectScope = options.targetScopes
+    ? options.targetScopes.includes('project')
+    : options.scope !== 'global';
+  const projectPath = includesProjectScope ? await discoverNativeProject(startPath) : startPath;
+  const projectEntry = includesProjectScope ? await resolveCometEntry(projectPath) : null;
+  const projectConfig = includesProjectScope ? await readProjectConfig(projectPath) : null;
+  const configuredWorkflows =
+    projectConfig?.workflows ?? (projectConfig ? [projectConfig.default_workflow] : null);
+  const nativeProject = configuredWorkflows
+    ? configuredWorkflows.includes('native')
+    : projectEntry?.workflow === 'native';
+  const classicProject = configuredWorkflows
+    ? configuredWorkflows.includes('classic')
+    : projectEntry?.workflow === 'classic';
+  const projectWorkflowSelection: InitWorkflowSelection =
+    nativeProject && classicProject ? 'both' : nativeProject ? 'native' : 'classic';
   const packageScope =
     options.scope && !options.targetScopes
       ? options.scope
       : await detectCometPackageScope(projectPath);
   let npmStatus: NpmStatus = 'skipped';
+  let npmExitCode: number | null = null;
+  let npmReason: string | undefined = options.npmSkipReason;
+  let npmCommand: string | null = null;
+  const skipPackageSelfUpdate = options.skipPackageSelfUpdate ?? options.skipNpm === true;
   const skipRepeatedGlobalNpm =
-    !options.skipNpm && packageScope === 'global' && options.skipGlobalNpmUpdate === true;
+    !skipPackageSelfUpdate && packageScope === 'global' && options.skipGlobalNpmUpdate === true;
   if (skipRepeatedGlobalNpm) {
+    npmReason = 'global scope self-update already attempted';
     log(`  ${t(lang, 'updatingNpmPackage')}: skipped (global scope already attempted)`);
-  } else if (!options.skipNpm) {
-    log(`  ${t(lang, 'updatingNpmPackage')} (${packageScope} scope)...`);
-    log(`    $ ${formatNpmUpdateCommand(packageScope)}`);
-    const npmUpdated = await updateCometNpmPackage(
-      packageScope,
-      projectPath,
-      log,
-      options.json === true,
-    );
-    if (npmUpdated) {
-      npmStatus = 'updated';
-      log(`  ${t(lang, 'npmPackageUpdated')} ${PACKAGE_NAME}`);
-    } else {
+  } else if (!skipPackageSelfUpdate) {
+    let npmCliPath: string | null = null;
+    let installedPackage: InstalledCometPackage | null = null;
+    try {
+      npmCliPath = await resolveNpmCliPath();
+      installedPackage = await readInstalledCometPackage(packageScope, projectPath, npmCliPath);
+    } catch (error) {
       npmStatus = 'failed';
+      npmReason = `unable to inspect installed Comet package: ${(error as Error).message}`;
+    }
+
+    const registryVersion = installedPackage ? await getLatestVersion() : null;
+    if (installedPackage && registryVersion === null) {
+      npmStatus = 'failed';
+      npmReason = 'unable to resolve the latest Comet version from the npm registry';
+    } else if (installedPackage && registryVersion && npmCliPath) {
+      const plan = resolveNpmSelfUpdatePlan(installedPackage.version, registryVersion);
+      if (plan.action === 'skip') {
+        npmStatus = 'skipped';
+        npmReason = plan.reason;
+        log(`  ${t(lang, 'updatingNpmPackage')}: skipped (${plan.reason})`);
+      } else if (plan.action === 'fail') {
+        npmStatus = 'failed';
+        npmReason = plan.reason;
+      } else {
+        npmCommand = formatNpmUpdateCommand(packageScope, plan.version);
+        log(`  ${t(lang, 'updatingNpmPackage')} (${packageScope} scope)...`);
+        log(`    $ ${npmCommand}`);
+        const npmResult = await updateCometNpmPackage(
+          npmCliPath,
+          packageScope,
+          projectPath,
+          plan.version,
+          installedPackage,
+          log,
+        );
+        npmExitCode = npmResult.exitCode;
+        npmReason = npmResult.reason;
+        if (npmResult.success) {
+          npmStatus = 'updated';
+          log(`  ${t(lang, 'npmPackageUpdated')} ${PACKAGE_NAME}@${plan.version}`);
+        } else {
+          npmStatus = 'failed';
+        }
+      }
+    }
+    if (npmStatus === 'failed') {
       log(
         `  ${t(lang, options.failOnNpmFailure ? 'npmPackageFailedBlocking' : 'npmPackageFailed')}`,
       );
       if (options.failOnNpmFailure) {
-        throw createNpmUpdateFailure(packageScope);
+        throw createNpmUpdateFailure(packageScope, npmReason);
       }
     }
   }
-
-  const installMode = await selectInstallMode(options, lang);
 
   const targets = await detectInstalledCometTargets(projectPath, {
     scopes: options.targetScopes ?? (options.scope ? [options.scope] : undefined),
@@ -476,18 +1237,31 @@ async function updateSingleProject(
     return {
       projectPath,
       npm: {
-        scope: options.skipNpm ? 'skipped' : packageScope,
+        scope: skipPackageSelfUpdate ? 'skipped' : packageScope,
         status: npmStatus,
-        command:
-          options.skipNpm || skipRepeatedGlobalNpm ? null : formatNpmUpdateCommand(packageScope),
+        command: npmCommand,
+        exitCode: npmExitCode,
+        reason: npmReason,
       },
-      skills: { totalCopied: 0, cleanupFailed: 0, targets: [] },
-      rules: { totalCopied: 0 },
-      hooks: { totalInstalled: 0 },
+      skills: { totalCopied: 0, totalFailed: 0, cleanupFailed: 0, targets: [] },
+      rules: { totalCopied: 0, totalFailed: 0, targets: [] },
+      hooks: { totalInstalled: 0, totalFailed: 0, targets: [] },
       projectInstructions: { updated: 0 },
       codegraph: 'skipped',
     };
   }
+
+  const hasClassicCompatibleTarget = targets.some(
+    (target) => target.scope === 'global' || classicProject,
+  );
+  const selectedInstallMode = hasClassicCompatibleTarget
+    ? await selectInstallMode(options, lang)
+    : 'copy';
+  const installModeFor = (target: InstalledCometTarget): InstallMode =>
+    nativeProject && target.scope === 'project' ? 'copy' : selectedInstallMode;
+  const reportedInstallMode = targets.every((target) => nativeProject && target.scope === 'project')
+    ? 'copy'
+    : selectedInstallMode;
 
   log(`\n  ${t(lang, 'updatingSkillsOnTargets')} ${targets.length} target(s):`);
   for (const target of targets) {
@@ -495,33 +1269,60 @@ async function updateSingleProject(
     const scopeLabel = target.scope === 'global' ? 'global' : `project (${projectPath})`;
     const languageId = resolveTargetLanguage(options.language, target.language);
     const languageSkillsDir = languageToSkillsDir(languageId);
+    const targetInstallMode = installModeFor(target);
     log(`    - ${target.platform.name} (${scopeLabel}, ${language})`);
     log(
-      `      $ ${formatSkillUpdateCommand(target.scope, target.platform, languageSkillsDir, installMode)}`,
+      `      $ ${formatSkillUpdateCommand(target.scope, target.platform, languageSkillsDir, targetInstallMode)}`,
     );
   }
 
-  log(
-    `\n  ${t(lang, 'copyingSkillsFiles')} ${(await getManifestSkills()).length} skill files...\n`,
+  const targetWorkflowSelections = targets.map((target) =>
+    target.scope === 'global' ? 'classic' : projectWorkflowSelection,
   );
+  const updateSkillPaths = new Set(
+    (
+      await Promise.all(
+        [...new Set(targetWorkflowSelections)].map((selection) => getManifestSkills(selection)),
+      )
+    ).flat(),
+  );
+  log(`\n  ${t(lang, 'copyingSkillsFiles')} ${updateSkillPaths.size} skill files...\n`);
 
   let totalCopied = 0;
+  let totalFailed = 0;
   let totalCleanupFailed = 0;
   let totalRulesCopied = 0;
+  let totalRulesFailed = 0;
   let totalHooksInstalled = 0;
+  let totalHooksFailed = 0;
   let projectInstructionsUpdated = 0;
   const targetResults: SingleProjectUpdateResult['skills']['targets'] = [];
+  const ruleTargetResults: SingleProjectUpdateResult['rules']['targets'] = [];
+  const hookTargetResults: SingleProjectUpdateResult['hooks']['targets'] = [];
   for (const target of targets) {
     const baseDir = getBaseDir(target.scope, projectPath);
     const languageId = resolveTargetLanguage(options.language, target.language);
     const languageSkillsDir = languageToSkillsDir(languageId);
+    const targetInstallMode = installModeFor(target);
+    const nativeProjectTarget = nativeProject && target.scope === 'project';
+    const targetWorkflowSelection =
+      target.scope === 'global' ? 'classic' : projectWorkflowSelection;
+    if (nativeProjectTarget) {
+      await prepareManagedSkillCopyTarget(
+        baseDir,
+        target.platform,
+        target.scope,
+        targetWorkflowSelection,
+      );
+    }
     const { copied, skipped, failed } = await copyCometSkillsForPlatform(
       baseDir,
       target.platform,
       true,
       languageSkillsDir,
       target.scope,
-      installMode,
+      targetInstallMode,
+      targetWorkflowSelection,
     );
     const cleanupResult =
       failed === 0
@@ -529,6 +1330,7 @@ async function updateSingleProject(
         : { removed: 0, failed: 0 };
     totalCleanupFailed += cleanupResult.failed;
     totalCopied += copied;
+    totalFailed += failed;
     targetResults.push({
       scope: target.scope,
       platform: target.platform.id,
@@ -537,12 +1339,19 @@ async function updateSingleProject(
       source: languageSkillsDir,
       copied,
       skipped,
+      failed,
+      reason:
+        failed > 0
+          ? `${failed} Skill file(s) failed to install`
+          : cleanupResult.failed > 0
+            ? `legacy Skill cleanup failed (${cleanupResult.failed})`
+            : undefined,
       cleanupFailed: cleanupResult.failed,
       command: formatSkillUpdateCommand(
         target.scope,
         target.platform,
         languageSkillsDir,
-        installMode,
+        targetInstallMode,
       ),
     });
     log(
@@ -554,42 +1363,141 @@ async function updateSingleProject(
       );
     }
 
+    if (failed > 0) {
+      const dependencyReason = 'skipped because Skill installation failed';
+      ruleTargetResults.push({
+        scope: target.scope,
+        platform: target.platform.id,
+        platformName: target.platform.name,
+        copied: 0,
+        skipped: 0,
+        failed: 0,
+        status: 'skipped',
+        reason: dependencyReason,
+      });
+      hookTargetResults.push({
+        scope: target.scope,
+        platform: target.platform.id,
+        platformName: target.platform.name,
+        failed: 0,
+        status: 'skipped',
+        reason: dependencyReason,
+      });
+      continue;
+    }
+
     try {
-      const { copied: ruleCopied } = await copyCometRulesForPlatform(
+      const ruleResult = await copyCometRulesForPlatform(
         baseDir,
         target.platform,
         true,
         languageId,
         target.scope,
+        target.scope === 'global' ? 'classic' : projectWorkflowSelection,
       );
-      totalRulesCopied += ruleCopied;
-      if (ruleCopied > 0) {
-        log(`  Comet rules -> ${target.platform.name}: ${ruleCopied} ${t(lang, 'rulesUpdated')}`);
+      totalRulesCopied += ruleResult.copied;
+      totalRulesFailed += ruleResult.failed;
+      const ruleStatus =
+        ruleResult.failed > 0 ? 'failed' : ruleResult.copied > 0 ? 'copied' : 'skipped';
+      const ruleReason =
+        ruleResult.failed > 0
+          ? `${ruleResult.failed} Rule file(s) failed to install`
+          : !target.platform.rulesDir || !target.platform.rulesFormat
+            ? 'platform does not support rules'
+            : undefined;
+      ruleTargetResults.push({
+        scope: target.scope,
+        platform: target.platform.id,
+        platformName: target.platform.name,
+        ...ruleResult,
+        status: ruleStatus,
+        reason: ruleReason,
+      });
+      if (ruleResult.copied > 0) {
+        log(
+          `  Comet rules -> ${target.platform.name}: ${ruleResult.copied} ${t(lang, 'rulesUpdated')}`,
+        );
+      }
+      if (ruleResult.failed > 0) {
+        log(`  Comet rules -> ${target.platform.name}: ${t(lang, 'rulesFailed')} (${ruleReason})`);
       }
     } catch (err) {
-      log(
-        `  Comet rules -> ${target.platform.name}: ${t(lang, 'rulesFailed')} (${(err as Error).message})`,
-      );
+      totalRulesFailed++;
+      const reason = (err as Error).message;
+      ruleTargetResults.push({
+        scope: target.scope,
+        platform: target.platform.id,
+        platformName: target.platform.name,
+        copied: 0,
+        skipped: 0,
+        failed: 1,
+        status: 'failed',
+        reason,
+      });
+      log(`  Comet rules -> ${target.platform.name}: ${t(lang, 'rulesFailed')} (${reason})`);
     }
 
-    if (target.platform.supportsHooks) {
-      try {
-        const { installed, reason } = await installCometHooksForPlatform(
-          baseDir,
-          target.platform,
-          target.scope,
-        );
-        if (installed) {
-          totalHooksInstalled++;
-          log(`  Comet hooks -> ${target.platform.name}: ${t(lang, 'hooksUpdated')}`);
-        } else if (reason) {
-          log(`  Comet hooks -> ${target.platform.name}: ${t(lang, 'hooksSkipped')} (${reason})`);
+    try {
+      const {
+        status,
+        reason,
+        cleanupFailed = 0,
+      } = await installCometHooksForPlatform(
+        baseDir,
+        target.platform,
+        target.scope,
+        target.scope === 'global' ? 'classic' : projectWorkflowSelection,
+      );
+      const hookFailed = status === 'failed' ? 1 : cleanupFailed;
+      totalHooksFailed += hookFailed;
+      hookTargetResults.push({
+        scope: target.scope,
+        platform: target.platform.id,
+        platformName: target.platform.name,
+        failed: hookFailed,
+        status,
+        reason,
+      });
+      if (status === 'installed') {
+        totalHooksInstalled++;
+        log(`  Comet hooks -> ${target.platform.name}: ${t(lang, 'hooksUpdated')}`);
+        if (cleanupFailed > 0) {
+          log(`  Comet hooks -> ${target.platform.name}: ${reason}`);
         }
-      } catch (err) {
-        log(
-          `  Comet hooks -> ${target.platform.name}: ${t(lang, 'hooksFailed')} (${(err as Error).message})`,
-        );
+      } else if (status === 'failed') {
+        log(`  Comet hooks -> ${target.platform.name}: ${t(lang, 'hooksFailed')} (${reason})`);
+      } else if (reason && target.platform.supportsHooks) {
+        log(`  Comet hooks -> ${target.platform.name}: ${t(lang, 'hooksSkipped')} (${reason})`);
       }
+    } catch (err) {
+      totalHooksFailed++;
+      const reason = (err as Error).message;
+      hookTargetResults.push({
+        scope: target.scope,
+        platform: target.platform.id,
+        platformName: target.platform.name,
+        failed: 1,
+        status: 'failed',
+        reason,
+      });
+      log(`  Comet hooks -> ${target.platform.name}: ${t(lang, 'hooksFailed')} (${reason})`);
+    }
+  }
+
+  const projectRouterInstalled = hookTargetResults.some(
+    (target) => target.scope === 'project' && target.status === 'installed',
+  );
+  const projectHookFailed = hookTargetResults.some(
+    (target) => target.scope === 'project' && target.status === 'failed',
+  );
+  if (
+    includesProjectScope &&
+    projectRouterInstalled &&
+    !projectHookFailed &&
+    (projectWorkflowSelection === 'classic' || projectWorkflowSelection === 'both')
+  ) {
+    if (await migrateLegacyClassicSelection(projectPath)) {
+      log('  Comet current selection -> migrated Classic v1 to shared v2');
     }
   }
 
@@ -635,6 +1543,8 @@ async function updateSingleProject(
 
   if (options.json) {
     codegraphStatus = 'skipped';
+  } else if (nativeProject) {
+    codegraphStatus = 'skipped';
   } else if (codegraphAlreadyIndexed) {
     log('\n  CodeGraph: skipped (existing .codegraph index detected)');
   } else {
@@ -652,19 +1562,29 @@ async function updateSingleProject(
   return {
     projectPath,
     npm: {
-      scope: options.skipNpm ? 'skipped' : packageScope,
+      scope: skipPackageSelfUpdate ? 'skipped' : packageScope,
       status: npmStatus,
-      command:
-        options.skipNpm || skipRepeatedGlobalNpm ? null : formatNpmUpdateCommand(packageScope),
+      command: npmCommand,
+      exitCode: npmExitCode,
+      reason: npmReason,
     },
     skills: {
       totalCopied,
+      totalFailed,
       cleanupFailed: totalCleanupFailed,
-      installMode,
+      installMode: reportedInstallMode,
       targets: targetResults,
     },
-    rules: { totalCopied: totalRulesCopied },
-    hooks: { totalInstalled: totalHooksInstalled },
+    rules: {
+      totalCopied: totalRulesCopied,
+      totalFailed: totalRulesFailed,
+      targets: ruleTargetResults,
+    },
+    hooks: {
+      totalInstalled: totalHooksInstalled,
+      totalFailed: totalHooksFailed,
+      targets: hookTargetResults,
+    },
     projectInstructions: { updated: projectInstructionsUpdated },
     codegraph: codegraphStatus,
   };
@@ -690,11 +1610,28 @@ function logSingleProjectSummary(
   if (result.skills.cleanupFailed > 0) {
     log(`    Skill cleanup failures: ${result.skills.cleanupFailed} (update incomplete)`);
   }
+  if (result.skills.totalFailed > 0) {
+    log(`    Skill failures: ${result.skills.totalFailed} (update incomplete)`);
+  }
+  if (result.rules.totalFailed > 0) {
+    log(`    Rule failures: ${result.rules.totalFailed} (update incomplete)`);
+  }
+  if (result.hooks.totalFailed > 0) {
+    log(`    Hook failures: ${result.hooks.totalFailed} (update incomplete)`);
+  }
+  for (const failure of collectComponentFailures(result)) {
+    log(
+      `    ${failure.platformName} (${failure.scope}) ${failure.component}: ${failure.status} (${failure.failed}) - ${failure.reason}`,
+    );
+  }
   log(`    ${t(lang, 'summaryCodegraph')} ${result.codegraph}`);
   log(`    ${t(lang, 'summaryScope')} ${scopes}`);
   log(`    ${t(lang, 'summaryLanguage')} ${languages}`);
-  if (result.skills.cleanupFailed > 0) {
-    log(`\n  Update incomplete. Canonical Skills were installed, but legacy cleanup failed.\n`);
+  if (hasUpdateFailures(result)) {
+    const reasons = collectCommandFailures(result)
+      .map((failure) => failure.reason)
+      .join('; ');
+    log(`\n  Update incomplete. ${reasons}.\n`);
   } else {
     log(`\n  ${t(lang, 'updateComplete')}\n`);
   }
@@ -704,7 +1641,7 @@ async function updateAllIndexedProjects(
   registryProjects: ProjectRegistryEntry[],
   options: UpdateOptions,
   log: (message: string) => void,
-): Promise<void> {
+): Promise<CommandExecutionResult> {
   const lang = options.language ?? 'en';
   const results: AllProjectsUpdateResult[] = [];
   const runnableProjects: Array<{ projectPath: string; targets: InstalledCometTarget[] }> = [];
@@ -728,7 +1665,7 @@ async function updateAllIndexedProjects(
     } catch (error) {
       results.push({
         projectPath,
-        status: 'skipped',
+        status: 'failed',
         reason: `unable to inspect project: ${(error as Error).message}`,
         targets: [],
       });
@@ -750,7 +1687,7 @@ async function updateAllIndexedProjects(
     });
     if (!confirmed) {
       log(`\n  ${t(lang, 'cancelled')}\n`);
-      return;
+      return { status: 'complete' };
     }
   }
 
@@ -767,7 +1704,8 @@ async function updateAllIndexedProjects(
   }
 
   let globalNpmAttempted = false;
-  for (const project of runnableProjects) {
+  for (let index = 0; index < runnableProjects.length; index++) {
+    const project = runnableProjects[index];
     const { projectPath, targets } = project;
     try {
       const result = await updateSingleProject(
@@ -789,12 +1727,15 @@ async function updateAllIndexedProjects(
         continue;
       }
 
-      if (result.skills.cleanupFailed > 0) {
+      if (hasUpdateFailures(result)) {
         results.push({
           projectPath,
           status: 'failed',
-          reason: `legacy Skill cleanup failed (${result.skills.cleanupFailed})`,
+          reason: collectCommandFailures(result)
+            .map((failure) => failure.reason)
+            .join('; '),
           targets: summarizeUpdatedTargets(result.skills.targets),
+          failures: collectCommandFailures(result),
         });
         continue;
       }
@@ -812,13 +1753,33 @@ async function updateAllIndexedProjects(
         },
       });
     } catch (error) {
+      const npmFailure = isGlobalNpmUpdateFailure(error);
       results.push({
         projectPath,
         status: 'failed',
         reason: (error as Error).message,
         targets: summarizeTargets(targets),
+        failures: npmFailure
+          ? [
+              {
+                component: 'npm',
+                scope: 'global',
+                reason: (error as Error).message,
+              },
+            ]
+          : undefined,
       });
-      if (isGlobalNpmUpdateFailure(error)) break;
+      if (npmFailure) {
+        for (const remaining of runnableProjects.slice(index + 1)) {
+          results.push({
+            projectPath: remaining.projectPath,
+            status: 'not_attempted',
+            reason: 'not attempted because the global npm package update failed',
+            targets: summarizeTargets(remaining.targets),
+          });
+        }
+        break;
+      }
     }
   }
 
@@ -827,6 +1788,11 @@ async function updateAllIndexedProjects(
       JSON.stringify(
         {
           mode: 'all-projects',
+          status: results.some(
+            (result) => result.status === 'failed' || result.status === 'not_attempted',
+          )
+            ? 'incomplete'
+            : 'complete',
           registry: {
             projectsFound: registryProjects.length,
             staleRemoved,
@@ -837,26 +1803,68 @@ async function updateAllIndexedProjects(
         2,
       ),
     );
-    return;
+    return {
+      status: results.some(
+        (result) => result.status === 'failed' || result.status === 'not_attempted',
+      )
+        ? 'incomplete'
+        : 'complete',
+    };
   }
 
   log(
     `\n  Updated ${results.filter((result) => result.status === 'updated').length} indexed project(s).`,
   );
+  for (const result of results.filter((candidate) => candidate.status !== 'updated')) {
+    log(`    ${result.projectPath}: ${result.status} (${result.reason ?? 'no reason provided'})`);
+  }
+  return {
+    status: results.some(
+      (result) => result.status === 'failed' || result.status === 'not_attempted',
+    )
+      ? 'incomplete'
+      : 'complete',
+  };
+}
+
+function resolveSelfUpdateOptions(
+  options: UpdateOptions,
+  refreshesOnlyCurrentProject: boolean,
+): UpdateOptions {
+  if (options.selfUpdate && (options.skipSelfUpdate || options.skipNpm)) {
+    throw new Error('--self-update cannot be combined with --skip-self-update or --skip-npm');
+  }
+
+  if (options.skipSelfUpdate || options.skipNpm) {
+    return {
+      ...options,
+      skipPackageSelfUpdate: true,
+      npmSkipReason: options.skipSelfUpdate
+        ? 'self-update disabled by --skip-self-update'
+        : 'self-update disabled by --skip-npm',
+    };
+  }
+  if (refreshesOnlyCurrentProject && !options.selfUpdate) {
+    return {
+      ...options,
+      skipPackageSelfUpdate: true,
+      npmSkipReason:
+        'self-update disabled for current-project updates; pass --self-update to opt in',
+    };
+  }
+  return { ...options, skipPackageSelfUpdate: false };
 }
 
 export async function updateCommand(
   targetPath: string,
   options: UpdateOptions = {},
-): Promise<void> {
+): Promise<CommandExecutionResult> {
   const projectPath = path.resolve(targetPath);
   const log = options.json ? () => undefined : console.log;
   const lang = options.language ?? 'en';
 
   assertProjectScopeOptions(options);
-  const registryProjects = await listProjectRegistryEntries({
-    strict: options.allProjects === true,
-  });
+  const registryProjects = await listProjectRegistryEntries({ strict: true });
 
   log(`\n  ${t(lang, 'updateTitle')}`);
   if (!options.json) {
@@ -865,31 +1873,35 @@ export async function updateCommand(
   log('');
 
   const scopeMode = await resolveProjectScopeMode('update', options, registryProjects.length);
+  options = resolveSelfUpdateOptions(
+    options,
+    options.currentProject === true || scopeMode === 'current-project',
+  );
   if (scopeMode === 'all-projects') {
-    await updateAllIndexedProjects(registryProjects, options, log);
-    return;
+    return updateAllIndexedProjects(registryProjects, options, log);
   }
 
   const result = await updateSingleProject(projectPath, options, log);
   if (result.skills.targets.length === 0) {
     if (options.json) {
       console.log(JSON.stringify(currentProjectJson(result), null, 2));
-      return;
+      return { status: hasUpdateFailures(result) ? 'incomplete' : 'complete' };
     }
     log(`\n  ${t(lang, 'noInstallsFound')}\n`);
-    return;
+    return { status: hasUpdateFailures(result) ? 'incomplete' : 'complete' };
   }
 
-  if (result.skills.cleanupFailed === 0) {
-    await upsertUpdatedProjectTargets(projectPath, result);
+  if (!hasUpdateFailures(result)) {
+    await upsertUpdatedProjectTargets(result.projectPath, result);
   }
 
   if (options.json) {
     console.log(JSON.stringify(currentProjectJson(result), null, 2));
-    return;
+    return { status: hasUpdateFailures(result) ? 'incomplete' : 'complete' };
   }
 
   logSingleProjectSummary(result, options, log);
+  return { status: hasUpdateFailures(result) ? 'incomplete' : 'complete' };
 }
 
 export {
@@ -899,5 +1911,6 @@ export {
   detectInstalledCometTargets,
   formatNpmUpdateCommand,
   formatSkillUpdateCommand,
+  resolveNpmSelfUpdatePlan,
 };
 export type { InstalledCometTarget, SkillLanguage, TranslationKey };

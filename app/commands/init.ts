@@ -13,7 +13,10 @@ import {
   getBaseDir,
   type InstallScope,
 } from '../../platform/install/detect.js';
-import { upsertProjectInstallation } from '../../platform/install/project-registry.js';
+import {
+  readProjectRegistry,
+  upsertProjectInstallation,
+} from '../../platform/install/project-registry.js';
 import type { InstallMode } from '../../platform/install/types.js';
 import {
   copyCometSkillsForPlatform,
@@ -21,8 +24,22 @@ import {
   installCometHooksForPlatform,
   createWorkingDirs,
   mergeProjectConfig,
+  prepareNativeSkillInstallTarget,
 } from '../../domains/skill/platform-install.js';
+import { installCometProjectInstructions } from '../../domains/skill/project-instructions.js';
 import { LANGUAGES, type LanguageConfig } from '../../domains/skill/languages.js';
+import { resolveInitWorkflow } from '../../domains/comet-entry/init-workflow.js';
+import type { CometWorkflow, InitWorkflowSelection } from '../../domains/comet-entry/types.js';
+import { migrateLegacyClassicSelection } from '../../domains/comet-entry/current-selection.js';
+import {
+  defaultProjectConfig,
+  readProjectConfig,
+  writeProjectConfig,
+} from '../../domains/comet-native/native-config.js';
+import {
+  ensureNativeDirectories,
+  nativeProjectPaths,
+} from '../../domains/comet-native/native-paths.js';
 import { installOpenSpec, isCommandAvailable } from '../../domains/integrations/openspec.js';
 import { installSuperpowersForPlatforms } from '../../domains/integrations/superpowers.js';
 import {
@@ -34,6 +51,7 @@ import { printVersionInfo } from '../../platform/version/version.js';
 import { printCometBanner } from '../cli/comet-banner.js';
 import { t, type TranslationKey } from './i18n.js';
 import { detectInstalledCometTargets } from './update.js';
+import type { CommandExecutionResult } from './command-result.js';
 
 type InitOptions = {
   yes?: boolean;
@@ -43,10 +61,66 @@ type InitOptions = {
   scope?: InstallScope;
   language?: string;
   installMode?: InstallMode;
+  workflow?: InitWorkflowSelection;
+  artifactRoot?: string;
 };
 
+function workflowChoiceNames(lang: string): Array<{
+  name: string;
+  value: InitWorkflowSelection;
+}> {
+  if (lang === 'zh') {
+    return [
+      {
+        name: 'Native — 面向强模型的轻量自主流程，自带澄清、状态、检查与自动推进，不依赖外部 Skill',
+        value: 'native',
+      },
+      {
+        name: 'Classic — 面向高约束或较弱模型的完整 Spec/TDD 阶段流程，使用 OpenSpec 与 Superpowers',
+        value: 'classic',
+      },
+      {
+        name: '两者 — 同时安装两套独立入口；/comet 默认使用 Native，也可显式进入 Classic',
+        value: 'both',
+      },
+    ];
+  }
+  return [
+    {
+      name: 'Native — lightweight autonomy for strong models, with clarification, state, checks, and auto-progression; no external skills',
+      value: 'native',
+    },
+    {
+      name: 'Classic — full Spec/TDD phases for high-control work or weaker models, using OpenSpec and Superpowers',
+      value: 'classic',
+    },
+    {
+      name: 'Both — install two independent entries; /comet defaults to Native and Classic remains explicit',
+      value: 'both',
+    },
+  ];
+}
+
+async function selectWorkflow(
+  options: InitOptions,
+  lang: string,
+  suggested: CometWorkflow,
+): Promise<InitWorkflowSelection> {
+  if (options.workflow) return options.workflow;
+  if (options.yes || options.json) return suggested;
+  return select({
+    message: lang === 'zh' ? '选择要初始化的 Comet 模式：' : 'Select Comet workflow(s):',
+    choices: workflowChoiceNames(lang),
+    default: suggested,
+  });
+}
+
+function includesWorkflow(selection: InitWorkflowSelection, workflow: CometWorkflow): boolean {
+  return selection === 'both' || selection === workflow;
+}
+
 type InstallStatus = 'installed' | 'skipped' | 'failed';
-type ComponentAction = 'overwrite' | 'skip' | 'install';
+type ComponentAction = 'overwrite' | 'skip' | 'install' | 'reuse';
 type BulkOverwriteChoice = 'overwrite-all' | 'skip-all' | 'choose';
 
 interface PlatformResult {
@@ -55,6 +129,14 @@ interface PlatformResult {
   superpowers: InstallStatus;
   comet: InstallStatus;
   codegraph: InstallStatus;
+  failures: InitFailureDetail[];
+}
+
+interface InitFailureDetail {
+  platform: string;
+  platformName: string;
+  component: 'OpenSpec' | 'Superpowers' | 'Comet' | 'Rule' | 'Hook' | 'CodeGraph' | 'Finalization';
+  reason: string;
 }
 
 type ComponentPlan = {
@@ -65,7 +147,7 @@ type ComponentPlan = {
 
 async function selectScope(options: InitOptions, lang: string): Promise<InstallScope> {
   if (options.scope) return options.scope;
-  if (options.yes) return 'project';
+  if (options.yes || options.json) return 'project';
 
   return select({
     message: t(lang, 'installScope'),
@@ -80,7 +162,7 @@ async function selectLanguage(options: InitOptions): Promise<LanguageConfig> {
   if (options.language) {
     return LANGUAGES.find((l) => l.id === options.language) ?? LANGUAGES[0];
   }
-  if (options.yes) return LANGUAGES[0];
+  if (options.yes || options.json) return LANGUAGES[0];
 
   const langId = await select({
     message: t('en', 'languagePrompt'),
@@ -92,7 +174,7 @@ async function selectLanguage(options: InitOptions): Promise<LanguageConfig> {
 
 async function selectInstallMode(options: InitOptions, lang: string): Promise<InstallMode> {
   if (options.installMode) return options.installMode;
-  if (options.yes) return 'copy';
+  if (options.yes || options.json) return 'copy';
 
   return select({
     message: t(lang, 'installMode'),
@@ -115,7 +197,7 @@ async function selectPlatforms(
     checked: detected.has(p.id),
   }));
 
-  if (options.yes) {
+  if (options.yes || options.json) {
     const selected = [...detected];
     return selected.length > 0 ? selected : PLATFORMS.map((p) => p.id);
   }
@@ -182,8 +264,14 @@ function resolveAction(
   if (!hasExisting) return 'install';
   if (options.overwrite) return 'overwrite';
   if (options.skipExisting) return 'skip';
-  if (options.yes) return 'skip';
+  if (options.yes || options.json) return 'skip';
   return 'install';
+}
+
+function resolveCometAction(hasExisting: boolean, options: InitOptions): ComponentAction {
+  if (hasExisting && (options.yes || options.json) && !options.overwrite && !options.skipExisting)
+    return 'reuse';
+  return resolveAction(hasExisting, options);
 }
 
 type NpmDepId = 'openspec' | 'superpowers' | 'codegraph';
@@ -198,7 +286,10 @@ async function selectNpmDeps(
   spPlatformIds: string[],
   options: InitOptions,
   lang: string,
+  workflow: CometWorkflow,
 ): Promise<Set<NpmDepId>> {
+  if (workflow === 'native') return new Set();
+
   const openSpecInstalled = isCommandAvailable('openspec');
   const codegraphInstalled =
     hasCodegraphProjectIndex(projectPath) || resolveCodegraphCommand() !== null;
@@ -240,7 +331,7 @@ async function selectNpmDeps(
     return choice;
   });
 
-  if (options.yes) {
+  if (options.yes || options.json) {
     return new Set(states.filter((s) => !s.installed).map((s) => s.id));
   }
 
@@ -278,7 +369,13 @@ function isAllSkipped(r: PlatformResult): boolean {
   );
 }
 
-function displaySummary(results: PlatformResult[], scope: InstallScope, lang: string): void {
+function displaySummary(
+  results: PlatformResult[],
+  scope: InstallScope,
+  lang: string,
+  workflowSelection: InitWorkflowSelection,
+  nativeArtifactRoot: string | null,
+): void {
   const scopeLabel = scope === 'global' ? os.homedir() : 'project';
   const componentStatuses: Array<[keyof Omit<PlatformResult, 'platform'>, string]> = [
     ['openspec', 'OpenSpec'],
@@ -292,13 +389,16 @@ function displaySummary(results: PlatformResult[], scope: InstallScope, lang: st
       .map(([, label]) => `${label} ${t(lang, 'failedStatus')}`)
       .join(', ');
 
-  console.log(`\n  ${t(lang, 'setupComplete')} (scope: ${scopeLabel})\n`);
-
   // A platform with both installed and failed components is shown as failed,
   // not both. Use priority: failed > installed > skipped.
   const failed = results.filter(hasFailure);
   const installed = results.filter((r) => !hasFailure(r) && hasInstall(r));
   const skipped = results.filter(isAllSkipped);
+  const failures = results.flatMap((result) => result.failures);
+
+  console.log(
+    `\n  ${failures.length > 0 ? (lang === 'zh' ? 'Comet 设置未完成。' : 'Comet setup incomplete.') : t(lang, 'setupComplete')} (scope: ${scopeLabel})\n`,
+  );
 
   if (installed.length > 0) {
     console.log(`  ${t(lang, 'installed')}`);
@@ -313,20 +413,44 @@ function displaySummary(results: PlatformResult[], scope: InstallScope, lang: st
     console.log(`  ${t(lang, 'failedLabel')}`);
     for (const r of failed) {
       console.log(`    ${r.platform.name} (${failedDetails(r)})`);
+      for (const failure of r.failures) {
+        console.log(`      ${failure.component}: ${failure.reason}`);
+      }
     }
   }
 
-  if (scope === 'project') {
+  const showNativeWorkspace =
+    scope === 'project' &&
+    includesWorkflow(workflowSelection, 'native') &&
+    nativeArtifactRoot !== null;
+  const showClassicWorkspace =
+    scope === 'project' && includesWorkflow(workflowSelection, 'classic');
+  if (showNativeWorkspace || showClassicWorkspace) {
     console.log(`\n  ${t(lang, 'workingDirs')}`);
+    if (showNativeWorkspace) {
+      const root = nativeArtifactRoot === '.' ? '' : `${nativeArtifactRoot}/`;
+      console.log(`    ${t(lang, 'nativeWorkingDir')} ${root}comet/`);
+    }
+    if (showClassicWorkspace) {
+      console.log(`    ${t(lang, 'classicWorkingDirs')}`);
+    }
   }
 
-  console.log(`\n  ${t(lang, 'getStarted')}`);
-  console.log(`    ${t(lang, 'getStartedComet')}`);
-  console.log(`    ${t(lang, 'getStartedHotfix')}`);
-  console.log(`    ${t(lang, 'getStartedTweak')}\n`);
+  if (failures.length === 0) {
+    console.log(`\n  ${t(lang, 'getStarted')}`);
+    console.log(`    ${t(lang, 'getStartedComet')}`);
+    if (includesWorkflow(workflowSelection, 'classic')) {
+      console.log(`    ${t(lang, 'getStartedHotfix')}`);
+      console.log(`    ${t(lang, 'getStartedTweak')}`);
+    }
+  }
+  console.log();
 }
 
-export async function initCommand(targetPath: string, options: InitOptions = {}): Promise<void> {
+export async function initCommand(
+  targetPath: string,
+  options: InitOptions = {},
+): Promise<CommandExecutionResult> {
   const projectPath = path.resolve(targetPath);
   const log = options.json ? () => undefined : console.log;
 
@@ -342,7 +466,39 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
 
   const detected = await detectPlatforms(projectPath);
   const scope = await selectScope(options, lang);
-  const installMode = await selectInstallMode(options, lang);
+  if (
+    scope === 'global' &&
+    (options.workflow !== undefined || options.artifactRoot !== undefined)
+  ) {
+    throw new Error('--workflow and --root are only valid for project-scope initialization');
+  }
+  if (scope === 'project') {
+    await readProjectRegistry({ strict: true });
+  }
+  const suggestedWorkflowDecision =
+    scope === 'project'
+      ? await resolveInitWorkflow(projectPath, {
+          workflow: options.workflow === 'both' ? 'native' : options.workflow,
+          artifactRoot: options.artifactRoot,
+        })
+      : null;
+  const workflowSelection =
+    scope === 'project'
+      ? await selectWorkflow(options, lang, suggestedWorkflowDecision?.workflow ?? 'native')
+      : 'classic';
+  const workflow: CometWorkflow = workflowSelection === 'both' ? 'native' : workflowSelection;
+  const workflowDecision =
+    scope === 'project'
+      ? options.workflow === undefined && (options.yes || options.json)
+        ? suggestedWorkflowDecision
+        : await resolveInitWorkflow(projectPath, {
+            workflow,
+            artifactRoot: options.artifactRoot,
+          })
+      : null;
+  const workflowSource = workflowDecision?.source ?? 'global-install';
+  const installMode =
+    workflowSelection === 'native' ? 'copy' : await selectInstallMode(options, lang);
 
   const selectedPlatformIds = await selectPlatforms(detected, options, lang);
   if (selectedPlatformIds.length === 0) {
@@ -353,17 +509,27 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
             projectPath,
             scope,
             language: language.id,
+            workflow,
+            initializedWorkflows:
+              workflowSelection === 'both' ? ['native', 'classic'] : [workflowSelection],
+            workflowSource,
+            projectConfigCreated: false,
+            projectConfigUpdated: false,
+            nativeArtifactRoot: null,
             selectedPlatforms: [],
+            status: 'incomplete',
+            failures: [{ component: 'Comet', reason: 'no platforms selected' }],
             results: [],
+            workingDirsCreated: false,
           },
           null,
           2,
         ),
       );
-      return;
+      return { status: 'incomplete' };
     }
     log(`\n  ${t(lang, 'noPlatforms')}\n`);
-    return;
+    return { status: 'incomplete' };
   }
 
   const selectedPlatforms = PLATFORMS.filter((p) => selectedPlatformIds.includes(p.id));
@@ -379,15 +545,37 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
   const plans: PlatformPlan[] = [];
 
   for (const platform of selectedPlatforms) {
-    const hasOS = await hasSkills(baseDir, platform, 'openspec', selectedPlatforms, scope);
-    const hasSP = await hasSkills(baseDir, platform, 'superpowers', selectedPlatforms, scope);
-    const hasCM = await hasSkills(baseDir, platform, 'comet', selectedPlatforms, scope);
+    const hasOS = includesWorkflow(workflowSelection, 'classic')
+      ? await hasSkills(baseDir, platform, 'openspec', selectedPlatforms, scope)
+      : false;
+    const hasSP = includesWorkflow(workflowSelection, 'classic')
+      ? await hasSkills(baseDir, platform, 'superpowers', selectedPlatforms, scope)
+      : false;
+    const hasCM = await hasSkills(baseDir, platform, 'comet', selectedPlatforms, scope, {
+      includeGlobalFallback: false,
+    });
 
-    let osAction = resolveAction(hasOS, options);
-    let spAction = resolveAction(hasSP, options);
-    let cmAction = resolveAction(hasCM, options);
+    let osAction = includesWorkflow(workflowSelection, 'classic')
+      ? resolveAction(hasOS, options)
+      : 'skip';
+    let spAction = includesWorkflow(workflowSelection, 'classic')
+      ? resolveAction(hasSP, options)
+      : 'skip';
+    let cmAction =
+      workflowSelection === 'classic'
+        ? resolveCometAction(hasCM, options)
+        : resolveAction(hasCM, options);
+    if (
+      includesWorkflow(workflowSelection, 'native') &&
+      hasCM &&
+      (options.yes || options.json) &&
+      !options.skipExisting &&
+      !options.overwrite
+    ) {
+      cmAction = 'install';
+    }
 
-    if (!options.yes) {
+    if (!options.yes && !options.json) {
       const existingComponents = [
         hasOS && osAction === 'install' ? 'OpenSpec' : null,
         hasSP && spAction === 'install' ? 'Superpowers' : null,
@@ -419,6 +607,20 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
     plans.push({ platform, osAction, spAction, cmAction, hasOS, hasSP, hasCM });
   }
 
+  if (includesWorkflow(workflowSelection, 'native') && scope === 'project') {
+    for (const plan of plans) {
+      const action =
+        plan.cmAction === 'overwrite' ? 'overwrite' : plan.cmAction === 'install' ? 'fill' : 'skip';
+      await prepareNativeSkillInstallTarget(
+        baseDir,
+        plan.platform,
+        scope,
+        language.skillsDir,
+        action,
+      );
+    }
+  }
+
   const osToolIds = Array.from(
     new Set(plans.filter((p) => p.osAction !== 'skip').map((p) => p.platform.openspecToolId)),
   );
@@ -434,7 +636,13 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
     ['zcode', 'mimocode'].includes(id),
   );
 
-  const selectedNpmDeps = await selectNpmDeps(projectPath, spPlatformIds, options, lang);
+  const selectedNpmDeps = await selectNpmDeps(
+    projectPath,
+    spPlatformIds,
+    options,
+    lang,
+    includesWorkflow(workflowSelection, 'classic') ? 'classic' : 'native',
+  );
   const shouldInstallOpenSpecCli = selectedNpmDeps.has('openspec');
   const shouldInstallSuperpowers = selectedNpmDeps.has('superpowers');
   const shouldInstallCodegraphCli = selectedNpmDeps.has('codegraph');
@@ -478,6 +686,7 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
   }
 
   const results: PlatformResult[] = [];
+  let projectRouterInstalled = false;
 
   for (const plan of plans) {
     const { platform, cmAction } = plan;
@@ -488,6 +697,9 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
         : `${scope === 'global' ? '~/' : ''}${platformSkillsDir}/skills/`;
 
     let cmStatus: InstallStatus = 'skipped';
+    const platformFailures: InitFailureDetail[] = [];
+    let cometComponentInstalled = false;
+    let skillFailed = false;
     if (cmAction !== 'skip') {
       const { copied, failed } = await copyCometSkillsForPlatform(
         baseDir,
@@ -496,37 +708,119 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
         language.skillsDir,
         scope,
         installMode,
+        workflowSelection,
       );
+      skillFailed = failed > 0;
       cmStatus = failed > 0 ? 'failed' : copied > 0 ? 'installed' : 'skipped';
-      log(
-        `  Comet -> ${platform.name}: ${cmStatus} (${copied} files${
-          failed > 0 ? `, ${failed} failed` : ''
-        }) -> ${skillsPath}`,
-      );
+      cometComponentInstalled = copied > 0;
+      if (failed > 0) {
+        platformFailures.push({
+          platform: platform.id,
+          platformName: platform.name,
+          component: 'Comet',
+          reason: `${failed} Skill file(s) failed to install`,
+        });
+      }
+      if (cmAction === 'reuse' && copied === 0 && failed === 0) {
+        log(`  Comet -> ${platform.name}: reused (${t(lang, 'alreadyExists')})`);
+      } else {
+        log(
+          `  Comet -> ${platform.name}: ${cmStatus} (${copied} files${
+            failed > 0 ? `, ${failed} failed` : ''
+          }) -> ${skillsPath}`,
+        );
+      }
     } else {
       log(`  Comet -> ${platform.name}: skipped (${t(lang, 'alreadyExists')})`);
     }
 
-    if (cmAction !== 'skip') {
-      const { copied: ruleCopied } = await copyCometRulesForPlatform(
-        baseDir,
-        platform,
-        cmAction === 'overwrite',
-        language.id,
-        scope,
-      );
-      if (ruleCopied > 0) {
-        log(`  Comet rules -> ${platform.name}: ${ruleCopied} ${t(lang, 'rulesInstalled')}`);
+    if (cmAction !== 'skip' && !skillFailed) {
+      try {
+        const { copied: ruleCopied, failed: ruleFailed } = await copyCometRulesForPlatform(
+          baseDir,
+          platform,
+          cmAction === 'overwrite',
+          language.id,
+          scope,
+          workflowSelection,
+        );
+        cometComponentInstalled ||= ruleCopied > 0;
+        if (ruleCopied > 0) {
+          log(`  Comet rules -> ${platform.name}: ${ruleCopied} ${t(lang, 'rulesInstalled')}`);
+        }
+        if (ruleFailed > 0) {
+          cmStatus = 'failed';
+          platformFailures.push({
+            platform: platform.id,
+            platformName: platform.name,
+            component: 'Rule',
+            reason: `${ruleFailed} Rule file(s) failed to install`,
+          });
+          log(`  Comet rules -> ${platform.name}: ${t(lang, 'rulesFailed')} (${ruleFailed})`);
+        }
+      } catch (err) {
+        cmStatus = 'failed';
+        platformFailures.push({
+          platform: platform.id,
+          platformName: platform.name,
+          component: 'Rule',
+          reason: (err as Error).message,
+        });
+        log(
+          `  Comet rules -> ${platform.name}: ${t(lang, 'rulesFailed')} (${(err as Error).message})`,
+        );
       }
     }
 
-    if (cmAction !== 'skip' && platform.supportsHooks) {
-      const { installed, reason } = await installCometHooksForPlatform(baseDir, platform, scope);
-      if (installed) {
-        log(`  Comet hooks -> ${platform.name}: ${t(lang, 'hooksInstalled')}`);
-      } else if (reason) {
-        log(`  Comet hooks -> ${platform.name}: ${t(lang, 'hooksSkipped')} (${reason})`);
+    if (cmAction !== 'skip' && !skillFailed) {
+      try {
+        const {
+          status,
+          reason,
+          cleanupFailed = 0,
+        } = await installCometHooksForPlatform(baseDir, platform, scope, workflowSelection);
+        cometComponentInstalled ||= status === 'installed';
+        if (status === 'installed') {
+          if (scope === 'project') projectRouterInstalled = true;
+          log(`  Comet hooks -> ${platform.name}: ${t(lang, 'hooksInstalled')}`);
+          if (cleanupFailed > 0) {
+            cmStatus = 'failed';
+            platformFailures.push({
+              platform: platform.id,
+              platformName: platform.name,
+              component: 'Hook',
+              reason: reason ?? `legacy Hook cleanup failed (${cleanupFailed})`,
+            });
+            log(`  Comet hooks -> ${platform.name}: ${reason}`);
+          }
+        } else if (status === 'failed') {
+          cmStatus = 'failed';
+          platformFailures.push({
+            platform: platform.id,
+            platformName: platform.name,
+            component: 'Hook',
+            reason: reason ?? 'Hook installation failed',
+          });
+          log(`  Comet hooks -> ${platform.name}: ${t(lang, 'hooksFailed')} (${reason})`);
+        } else if (reason && platform.supportsHooks) {
+          log(`  Comet hooks -> ${platform.name}: ${t(lang, 'hooksSkipped')} (${reason})`);
+        }
+      } catch (err) {
+        cmStatus = 'failed';
+        platformFailures.push({
+          platform: platform.id,
+          platformName: platform.name,
+          component: 'Hook',
+          reason: (err as Error).message,
+        });
+        log(
+          `  Comet hooks -> ${platform.name}: ${t(lang, 'hooksFailed')} (${(err as Error).message})`,
+        );
       }
+    }
+
+    if (cmAction !== 'skip' && cmStatus !== 'failed') {
+      cmStatus = cometComponentInstalled ? 'installed' : 'skipped';
     }
 
     results.push({
@@ -535,6 +829,29 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
       superpowers: plan.spAction !== 'skip' ? spGlobalStatus : 'skipped',
       comet: cmStatus,
       codegraph: 'skipped',
+      failures: [
+        ...(osToolIds.includes(platform.openspecToolId) && osGlobalStatus === 'failed'
+          ? [
+              {
+                platform: platform.id,
+                platformName: platform.name,
+                component: 'OpenSpec' as const,
+                reason: 'OpenSpec installation failed; see the preceding diagnostic for details',
+              },
+            ]
+          : []),
+        ...(plan.spAction !== 'skip' && spGlobalStatus === 'failed'
+          ? [
+              {
+                platform: platform.id,
+                platformName: platform.name,
+                component: 'Superpowers' as const,
+                reason: 'Superpowers installation failed; see the preceding diagnostic for details',
+              },
+            ]
+          : []),
+        ...platformFailures,
+      ],
     });
   }
 
@@ -552,6 +869,14 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
     log(`  CodeGraph: ${cgGlobalStatus}`);
     for (const r of results) {
       r.codegraph = cgGlobalStatus;
+      if (cgGlobalStatus === 'failed') {
+        r.failures.push({
+          platform: r.platform.id,
+          platformName: r.platform.name,
+          component: 'CodeGraph',
+          reason: 'CodeGraph installation failed; see the preceding diagnostic for details',
+        });
+      }
     }
   } else if (!options.json && codegraphAlreadyIndexed) {
     log('\n  CodeGraph: skipped (existing .codegraph index detected)');
@@ -559,30 +884,127 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
     log(`\n  CodeGraph: ${t(lang, 'cgSkippedByUser')}`);
   }
 
-  if (scope === 'project') {
-    await createWorkingDirs(projectPath, language.artifactLanguage);
-    const projectTargets = await detectInstalledCometTargets(projectPath, { scopes: ['project'] });
-    if (projectTargets.length > 0) {
-      await upsertProjectInstallation(
-        projectPath,
-        projectTargets.map((target) => ({
-          platform: target.platform.id,
-          language: target.language,
-        })),
-        'init',
-      );
+  let projectConfigCreated = false;
+  let projectConfigUpdated = false;
+  let nativeArtifactRoot: string | null = null;
+  let workingDirsCreated = false;
+  let finalizationFailure: string | undefined;
+  const cometInstallComplete =
+    results.length > 0 && results.every((result) => result.comet !== 'failed');
+
+  if (
+    scope === 'project' &&
+    projectRouterInstalled &&
+    cometInstallComplete &&
+    includesWorkflow(workflowSelection, 'classic')
+  ) {
+    if (await migrateLegacyClassicSelection(projectPath)) {
+      log('  Comet current selection -> migrated Classic v1 to shared v2');
     }
-  } else {
-    await mergeProjectConfig(baseDir, language.artifactLanguage);
   }
+
+  try {
+    if (scope === 'project' && workflowDecision && cometInstallComplete) {
+      if (includesWorkflow(workflowSelection, 'native')) {
+        const paths = await nativeProjectPaths(projectPath, workflowDecision.artifactRoot);
+        await ensureNativeDirectories(paths);
+        nativeArtifactRoot = workflowDecision.artifactRoot;
+      }
+      if (includesWorkflow(workflowSelection, 'classic')) {
+        await createWorkingDirs(projectPath, language.artifactLanguage);
+      }
+      workingDirsCreated = true;
+
+      if (includesWorkflow(workflowSelection, 'native')) {
+        await installCometProjectInstructions(projectPath, language.id);
+      }
+
+      const projectTargets = await detectInstalledCometTargets(projectPath, {
+        scopes: ['project'],
+      });
+      const successfulCometPlatforms = new Set(
+        results
+          .filter(
+            (result) =>
+              result.comet !== 'failed' &&
+              plans.some(
+                (plan) => plan.platform.id === result.platform.id && plan.cmAction !== 'skip',
+              ),
+          )
+          .map((result) => result.platform.id),
+      );
+      const completeProjectTargets = projectTargets.filter((target) =>
+        successfulCometPlatforms.has(target.platform.id),
+      );
+      if (completeProjectTargets.length > 0) {
+        await upsertProjectInstallation(
+          projectPath,
+          completeProjectTargets.map((target) => ({
+            platform: target.platform.id,
+            language: target.language,
+          })),
+          'init',
+        );
+      }
+
+      // The project config activates the selected workflow. Commit it only after
+      // every required project artifact has been written successfully so a
+      // partial initialization cannot route later commands into Native.
+      const existing = await readProjectConfig(projectPath);
+      const selectedWorkflows =
+        workflowSelection === 'both' ? (['native', 'classic'] as const) : [workflowSelection];
+      const configuredWorkflows =
+        existing?.workflows ?? (existing ? [existing.default_workflow] : []);
+      const workflowsChanged =
+        configuredWorkflows.length !== selectedWorkflows.length ||
+        selectedWorkflows.some((selected) => !configuredWorkflows.includes(selected));
+      if (workflowDecision.writeProjectConfig || (existing !== null && workflowsChanged)) {
+        const config =
+          existing ??
+          defaultProjectConfig(workflowDecision.artifactRoot, language.artifactLanguage);
+        config.default_workflow = workflowDecision.workflow;
+        config.workflows = [...selectedWorkflows];
+        await writeProjectConfig(projectPath, config);
+        projectConfigCreated = existing === null;
+        projectConfigUpdated = existing !== null;
+      }
+    } else if (scope === 'global') {
+      await mergeProjectConfig(baseDir, language.artifactLanguage);
+    }
+  } catch (error) {
+    finalizationFailure = (error as Error).message;
+    const target = results[0];
+    if (target) {
+      target.comet = 'failed';
+      target.failures.push({
+        platform: target.platform.id,
+        platformName: target.platform.name,
+        component: 'Finalization',
+        reason: finalizationFailure,
+      });
+    }
+    log(`  Comet finalization failed: ${finalizationFailure}`);
+  }
+
+  const failures = results.flatMap((result) => result.failures);
+  const completionStatus = failures.length > 0 || finalizationFailure ? 'incomplete' : 'complete';
 
   if (options.json) {
     console.log(
       JSON.stringify(
         {
+          status: completionStatus,
+          failures,
           projectPath,
           scope,
           language: language.id,
+          workflow,
+          initializedWorkflows:
+            workflowSelection === 'both' ? ['native', 'classic'] : [workflowSelection],
+          workflowSource,
+          projectConfigCreated,
+          projectConfigUpdated,
+          nativeArtifactRoot,
           selectedPlatforms: selectedPlatformIds,
           results: results.map((result) => ({
             platform: result.platform.id,
@@ -592,17 +1014,18 @@ export async function initCommand(targetPath: string, options: InitOptions = {})
             comet: result.comet,
             codegraph: result.codegraph,
           })),
-          workingDirsCreated: scope === 'project',
+          workingDirsCreated,
         },
         null,
         2,
       ),
     );
-    return;
+    return { status: completionStatus };
   }
 
-  displaySummary(results, scope, lang);
+  displaySummary(results, scope, lang, workflowSelection, nativeArtifactRoot);
+  return { status: completionStatus };
 }
 
-export { applyBulkOverwriteChoice };
+export { applyBulkOverwriteChoice, workflowChoiceNames };
 export type { TranslationKey };

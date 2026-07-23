@@ -1,9 +1,14 @@
 import { existsSync, promises as fs, readFileSync } from 'fs';
 import path from 'path';
+import type { CometHookDecision, CometHookRequest } from '../comet-entry/hook-types.js';
 import type { ClassicCommandHandler, ClassicCommandResult } from './classic-cli.js';
+import {
+  driftStaleReason,
+  resolveBranchBinding,
+  unboundDetachedMessage,
+} from './classic-branch-binding.js';
 import { resolveCurrentChange } from './classic-current-change.js';
-import { ensureStrictClassicRuntimeRun } from './classic-runtime-run.js';
-import { readLegacyState } from './classic-store.js';
+import { readClassicState, readLegacyState } from './classic-store.js';
 import type { ClassicPhase, ClassicState } from './classic-state.js';
 
 function result(exitCode: number, message: string): ClassicCommandResult {
@@ -29,6 +34,11 @@ function inputTarget(): string {
 
 function normalized(value: string): string {
   return value.replaceAll('\\', '/').replace(/\/+/gu, '/');
+}
+
+function comparisonKey(value: string): string {
+  const normalizedValue = normalized(value);
+  return process.platform === 'win32' ? normalizedValue.toLowerCase() : normalizedValue;
 }
 
 function parseProjectRoot(args: string[]): string {
@@ -96,6 +106,7 @@ interface GoverningChange {
   classic: ClassicState | null;
   archived: boolean;
   superpowersArtifact?: 'matched' | 'unmatched';
+  superpowersSlot?: SuperpowersArtifactSlot;
 }
 
 interface GoverningBlock {
@@ -106,12 +117,17 @@ type GoverningResolution = GoverningChange | GoverningBlock | null;
 
 async function loadGoverningChange(changeDir: string): Promise<GoverningChange | null> {
   try {
-    const runtime = await ensureStrictClassicRuntimeRun(changeDir);
+    const projection = await readClassicState(changeDir, { migrate: false });
+    const unknownKeys = Array.from(new Set(projection.unknownKeys)).sort();
+    if (unknownKeys.length > 0) {
+      throw new Error(`Invalid Classic state: unknown field(s): ${unknownKeys.join(', ')}`);
+    }
+    if (!projection.classic) throw new Error('Classic state projection is unavailable');
     return {
       changeDir,
-      phase: runtime.classic.phase,
-      classic: runtime.classic,
-      archived: runtime.classic.archived,
+      phase: projection.classic.phase,
+      classic: projection.classic,
+      archived: projection.classic.archived,
     };
   } catch {
     // Legacy/partial state without the required Classic fields: fall back to a
@@ -145,8 +161,81 @@ async function activeChanges(projectRoot: string): Promise<GoverningChange[]> {
   return governingChanges;
 }
 
+export interface ActiveClassicHookChange {
+  workflow: 'classic';
+  name: string;
+  phase: ClassicPhase;
+}
+
+export async function listActiveClassicHookChanges(
+  projectRoot: string,
+): Promise<ActiveClassicHookChange[]> {
+  return (await activeChanges(projectRoot)).map((change) => ({
+    workflow: 'classic',
+    name: governingChangeName(change)!,
+    phase: change.phase,
+  }));
+}
+
 function isSuperpowersArtifactPath(relativePath: string): boolean {
-  return relativePath.startsWith('docs/superpowers/');
+  return comparisonKey(relativePath).startsWith('docs/superpowers/');
+}
+
+type SuperpowersArtifactField = 'designDoc' | 'plan' | 'verificationReport';
+
+interface SuperpowersArtifactSlot {
+  prefix: string;
+  field: SuperpowersArtifactField;
+  wireField: 'design_doc' | 'plan' | 'verification_report';
+  phase: 'design' | 'build' | 'verify';
+}
+
+const SUPERPOWERS_ARTIFACT_SLOTS: readonly SuperpowersArtifactSlot[] = [
+  {
+    prefix: 'docs/superpowers/specs/',
+    field: 'designDoc',
+    wireField: 'design_doc',
+    phase: 'design',
+  },
+  {
+    prefix: 'docs/superpowers/plans/',
+    field: 'plan',
+    wireField: 'plan',
+    phase: 'build',
+  },
+  {
+    prefix: 'docs/superpowers/reports/',
+    field: 'verificationReport',
+    wireField: 'verification_report',
+    phase: 'verify',
+  },
+];
+
+function standardSuperpowersArtifactSlot(relativePath: string): SuperpowersArtifactSlot | null {
+  const key = comparisonKey(relativePath);
+  const slot = SUPERPOWERS_ARTIFACT_SLOTS.find((candidate) => key.startsWith(candidate.prefix));
+  if (!slot) return null;
+  const fileName = key.slice(slot.prefix.length);
+  if (!fileName || fileName.includes('/') || !fileName.endsWith('.md')) return null;
+  return slot;
+}
+
+function superpowersArtifactValue(
+  governing: GoverningChange,
+  slot: SuperpowersArtifactSlot,
+): string | null {
+  return governing.classic?.[slot.field] ?? null;
+}
+
+function allowsFirstSuperpowersArtifactWrite(
+  governing: GoverningChange,
+  slot: SuperpowersArtifactSlot,
+): boolean {
+  return (
+    governing.classic !== null &&
+    governing.phase === slot.phase &&
+    !superpowersArtifactValue(governing, slot)
+  );
 }
 
 function allowsSuperpowersArtifacts(governing: GoverningChange): boolean {
@@ -182,7 +271,7 @@ function matchesRecordedSuperpowersArtifact(
     governing.classic?.verificationReport,
   ];
   return artifactPaths.some(
-    (artifactPath) => artifactPath && normalized(artifactPath) === relativePath,
+    (artifactPath) => artifactPath && comparisonKey(artifactPath) === comparisonKey(relativePath),
   );
 }
 
@@ -199,12 +288,12 @@ function matchesSuperpowersArtifactName(relativePath: string, changeName: string
 async function superpowersArtifactGoverningChange(
   relativePath: string,
   projectRoot: string,
-): Promise<GoverningChange | null> {
+): Promise<{ governing: GoverningChange; match: 'recorded' | 'named' } | null> {
   const active = await activeChanges(projectRoot);
   const recorded = active.find((governing) =>
     matchesRecordedSuperpowersArtifact(relativePath, governing),
   );
-  if (recorded) return recorded;
+  if (recorded) return { governing: recorded, match: 'recorded' };
 
   const eligible = active.filter(allowsSuperpowersArtifacts);
   const named = eligible
@@ -215,7 +304,7 @@ async function superpowersArtifactGoverningChange(
     .sort(
       (a, b) => (governingChangeName(b)?.length ?? 0) - (governingChangeName(a)?.length ?? 0),
     )[0];
-  if (named) return named;
+  if (named) return { governing: named, match: 'named' };
 
   return null;
 }
@@ -223,9 +312,24 @@ async function superpowersArtifactGoverningChange(
 async function repoSourceGoverningChange(
   projectRoot: string,
   relativePath: string,
+  selectedChangeName?: string,
 ): Promise<GoverningResolution> {
   const active = await activeChanges(projectRoot);
   if (active.length === 0) return null;
+
+  if (selectedChangeName) {
+    const selected = active.find(
+      (governing) => governingChangeName(governing) === selectedChangeName,
+    );
+    return (
+      selected ?? {
+        blockedResult: blockedStaleSelection(
+          relativePath,
+          `selected change '${selectedChangeName}' is no longer active`,
+        ),
+      }
+    );
+  }
 
   const current = await resolveCurrentChange(projectRoot);
   if (current.status === 'stale') {
@@ -243,7 +347,33 @@ async function repoSourceGoverningChange(
       ),
     };
   }
-  if (active.length === 1) return active[0];
+  if (active.length === 1) {
+    // No selection file exists, so the drift check inside
+    // resolveCurrentChange never ran — enforce the branch binding here
+    // (read-only) before letting the sole active change govern the write.
+    const sole = active[0];
+    if (sole.changeDir !== null) {
+      const outcome = await resolveBranchBinding(sole.changeDir, {
+        heal: false,
+        cwd: projectRoot,
+      });
+      const name = governingChangeName(sole) ?? 'unknown';
+      if (outcome.status === 'drift') {
+        return {
+          blockedResult: blockedStaleSelection(
+            relativePath,
+            driftStaleReason(name, outcome.boundBranch, outcome.currentBranch),
+          ),
+        };
+      }
+      if (outcome.status === 'unbound-detached') {
+        return {
+          blockedResult: blockedStaleSelection(relativePath, unboundDetachedMessage(name)),
+        };
+      }
+    }
+    return sole;
+  }
   return {
     blockedResult: blockedMultipleChanges(
       relativePath,
@@ -255,6 +385,7 @@ async function repoSourceGoverningChange(
 async function governingChange(
   relativePath: string,
   projectRoot: string,
+  selectedChangeName?: string,
 ): Promise<GoverningResolution> {
   const prefix = 'openspec/changes/';
   if (relativePath.startsWith(prefix)) {
@@ -273,11 +404,45 @@ async function governingChange(
   }
   if (isSuperpowersArtifactPath(relativePath)) {
     const superpowers = await superpowersArtifactGoverningChange(relativePath, projectRoot);
-    if (superpowers) return { ...superpowers, superpowersArtifact: 'matched' };
-    const fallback = (await activeChanges(projectRoot))[0] ?? null;
+    if (superpowers?.match === 'recorded') {
+      return { ...superpowers.governing, superpowersArtifact: 'matched' };
+    }
+
+    const slot = standardSuperpowersArtifactSlot(relativePath);
+    if (superpowers) {
+      return slot
+        ? {
+            ...superpowers.governing,
+            superpowersArtifact: allowsFirstSuperpowersArtifactWrite(superpowers.governing, slot)
+              ? 'matched'
+              : 'unmatched',
+            superpowersSlot: slot,
+          }
+        : { ...superpowers.governing, superpowersArtifact: 'matched' };
+    }
+    if (slot) {
+      const candidate = await repoSourceGoverningChange(
+        projectRoot,
+        relativePath,
+        selectedChangeName,
+      );
+      if (!candidate || 'blockedResult' in candidate) return candidate;
+      return {
+        ...candidate,
+        superpowersArtifact: allowsFirstSuperpowersArtifactWrite(candidate, slot)
+          ? 'matched'
+          : 'unmatched',
+        superpowersSlot: slot,
+      };
+    }
+
+    const active = await activeChanges(projectRoot);
+    const fallback = selectedChangeName
+      ? (active.find((candidate) => governingChangeName(candidate) === selectedChangeName) ?? null)
+      : (active[0] ?? null);
     return fallback ? { ...fallback, superpowersArtifact: 'unmatched' } : null;
   }
-  return repoSourceGoverningChange(projectRoot, relativePath);
+  return repoSourceGoverningChange(projectRoot, relativePath, selectedChangeName);
 }
 
 function isRootMarkdown(relativePath: string): boolean {
@@ -335,7 +500,7 @@ function blocked(relativePath: string, phase: ClassicPhase): ClassicCommandResul
             '  BLOCKED: source writes are not allowed during design',
             '  This phase does not allow source writes',
             '  ALLOWED: run brainstorming, create the Design Doc, and run guard',
-            '  NEXT: finish the Design Doc, then run comet-guard design --apply to enter build',
+            '  NEXT: finish the Design Doc, then run comet guard <change-name> design --apply to enter build',
           ]
         : [
             '  BLOCKED: source writes are not allowed during archive',
@@ -381,8 +546,33 @@ function blockedMissingDesignDoc(relativePath: string): ClassicCommandResult {
 
 function blockedUnmatchedSuperpowersArtifact(
   relativePath: string,
-  phase: ClassicPhase,
+  governing: GoverningChange,
 ): ClassicCommandResult {
+  const slot = governing.superpowersSlot;
+  const recorded = slot ? superpowersArtifactValue(governing, slot) : null;
+  const details = slot
+    ? governing.phase !== slot.phase
+      ? [
+          `  BLOCKED: ${slot.wireField} cannot be first-written in phase ${governing.phase}`,
+          `  Expected phase: ${slot.phase}`,
+          '  NEXT: resume the matching Comet phase or use an already recorded artifact path',
+        ]
+      : recorded
+        ? [
+            `  BLOCKED: ${slot.wireField} is already recorded for this change`,
+            `  Recorded path: ${recorded}`,
+            '  NEXT: write the recorded artifact or explicitly correct the state path',
+          ]
+        : [
+            '  BLOCKED: standard Superpowers artifact state is incomplete',
+            '  NEXT: validate the active change state, then retry the matching phase',
+          ]
+    : [
+        '  BLOCKED: unmatched Superpowers artifact',
+        '  This docs/superpowers/ path does not match any active change artifact',
+        '  NEXT: use a recorded artifact path or a standard phase artifact directory',
+      ];
+
   return result(
     2,
     [
@@ -391,12 +581,10 @@ function blockedUnmatchedSuperpowersArtifact(
       '║     COMET PHASE GUARD — WRITE BLOCKED    ║',
       '╚══════════════════════════════════════════╝',
       '',
-      `  Current phase: ${phase}`,
+      `  Current phase: ${governing.phase}`,
       `  Target file: ${relativePath}`,
       '',
-      '  BLOCKED: unmatched Superpowers artifact',
-      '  This docs/superpowers/ path does not match any active change artifact',
-      '  NEXT: record the artifact path in .comet.yaml or include the change name in the artifact filename',
+      ...details,
       '',
     ].join('\n'),
   );
@@ -440,10 +628,11 @@ function blockedStaleSelection(relativePath: string, reason: string): ClassicCom
   );
 }
 
-export const classicHookGuardCommand: ClassicCommandHandler = async (args) => {
-  const projectRoot = parseProjectRoot(args);
-  const target = inputTarget();
-  if (!target) return allowed('no file path in tool input');
+async function inspectClassicHookTarget(
+  projectRoot: string,
+  target: string,
+  selectedChangeName?: string,
+): Promise<ClassicCommandResult> {
   const relativePath = await projectRelative(target, projectRoot);
 
   if (isCometConfig(relativePath)) {
@@ -466,7 +655,7 @@ export const classicHookGuardCommand: ClassicCommandHandler = async (args) => {
 
   let governing: GoverningResolution;
   try {
-    governing = await governingChange(relativePath, projectRoot);
+    governing = await governingChange(relativePath, projectRoot, selectedChangeName);
   } catch (error) {
     return result(
       2,
@@ -486,7 +675,7 @@ export const classicHookGuardCommand: ClassicCommandHandler = async (args) => {
       return allowed(`${relativePath} (phase: ${phase}, superpowers)`);
     }
     if (governing.superpowersArtifact === 'unmatched') {
-      return blockedUnmatchedSuperpowersArtifact(relativePath, phase);
+      return blockedUnmatchedSuperpowersArtifact(relativePath, governing);
     }
   }
   if (phase === 'build' && governing.classic?.workflow === 'full' && !governing.classic.designDoc) {
@@ -496,4 +685,73 @@ export const classicHookGuardCommand: ClassicCommandHandler = async (args) => {
     return allowed(`${relativePath} (phase: ${phase})`);
   }
   return blocked(relativePath, phase);
+}
+
+export async function inspectClassicHookGuard(
+  projectRoot: string,
+  changeName: string,
+  request: CometHookRequest,
+): Promise<CometHookDecision> {
+  const active = await activeChanges(projectRoot);
+  const selected = active.find((change) => governingChangeName(change) === changeName);
+  if (!selected) {
+    return {
+      allowed: false,
+      reason: `Selected Classic change ${changeName} is missing or archived; resume /comet-classic before retrying`,
+      workflow: 'classic',
+      change: changeName,
+    };
+  }
+  if (request.intent === 'non-write') {
+    return { allowed: true, reason: 'Hook event is not a write' };
+  }
+  if (request.intent === 'unknown' || request.targets.length === 0) {
+    if (
+      selected.phase === 'verify' ||
+      (selected.phase === 'build' &&
+        !(selected.classic?.workflow === 'full' && !selected.classic.designDoc))
+    ) {
+      return {
+        allowed: true,
+        reason: `Classic change is in ${selected.phase}`,
+        workflow: 'classic',
+        change: changeName,
+        phase: selected.phase,
+      };
+    }
+    return {
+      allowed: false,
+      reason: `Hook write target could not be determined while Classic change ${changeName} is in ${selected.phase}; resume /comet-classic before retrying`,
+      workflow: 'classic',
+      change: changeName,
+      phase: selected.phase,
+    };
+  }
+
+  for (const target of request.targets) {
+    const inspected = await inspectClassicHookTarget(projectRoot, target, changeName);
+    if (inspected.exitCode !== 0) {
+      return {
+        allowed: false,
+        reason: inspected.stderr?.trim() || 'Classic phase guard blocked the write',
+        workflow: 'classic',
+        change: changeName,
+        phase: selected.phase,
+      };
+    }
+  }
+  return {
+    allowed: true,
+    reason: `Classic write allowed in ${selected.phase}`,
+    workflow: 'classic',
+    change: changeName,
+    phase: selected.phase,
+  };
+}
+
+export const classicHookGuardCommand: ClassicCommandHandler = async (args) => {
+  const projectRoot = parseProjectRoot(args);
+  const target = inputTarget();
+  if (!target) return allowed('no file path in tool input');
+  return inspectClassicHookTarget(projectRoot, target);
 };

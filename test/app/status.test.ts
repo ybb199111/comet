@@ -5,6 +5,12 @@ import os from 'os';
 import path from 'path';
 import { statusCommand } from '../../app/commands/status.js';
 import { ensureClassicRuntimeRun } from '../../domains/comet-classic/classic-runtime-run.js';
+import { createNativeChange } from '../../domains/comet-native/native-change.js';
+import {
+  defaultProjectConfig,
+  writeProjectConfig,
+} from '../../domains/comet-native/native-config.js';
+import { nativeProjectPaths } from '../../domains/comet-native/native-paths.js';
 
 const stateScript = path.resolve('assets', 'skills', 'comet', 'scripts', 'comet-state.mjs');
 
@@ -31,6 +37,21 @@ async function snapshotChange(changeDir: string): Promise<{ files: string[]; yam
     files: files.sort(),
     yaml: await fs.readFile(path.join(changeDir, '.comet.yaml')),
   };
+}
+
+async function setCometYamlField(
+  changeDir: string,
+  field: string,
+  value: string | null,
+): Promise<void> {
+  const yamlPath = path.join(changeDir, '.comet.yaml');
+  const yaml = await fs.readFile(yamlPath, 'utf8');
+  const rendered = value === null ? 'null' : value;
+  const pattern = new RegExp(`^${field}:.*$`, 'mu');
+  const next = pattern.test(yaml)
+    ? yaml.replace(pattern, `${field}: ${rendered}`)
+    : `${yaml.trimEnd()}\n${field}: ${rendered}\n`;
+  await fs.writeFile(yamlPath, next);
 }
 
 describe('status command', () => {
@@ -83,7 +104,29 @@ describe('status command', () => {
       log.mockRestore();
     }
 
-    const changes = JSON.parse(json).changes;
+    const payload = JSON.parse(json);
+    expect(payload).toMatchObject({
+      schema: 'comet.status.v2',
+      defaultEntry: {
+        workflow: 'classic',
+        skill: 'comet-classic',
+        source: 'legacy-fallback',
+      },
+      workflows: {
+        native: { changes: [] },
+        classic: {
+          changes: [
+            expect.objectContaining({ name: 'b-invalid-comet' }),
+            expect.objectContaining({ name: 'z-comet-ready' }),
+          ],
+        },
+      },
+      unmanagedOpenSpec: [
+        expect.objectContaining({ name: 'a-open-complete' }),
+        expect.objectContaining({ name: 'c-open-incomplete' }),
+      ],
+    });
+    const changes = payload.changes;
     expect(changes.map((change: { name: string }) => change.name)).toEqual([
       'a-open-complete',
       'b-invalid-comet',
@@ -99,6 +142,7 @@ describe('status command', () => {
       phase: null,
       buildMode: null,
       isolation: null,
+      boundBranch: null,
       verifyMode: null,
       verifyResult: null,
       designDoc: null,
@@ -140,6 +184,9 @@ describe('status command', () => {
       tasksTotal: 1,
       commandChecks: null,
     });
+    expect(changes.every((change: { boundBranch?: unknown }) => 'boundBranch' in change)).toBe(
+      true,
+    );
   });
 
   it('includes latest build and verify command checks for a synchronized Comet Run', async () => {
@@ -269,6 +316,60 @@ describe('status command', () => {
     expect(output).toContain('next: /comet-build');
     expect(output).toContain('[1/2 tasks]');
     expect(output).toContain('run_step: full.build.plan');
+  });
+
+  it('prints branch-bound workspace modes with bound branch and omits bound suffix for null isolation', async () => {
+    const changesDir = path.join(tmpDir, 'openspec', 'changes');
+    state(tmpDir, 'init', 'current-bound', 'full');
+    await setCometYamlField(path.join(changesDir, 'current-bound'), 'isolation', 'current');
+    await setCometYamlField(path.join(changesDir, 'current-bound'), 'bound_branch', 'feature-A');
+
+    state(tmpDir, 'init', 'branch-bound', 'full');
+    await setCometYamlField(path.join(changesDir, 'branch-bound'), 'isolation', 'branch');
+    await setCometYamlField(path.join(changesDir, 'branch-bound'), 'bound_branch', 'feature-B');
+
+    state(tmpDir, 'init', 'worktree-bound', 'full');
+    await setCometYamlField(path.join(changesDir, 'worktree-bound'), 'isolation', 'worktree');
+    await setCometYamlField(path.join(changesDir, 'worktree-bound'), 'bound_branch', 'feature-C');
+
+    state(tmpDir, 'init', 'null-bound', 'full');
+    await setCometYamlField(path.join(changesDir, 'null-bound'), 'bound_branch', 'feature-D');
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let output: string;
+    try {
+      await statusCommand(tmpDir);
+      output = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(output).toContain('isolation: current (bound: feature-A)');
+    expect(output).toContain('isolation: branch (bound: feature-B)');
+    expect(output).toContain('isolation: worktree (bound: feature-C)');
+    expect(output).not.toContain('feature-D');
+  });
+
+  it('includes boundBranch in JSON status output', async () => {
+    const changeDir = path.join(tmpDir, 'openspec', 'changes', 'current-bound');
+    state(tmpDir, 'init', 'current-bound', 'full');
+    await setCometYamlField(changeDir, 'isolation', 'current');
+    await setCometYamlField(changeDir, 'bound_branch', 'feature-A');
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await statusCommand(tmpDir, { json: true });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(JSON.parse(json).changes[0]).toMatchObject({
+      name: 'current-bound',
+      isolation: 'current',
+      boundBranch: 'feature-A',
+    });
   });
 
   it('keeps legacy state without a Run byte-for-byte read-only in text and JSON status', async () => {
@@ -443,5 +544,26 @@ describe('status command', () => {
       currentStep: 'full.open',
       runtimeMode: 'engine-projection',
     });
+  });
+
+  it('renders the default entry and workflow partitions in text output', async () => {
+    await writeProjectConfig(tmpDir, defaultProjectConfig('docs'));
+    const paths = await nativeProjectPaths(tmpDir, 'docs');
+    await createNativeChange({ paths, name: 'native-text', language: 'en' });
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let output: string;
+    try {
+      await statusCommand(tmpDir);
+      output = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(output).toContain('Default Entry: native -> /comet-native [project-config]');
+    expect(output).toContain('Native Changes:');
+    expect(output).toContain('native-text [Native] [phase: shape]');
+    expect(output).toContain('Classic Changes:');
+    expect(output).toContain('Unmanaged OpenSpec Changes:');
   });
 });

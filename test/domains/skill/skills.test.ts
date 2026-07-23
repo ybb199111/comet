@@ -1,13 +1,35 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
+import { parse } from 'yaml';
+
+const { readJsonMock, readFileMock, writeFileMock } = vi.hoisted(() => ({
+  readJsonMock: vi.fn(),
+  readFileMock: vi.fn(),
+  writeFileMock: vi.fn(),
+}));
+
+vi.mock('fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs/promises')>();
+  readFileMock.mockImplementation(actual.readFile);
+  writeFileMock.mockImplementation(actual.writeFile);
+  return { ...actual, readFile: readFileMock, writeFile: writeFileMock };
+});
+
+vi.mock('../../../platform/fs/file-system.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../platform/fs/file-system.js')>();
+  readJsonMock.mockImplementation(actual.readJson);
+  return { ...actual, readJson: readJsonMock };
+});
+
 import {
   getAssetsDir,
   readManifest,
   getManifestSkills,
   createWorkingDirs,
   copyCometSkillsForPlatform,
+  copyCometRulesForPlatform,
   installCometHooksForPlatform,
   parseProjectConfigOverrides,
   renderProjectConfig,
@@ -20,6 +42,15 @@ describe('skills', () => {
   let tmpDir: string;
 
   beforeEach(async () => {
+    readJsonMock.mockReset();
+    readJsonMock.mockImplementation(
+      async (filePath: string) =>
+        JSON.parse(await fs.readFile(filePath, 'utf-8')) as Record<string, unknown>,
+    );
+    readFileMock.mockReset();
+    readFileMock.mockImplementation(fs.readFile);
+    writeFileMock.mockReset();
+    writeFileMock.mockImplementation(fs.writeFile);
     tmpDir = path.join(
       os.tmpdir(),
       `comet-skills-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -89,6 +120,83 @@ describe('skills', () => {
         expect(content, file).not.toContain('触发本次工作流的用户请求语言');
       }
     });
+
+    it('keeps both Native skills operational without unreleased migration narratives', async () => {
+      for (const languageDir of ['skills', 'skills-zh']) {
+        const nativeDir = path.join(getAssetsDir(), languageDir, 'comet-native');
+        const main = await fs.readFile(path.join(nativeDir, 'SKILL.md'), 'utf-8');
+        const references = await Promise.all(
+          ['commands.md', 'artifacts.md', 'recovery.md'].map((file) =>
+            fs.readFile(path.join(nativeDir, 'reference', file), 'utf-8'),
+          ),
+        );
+        const allContent = [main, ...references].join('\n');
+
+        for (const required of [
+          'comet native select <change-name>',
+          'continuation.disposition',
+          '[blocking]',
+          '--confirmed',
+          '--no-code-reason',
+          '--allow-partial-scope',
+          'git-selection-changed',
+          'physical-selection-changed',
+          'scope-detail-overflow',
+          'acceptancePage.nextCursor',
+          'comet native check <change-name>',
+          '--result pass|fail --report verification.md',
+          '--failure-category',
+          '--failed-check',
+          '--override-repair',
+          'comet native archive <change-name> --dry-run',
+          '--expect-preflight',
+          'comet native spec rebase',
+          'comet native checkpoint',
+          'baseline-snapshot-missing',
+          'workspace-root-changed',
+        ]) {
+          expect(allContent, `${languageDir}: ${required}`).toContain(required);
+        }
+
+        const phaseHeadings = ['## Shape', '## Build', '## Verify', '## Archive'];
+        const phaseOffsets = phaseHeadings.map((heading) => main.indexOf(heading));
+        expect(phaseOffsets.every((offset) => offset >= 0)).toBe(true);
+        expect(phaseOffsets).toEqual([...phaseOffsets].sort((left, right) => left - right));
+
+        for (const unwanted of [
+          'comet.native.v1',
+          'comet.native.v2',
+          'strong coding model',
+          'another strong model',
+          'decision frontier',
+          'cold-start executable standard',
+          'Schema upgrades',
+          'legacy physical-tree baseline',
+          '强编码模型',
+          '强模型',
+          '决策前沿',
+          '冷启动可执行标准',
+          'Schema 升级',
+          '旧 schema',
+          '早期 v2',
+        ]) {
+          expect(allContent, `${languageDir}: ${unwanted}`).not.toContain(unwanted);
+        }
+      }
+
+      const zhMain = await fs.readFile(
+        path.join(getAssetsDir(), 'skills-zh', 'comet-native', 'SKILL.md'),
+        'utf-8',
+      );
+      const enMain = await fs.readFile(
+        path.join(getAssetsDir(), 'skills', 'comet-native', 'SKILL.md'),
+        'utf-8',
+      );
+      expect(zhMain).toMatch(/transition 成功后(?:不再调用工具|禁止任何工具调用)/);
+      expect(zhMain).toContain('不依赖任何外部 Skill');
+      expect(enMain).toContain('make no tool calls after the transition succeeds');
+      expect(enMain).toContain('does not depend on any external Skill');
+    });
   });
 
   describe('getManifestSkills', () => {
@@ -99,6 +207,229 @@ describe('skills', () => {
       expect(skills.some((s) => s.includes('comet/SKILL.md'))).toBe(true);
     });
   });
+
+  describe('copyCometRulesForPlatform', () => {
+    it('installs the unified workflow Rule for a Native project', async () => {
+      const platform = PLATFORMS.find((candidate) => candidate.id === 'claude')!;
+
+      await expect(
+        copyCometRulesForPlatform(tmpDir, platform, true, 'en', 'project', 'native'),
+      ).resolves.toEqual({ copied: 1, skipped: 0, failed: 0 });
+
+      await expect(
+        fs.access(path.join(tmpDir, '.claude', 'rules', 'comet-workflow-guard.md')),
+      ).resolves.toBeUndefined();
+      await expect(
+        fs.access(path.join(tmpDir, '.claude', 'rules', 'comet-phase-guard.md')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(
+        fs.access(path.join(tmpDir, '.claude', 'rules', 'comet-native-phase-guard.md')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('reports a missing Rule source as failed', async () => {
+      readJsonMock.mockResolvedValue({
+        version: 'test',
+        skills: [],
+        rules: ['comet/rules/missing-rule.md'],
+      });
+      const platform = PLATFORMS.find((candidate) => candidate.id === 'claude')!;
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      try {
+        await expect(
+          copyCometRulesForPlatform(tmpDir, platform, true, 'zh', 'project'),
+        ).resolves.toEqual({ copied: 0, skipped: 0, failed: 1 });
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('Rule source not found'));
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it('reports a Rule source permission failure without calling it missing', async () => {
+      const platform = PLATFORMS.find((candidate) => candidate.id === 'claude')!;
+      const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      readFileMock.mockRejectedValueOnce(permissionError);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      try {
+        await expect(
+          copyCometRulesForPlatform(tmpDir, platform, true, 'zh', 'project'),
+        ).resolves.toEqual({ copied: 0, skipped: 0, failed: 1 });
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('Failed to copy rule'));
+        expect(error).not.toHaveBeenCalledWith(expect.stringContaining('Rule source not found'));
+      } finally {
+        error.mockRestore();
+      }
+    });
+
+    it('reports a Rule source access failure without calling it missing', async () => {
+      const platform = PLATFORMS.find((candidate) => candidate.id === 'claude')!;
+      const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      const accessSpy = vi.spyOn(fs, 'access').mockRejectedValue(permissionError);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      try {
+        await expect(
+          copyCometRulesForPlatform(tmpDir, platform, true, 'zh', 'project'),
+        ).resolves.toEqual({ copied: 0, skipped: 0, failed: 1 });
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('Failed to copy rule'));
+        expect(error).not.toHaveBeenCalledWith(expect.stringContaining('Rule source not found'));
+      } finally {
+        accessSpy.mockRestore();
+        error.mockRestore();
+      }
+    });
+
+    it('reports a Rule copy permission failure', async () => {
+      const platform = PLATFORMS.find((candidate) => candidate.id === 'claude')!;
+      const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      writeFileMock.mockRejectedValueOnce(permissionError);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      try {
+        await expect(
+          copyCometRulesForPlatform(tmpDir, platform, true, 'zh', 'project'),
+        ).resolves.toEqual({ copied: 0, skipped: 0, failed: 1 });
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('Failed to copy rule'));
+      } finally {
+        error.mockRestore();
+      }
+    });
+  });
+
+  it.each([
+    { installMode: 'copy' as const, destinationRoot: ['.claude', 'skills'] },
+    { installMode: 'symlink' as const, destinationRoot: ['.comet', 'skills', 'skills'] },
+  ])(
+    'counts a $installMode Skill destination preflight access error instead of rejecting',
+    async ({ installMode, destinationRoot }) => {
+      const platform = PLATFORMS.find((candidate) => candidate.id === 'claude')!;
+      const blockedDestination = path.join(tmpDir, ...destinationRoot, 'comet', 'SKILL.md');
+      const access = fs.access.bind(fs);
+      const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      const accessSpy = vi.spyOn(fs, 'access').mockImplementation(async (filePath, mode) => {
+        if (path.resolve(String(filePath)) === path.resolve(blockedDestination)) {
+          throw permissionError;
+        }
+        await access(filePath, mode);
+      });
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      try {
+        const result = await copyCometSkillsForPlatform(
+          tmpDir,
+          platform,
+          false,
+          'skills',
+          'project',
+          installMode,
+        );
+        expect(result.failed).toBeGreaterThan(0);
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('permission denied'));
+      } finally {
+        error.mockRestore();
+        accessSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each(['copy', 'symlink'] as const)(
+    'counts an OpenCode command artifact access failure in %s mode without rejecting',
+    async (installMode) => {
+      const platform = PLATFORMS.find((candidate) => candidate.id === 'opencode')!;
+      const blockedArtifact = path.join(tmpDir, '.opencode', 'commands', 'comet.md');
+      const access = fs.access.bind(fs);
+      const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      const accessSpy = vi.spyOn(fs, 'access').mockImplementation(async (filePath, mode) => {
+        if (path.resolve(String(filePath)) === path.resolve(blockedArtifact)) {
+          throw permissionError;
+        }
+        await access(filePath, mode);
+      });
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      try {
+        const result = await copyCometSkillsForPlatform(
+          tmpDir,
+          platform,
+          false,
+          'skills',
+          'project',
+          installMode,
+        );
+        expect(result.failed).toBeGreaterThan(0);
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('permission denied'));
+      } finally {
+        error.mockRestore();
+        accessSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each(['copy', 'symlink'] as const)(
+    'counts a Pi settings write failure in %s mode without creating an extension',
+    async (installMode) => {
+      const platform = PLATFORMS.find((candidate) => candidate.id === 'pi')!;
+      const settingsPath = path.join(tmpDir, '.pi', 'settings.json');
+      const extensionPath = path.join(tmpDir, '.pi', 'extensions', 'comet-commands.ts');
+      const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      writeFileMock.mockImplementation(async (filePath, ...args) => {
+        const resolved = path.resolve(String(filePath));
+        if (resolved === path.resolve(settingsPath)) throw permissionError;
+        return fs.writeFile(filePath, ...args);
+      });
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      try {
+        const result = await copyCometSkillsForPlatform(
+          tmpDir,
+          platform,
+          false,
+          'skills',
+          'project',
+          installMode,
+        );
+        expect(result.failed).toBeGreaterThanOrEqual(1);
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('permission denied'));
+        await expect(fs.access(extensionPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        error.mockRestore();
+      }
+    },
+  );
+
+  it.each(['copy', 'symlink'] as const)(
+    'counts a Pi extension write failure in %s mode without rejecting',
+    async (installMode) => {
+      const platform = PLATFORMS.find((candidate) => candidate.id === 'pi')!;
+      const settingsPath = path.join(tmpDir, '.pi', 'settings.json');
+      const extensionPath = path.join(tmpDir, '.pi', 'extensions', 'comet-commands.ts');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, '{"enableSkillCommands":true}\n', 'utf8');
+      const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      writeFileMock.mockImplementation(async (filePath, ...args) => {
+        if (path.resolve(String(filePath)) === path.resolve(extensionPath)) throw permissionError;
+        return fs.writeFile(filePath, ...args);
+      });
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      try {
+        const result = await copyCometSkillsForPlatform(
+          tmpDir,
+          platform,
+          false,
+          'skills',
+          'project',
+          installMode,
+        );
+        expect(result.failed).toBeGreaterThanOrEqual(1);
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('permission denied'));
+      } finally {
+        error.mockRestore();
+      }
+    },
+  );
 
   describe('createWorkingDirs', () => {
     it('creates superpowers spec and plan directories', async () => {
@@ -134,7 +465,8 @@ describe('skills', () => {
       await createWorkingDirs(tmpDir, 'zh-CN');
 
       const config = await fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf-8');
-      expect(config).toContain('# language: en | zh-CN');
+      expect(config).toContain('# Classic 工作流文档使用的产物语言');
+      expect(config).not.toContain('# Artifact language used for workflow documents');
       expect(config).toContain('language: zh-CN');
     });
 
@@ -216,7 +548,7 @@ describe('skills', () => {
       expect(command).toContain('$ARGUMENTS');
       expect(command).toContain('# Comet Phase 1: Open');
       expect(command).toContain('## Steps');
-      expect(command).toContain('node "$COMET_STATE" init <name> full');
+      expect(command).toContain('comet state init <name> full');
       expect(command).not.toContain('Immediately load the `comet-open` skill with the skill tool');
       expect(path.basename(commandPath)).toBe('comet-open.md');
     });
@@ -290,10 +622,404 @@ describe('skills', () => {
 
   describe('installCometHooksForPlatform', () => {
     const staleCometCommand = 'bash .legacy/skills/comet/scripts/comet-hook-guard.sh';
-    const currentCometScript = 'comet/scripts/comet-hook-guard.mjs';
+    const currentCometScript = 'comet/scripts/comet-hook-router.mjs';
     const normalized = (value: string) => value.replace(/\\/g, '/');
-    const expectedHookCommand = (skillsDir: string, baseDir = tmpDir) =>
-      `node "${normalized(path.join(baseDir, skillsDir, 'skills', ...currentCometScript.split('/')))}" --project-root "${normalized(baseDir)}"`;
+    const expectedHookCommand = (
+      skillsDir: string,
+      platformId: string,
+      baseDir = tmpDir,
+      scope: 'project' | 'global' = 'project',
+    ) =>
+      `node "${normalized(path.join(baseDir, skillsDir, 'skills', ...currentCometScript.split('/')))}" --platform "${platformId}"${scope === 'project' ? ` --project-root "${normalized(baseDir)}"` : ''}`;
+
+    it('installs only the unified Router Hook for a Native project', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+
+      await expect(
+        installCometHooksForPlatform(tmpDir, codex, 'project', 'native'),
+      ).resolves.toEqual({ status: 'installed' });
+
+      const hooks = JSON.parse(
+        await fs.readFile(path.join(tmpDir, '.codex', 'hooks.json'), 'utf8'),
+      ) as { hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> } };
+      const source = JSON.stringify(hooks).replaceAll('\\', '/');
+      expect(source).toContain('comet/scripts/comet-hook-router.mjs');
+      expect(source).toContain('--platform /"codex/"');
+      expect(source).not.toContain('comet/scripts/comet-hook-guard.mjs');
+      expect(source).not.toContain('comet-native/scripts/comet-native-hook-guard.mjs');
+    });
+
+    it('installs the Native Copilot Hook with a write matcher and structured denial output', async () => {
+      const copilot = PLATFORMS.find((candidate) => candidate.id === 'github-copilot')!;
+
+      await expect(
+        installCometHooksForPlatform(tmpDir, copilot, 'project', 'native'),
+      ).resolves.toEqual({ status: 'installed' });
+
+      const config = JSON.parse(
+        await fs.readFile(path.join(tmpDir, '.github', 'hooks', 'comet-guard.json'), 'utf8'),
+      ) as {
+        hooks: {
+          preToolUse: Array<{ matcher?: string; bash: string; powershell: string }>;
+        };
+      };
+      expect(config.hooks.preToolUse).toHaveLength(1);
+      expect(config.hooks.preToolUse[0].matcher).toBe('create|edit|str_replace_editor|apply_patch');
+      expect(config.hooks.preToolUse[0].bash.replaceAll('\\', '/')).toContain(
+        'comet/scripts/comet-hook-router.mjs',
+      );
+      expect(config.hooks.preToolUse[0].bash).toContain('--platform "github-copilot"');
+      expect(config.hooks.preToolUse[0].powershell).toBe(config.hooks.preToolUse[0].bash);
+    });
+
+    it('returns failed when the Hook manifest cannot be read', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      readJsonMock.mockRejectedValueOnce(new Error('manifest unavailable'));
+
+      await expect(installCometHooksForPlatform(tmpDir, codex, 'project')).resolves.toEqual({
+        status: 'failed',
+        reason: 'manifest unavailable',
+      });
+    });
+
+    it('returns failed when a Hook-capable platform does not declare a format', async () => {
+      const platform: Platform = {
+        id: 'missing-hook-format',
+        name: 'Missing Hook Format',
+        skillsDir: '.missing-hook-format',
+        openspecToolId: 'missing-hook-format',
+        supportsHooks: true,
+      };
+
+      await expect(installCometHooksForPlatform(tmpDir, platform, 'project')).resolves.toEqual({
+        status: 'failed',
+        reason: 'hook-capable platform does not declare a hook format',
+      });
+    });
+
+    it.each([
+      { scope: 'project' as const, baseDir: () => tmpDir },
+      { scope: 'global' as const, baseDir: () => path.join(tmpDir, 'home') },
+    ])('writes $scope Codex hooks to .codex/hooks.json', async ({ scope, baseDir }) => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const root = baseDir();
+
+      await expect(installCometHooksForPlatform(root, codex, scope)).resolves.toEqual({
+        status: 'installed',
+      });
+
+      const hooks = JSON.parse(await fs.readFile(path.join(root, '.codex', 'hooks.json'), 'utf-8'));
+      expect(hooks.hooks.PreToolUse[0].hooks[0].command.replaceAll('\\', '/')).toContain(
+        '/.agents/skills/comet/scripts/comet-hook-router.mjs',
+      );
+      await expect(
+        fs.access(path.join(root, '.codex', 'settings.local.json')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('reports failure when a legacy Codex Hook config cannot be cleaned up', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const legacyPath = path.join(tmpDir, '.codex', 'settings.local.json');
+      await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+      await fs.writeFile(legacyPath, '{not-json', 'utf-8');
+
+      await expect(installCometHooksForPlatform(tmpDir, codex, 'project')).resolves.toEqual({
+        status: 'installed',
+        cleanupFailed: 1,
+        reason: expect.stringContaining('legacy Hook cleanup failed'),
+      });
+      await expect(fs.readFile(legacyPath, 'utf-8')).resolves.toBe('{not-json');
+    });
+
+    it('keeps Codex hook installation idempotent when the project path contains spaces', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const root = path.join(tmpDir, 'Jane Doe project');
+      const canonicalPath = path.join(root, '.codex', 'hooks.json');
+
+      await installCometHooksForPlatform(root, codex, 'project');
+      const firstInstall = JSON.parse(await fs.readFile(canonicalPath, 'utf-8'));
+      await installCometHooksForPlatform(root, codex, 'project');
+      const secondInstall = JSON.parse(await fs.readFile(canonicalPath, 'utf-8'));
+
+      expect(secondInstall).toEqual(firstInstall);
+      expect(secondInstall.hooks.PreToolUse[0].hooks).toHaveLength(1);
+    });
+
+    it('preserves canonical group metadata and malformed entries while replacing managed hooks', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const canonicalPath = path.join(tmpDir, '.codex', 'hooks.json');
+      const userHandler = { type: 'command', command: 'node my-user-hook.mjs' };
+      const canonical = {
+        hooks: {
+          PreToolUse: [
+            null,
+            'manual-group',
+            {
+              matcher: 'Write|Edit',
+              description: 'primary group metadata',
+              hooks: [null, 'manual-handler', { type: 'command', command: staleCometCommand }],
+            },
+            {
+              matcher: 'Write|Edit',
+              customField: { duplicate: true },
+              hooks: [{ type: 'command', command: staleCometCommand }, userHandler],
+            },
+            {
+              matcher: 'Write|Edit',
+              keepEmpty: true,
+              hooks: [{ type: 'command', command: staleCometCommand }],
+            },
+          ],
+        },
+      };
+      await fs.mkdir(path.dirname(canonicalPath), { recursive: true });
+      await fs.writeFile(canonicalPath, JSON.stringify(canonical, null, 2), 'utf-8');
+
+      await expect(installCometHooksForPlatform(tmpDir, codex, 'project')).resolves.toEqual({
+        status: 'installed',
+      });
+      const firstInstall = JSON.parse(await fs.readFile(canonicalPath, 'utf-8'));
+      await expect(installCometHooksForPlatform(tmpDir, codex, 'project')).resolves.toEqual({
+        status: 'installed',
+      });
+      const secondInstall = JSON.parse(await fs.readFile(canonicalPath, 'utf-8'));
+
+      expect(secondInstall).toEqual(firstInstall);
+      expect(secondInstall.hooks.PreToolUse[0]).toBeNull();
+      expect(secondInstall.hooks.PreToolUse[1]).toBe('manual-group');
+      expect(secondInstall.hooks.PreToolUse[2].description).toBe('primary group metadata');
+      expect(secondInstall.hooks.PreToolUse[2].hooks.slice(0, 2)).toEqual([null, 'manual-handler']);
+      expect(secondInstall.hooks.PreToolUse[2].hooks[2].command.replaceAll('\\', '/')).toContain(
+        '/.agents/skills/comet/scripts/comet-hook-router.mjs',
+      );
+      expect(secondInstall.hooks.PreToolUse[3]).toEqual({
+        matcher: 'Write|Edit',
+        customField: { duplicate: true },
+        hooks: [userHandler],
+      });
+      expect(secondInstall.hooks.PreToolUse[4]).toEqual({
+        matcher: 'Write|Edit',
+        keepEmpty: true,
+        hooks: [],
+      });
+    });
+
+    it('migrates only Comet hooks from the historical Codex settings file', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const legacyPath = path.join(tmpDir, '.codex', 'settings.local.json');
+      const legacy = {
+        model: 'gpt-5',
+        hooks: {
+          PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo post' }] }],
+          PreToolUse: [
+            {
+              matcher: 'Write|Edit',
+              hooks: [
+                { type: 'command', command: staleCometCommand },
+                { type: 'command', command: 'node my-user-hook.mjs' },
+              ],
+            },
+          ],
+        },
+      };
+      await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+      await fs.writeFile(legacyPath, JSON.stringify(legacy, null, 2), 'utf-8');
+
+      await installCometHooksForPlatform(tmpDir, codex, 'project');
+
+      const migrated = JSON.parse(await fs.readFile(legacyPath, 'utf-8'));
+      expect(migrated.model).toBe('gpt-5');
+      expect(migrated.hooks.PostToolUse).toEqual(legacy.hooks.PostToolUse);
+      expect(migrated.hooks.PreToolUse[0].hooks).toEqual([
+        { type: 'command', command: 'node my-user-hook.mjs' },
+      ]);
+      await expect(fs.access(path.join(tmpDir, '.codex', 'hooks.json'))).resolves.toBeUndefined();
+    });
+
+    it('migrates quoted managed hook paths with spaces without matching malformed commands', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const legacyPath = path.join(tmpDir, '.codex', 'settings.local.json');
+      const managedPath = 'C:/Users/Jane Doe/.agents/skills/comet/scripts/comet-hook-guard.mjs';
+      const preservedCommands = [`node "${managedPath}`, `node "${managedPath}"; echo not-managed`];
+      const legacy = {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Write|Edit',
+              hooks: [
+                {
+                  type: 'command',
+                  command: `node "${managedPath}" --project-root "C:/Users/Jane Doe"`,
+                },
+                { type: 'command', command: `node '${managedPath}'` },
+                {
+                  type: 'command',
+                  command: 'node C:/Users/Jane/.agents/skills/comet/scripts/comet-hook-guard.mjs',
+                },
+                ...preservedCommands.map((command) => ({ type: 'command', command })),
+              ],
+            },
+          ],
+        },
+      };
+      await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+      await fs.writeFile(legacyPath, JSON.stringify(legacy, null, 2), 'utf-8');
+
+      await expect(installCometHooksForPlatform(tmpDir, codex, 'project')).resolves.toEqual({
+        status: 'installed',
+      });
+
+      const migrated = JSON.parse(await fs.readFile(legacyPath, 'utf-8'));
+      expect(
+        migrated.hooks.PreToolUse[0].hooks.map((handler: { command: string }) => handler.command),
+      ).toEqual(preservedCommands);
+    });
+
+    it('keeps canonical Codex hook installation successful when legacy cleanup cannot be written', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const canonicalPath = path.join(tmpDir, '.codex', 'hooks.json');
+      const legacyPath = path.join(tmpDir, '.codex', 'settings.local.json');
+      const legacy = {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Write|Edit',
+              hooks: [{ type: 'command', command: staleCometCommand }],
+            },
+          ],
+        },
+      };
+      await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+      await fs.writeFile(legacyPath, JSON.stringify(legacy, null, 2), 'utf-8');
+      writeFileMock
+        .mockImplementationOnce(fs.writeFile)
+        .mockRejectedValueOnce(new Error('simulated legacy write failure'));
+
+      await expect(installCometHooksForPlatform(tmpDir, codex, 'project')).resolves.toEqual({
+        status: 'installed',
+        cleanupFailed: 1,
+        reason: 'legacy Hook cleanup failed for settings.local.json',
+      });
+      await expect(fs.access(canonicalPath)).resolves.toBeUndefined();
+      await expect(fs.readFile(legacyPath, 'utf-8')).resolves.toBe(JSON.stringify(legacy, null, 2));
+    });
+
+    it('keeps canonical Codex hook installation successful when legacy access fails', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const canonicalPath = path.join(tmpDir, '.codex', 'hooks.json');
+      const legacyPath = path.join(tmpDir, '.codex', 'settings.local.json');
+      const legacy = '{\n  "hooks": {}\n}\n';
+      await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+      await fs.writeFile(legacyPath, legacy, 'utf-8');
+      const access = fs.access.bind(fs);
+      const permissionError = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      const accessSpy = vi.spyOn(fs, 'access').mockImplementation(async (filePath, mode) => {
+        if (path.resolve(String(filePath)) === path.resolve(legacyPath)) throw permissionError;
+        await access(filePath, mode);
+      });
+
+      try {
+        await expect(installCometHooksForPlatform(tmpDir, codex, 'project')).resolves.toEqual({
+          status: 'installed',
+          cleanupFailed: 1,
+          reason: 'legacy Hook cleanup failed for settings.local.json',
+        });
+      } finally {
+        accessSpy.mockRestore();
+      }
+
+      await expect(fs.access(canonicalPath)).resolves.toBeUndefined();
+      await expect(fs.readFile(legacyPath, 'utf-8')).resolves.toBe(legacy);
+    });
+
+    it('preserves legacy hook groups, group fields, and non-object handlers during migration', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const legacyPath = path.join(tmpDir, '.codex', 'settings.local.json');
+      const legacy = {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Write|Edit',
+              description: 'Comet-only group metadata',
+              hooks: [{ type: 'command', command: staleCometCommand }],
+            },
+            {
+              matcher: 'Bash',
+              customField: { preserved: true },
+              hooks: [null, 'manual-marker', { type: 'command', command: staleCometCommand }],
+            },
+          ],
+        },
+      };
+      await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+      await fs.writeFile(legacyPath, JSON.stringify(legacy, null, 2), 'utf-8');
+
+      await expect(installCometHooksForPlatform(tmpDir, codex, 'project')).resolves.toEqual({
+        status: 'installed',
+      });
+
+      const migrated = JSON.parse(await fs.readFile(legacyPath, 'utf-8'));
+      expect(migrated.hooks.PreToolUse).toEqual([
+        {
+          matcher: 'Write|Edit',
+          description: 'Comet-only group metadata',
+          hooks: [],
+        },
+        {
+          matcher: 'Bash',
+          customField: { preserved: true },
+          hooks: [null, 'manual-marker'],
+        },
+      ]);
+    });
+
+    it('installs canonical Codex hooks without changing invalid historical JSON', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const legacyPath = path.join(tmpDir, '.codex', 'settings.local.json');
+      const invalid = '{\r\n  "hooks": {\r\n';
+      await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+      await fs.writeFile(legacyPath, invalid, 'utf-8');
+
+      await expect(installCometHooksForPlatform(tmpDir, codex, 'project')).resolves.toEqual({
+        status: 'installed',
+        cleanupFailed: 1,
+        reason: 'legacy Hook cleanup failed for settings.local.json',
+      });
+
+      await expect(fs.readFile(legacyPath, 'utf-8')).resolves.toBe(invalid);
+      await expect(fs.access(path.join(tmpDir, '.codex', 'hooks.json'))).resolves.toBeUndefined();
+    });
+
+    it('does not overwrite invalid canonical Codex hooks or migrate the historical file', async () => {
+      const codex = PLATFORMS.find((candidate) => candidate.id === 'codex')!;
+      const canonicalPath = path.join(tmpDir, '.codex', 'hooks.json');
+      const legacyPath = path.join(tmpDir, '.codex', 'settings.local.json');
+      const invalidCanonical = '{\r\n  "hooks": {\r\n';
+      const legacy = `${JSON.stringify(
+        {
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: 'Write|Edit',
+                hooks: [{ type: 'command', command: staleCometCommand }],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      )}\r\n`;
+      await fs.mkdir(path.dirname(canonicalPath), { recursive: true });
+      await fs.writeFile(canonicalPath, invalidCanonical, 'utf-8');
+      await fs.writeFile(legacyPath, legacy, 'utf-8');
+
+      const result = await installCometHooksForPlatform(tmpDir, codex, 'project');
+
+      expect(result.status).toBe('failed');
+      expect(result.reason).toContain('Invalid Codex settings');
+      await expect(fs.readFile(canonicalPath, 'utf-8')).resolves.toBe(invalidCanonical);
+      await expect(fs.readFile(legacyPath, 'utf-8')).resolves.toBe(legacy);
+    });
 
     it('merges Claude-style hooks into an existing matcher group without replacing user hooks', async () => {
       const platform: Platform = {
@@ -374,7 +1100,7 @@ describe('skills', () => {
       await fs.writeFile(settingsPath, JSON.stringify(malformedSettings), 'utf-8');
 
       await expect(installCometHooksForPlatform(tmpDir, platform)).resolves.toEqual({
-        installed: true,
+        status: 'installed',
       });
 
       const updated = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
@@ -438,8 +1164,8 @@ describe('skills', () => {
           },
           {
             type: 'command',
-            command: expectedHookCommand(skillsDir),
-            description: 'Block code writes in wrong Comet phase (open/design/archive)',
+            command: expectedHookCommand(skillsDir, id),
+            description: 'Route each write to the selected Comet Native or Classic phase guard',
           },
         ]);
 
@@ -460,14 +1186,14 @@ describe('skills', () => {
       await fs.writeFile(settingsPath, JSON.stringify(initialSettings), 'utf-8');
 
       await expect(installCometHooksForPlatform(homeDir, platform, 'global')).resolves.toEqual({
-        installed: true,
+        status: 'installed',
       });
 
       const updated = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
       expect(updated.enabledPlugins).toEqual(initialSettings.enabledPlugins);
       expect(updated.hooks.PreToolUse).toHaveLength(1);
       expect(updated.hooks.PreToolUse[0].hooks[0].command).toBe(
-        expectedHookCommand('.codebuddy', homeDir),
+        expectedHookCommand('.codebuddy', 'codebuddy', homeDir, 'global'),
       );
     });
 
@@ -480,9 +1206,40 @@ describe('skills', () => {
 
       const result = await installCometHooksForPlatform(tmpDir, platform, 'project');
 
-      expect(result.installed).toBe(false);
-      expect(result.reason).toContain('Invalid codebuddy settings');
+      expect(result.status).toBe('failed');
+      expect(result.reason).toContain('Invalid CodeBuddy Code settings');
       await expect(fs.readFile(settingsPath, 'utf-8')).resolves.toBe(invalidSettings);
+    });
+
+    it.each([
+      {
+        id: 'claude',
+        configPath: ['.claude', 'settings.local.json'],
+      },
+      {
+        id: 'amazon-q',
+        configPath: ['.amazonq', 'settings.local.json'],
+      },
+      {
+        id: 'gemini',
+        configPath: ['.gemini', 'settings.json'],
+      },
+      {
+        id: 'windsurf',
+        configPath: ['.windsurf', 'hooks.json'],
+      },
+    ])('leaves malformed $id Hook JSON byte-for-byte unchanged', async ({ id, configPath }) => {
+      const platform = PLATFORMS.find((candidate) => candidate.id === id)!;
+      const settingsPath = path.join(tmpDir, ...configPath);
+      const malformedSettings = '{\r\n  "hooks": {\r\n';
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, malformedSettings, 'utf-8');
+
+      const result = await installCometHooksForPlatform(tmpDir, platform, 'project');
+
+      expect(result.status).toBe('failed');
+      expect(result.reason).toContain(`Invalid ${platform.name} settings`);
+      await expect(fs.readFile(settingsPath, 'utf-8')).resolves.toBe(malformedSettings);
     });
 
     it('merges Gemini hooks into the existing matcher group idempotently', async () => {
@@ -535,8 +1292,8 @@ describe('skills', () => {
         },
         {
           type: 'command',
-          command: expectedHookCommand('.gemini'),
-          name: 'Block code writes in wrong Comet phase (open/design/archive)',
+          command: expectedHookCommand('.gemini', 'gemini'),
+          name: 'Route each write to the selected Comet Native or Classic phase guard',
         },
       ]);
 
@@ -576,7 +1333,7 @@ describe('skills', () => {
       expect(firstInstall.hooks.pre_write_code).toEqual([
         { command: 'echo user-write-check', show_output: false },
         {
-          command: expectedHookCommand('.windsurf'),
+          command: expectedHookCommand('.windsurf', 'windsurf'),
           show_output: true,
         },
       ]);
@@ -588,15 +1345,15 @@ describe('skills', () => {
   });
 
   describe('Chinese Comet workflow safeguards', () => {
-    it('requires OpenSpec instructions for each standard open artifact', async () => {
+    it('uses the OpenSpec status graph to drive Chinese open artifacts', async () => {
       const zhOpen = await fs.readFile(
         path.resolve('assets', 'skills-zh', 'comet-open', 'SKILL.md'),
         'utf-8',
       );
 
-      expect(zhOpen).toContain('openspec instructions proposal --change "<name>" --json');
-      expect(zhOpen).toContain('openspec instructions design --change "<name>" --json');
-      expect(zhOpen).toContain('openspec instructions tasks --change "<name>" --json');
+      expect(zhOpen).toContain('openspec instructions <artifact-id> --change "<name>" --json');
+      expect(zhOpen).toContain('不得硬编码生成顺序');
+      expect(zhOpen).not.toContain('openspec instructions proposal --change "<name>" --json');
       for (const field of [
         '`context`',
         '`rules`',
@@ -610,19 +1367,19 @@ describe('skills', () => {
       expect(zhOpen).toContain('不得复制到 artifact 内容中');
       expect(zhOpen).toContain('每创建一个 artifact 后');
       expect(zhOpen).toContain('openspec status --change "<name>" --json');
-      expect(zhOpen).toContain('必须立即停止 artifact 创建');
+      expect(zhOpen).toContain('必须立即停止并报告 OpenSpec 错误');
       expect(zhOpen).toContain('不得回退为硬编码文档结构');
     });
 
-    it('requires OpenSpec instructions for each standard open artifact (English)', async () => {
+    it('uses the OpenSpec status graph to drive English open artifacts', async () => {
       const enOpen = await fs.readFile(
         path.resolve('assets', 'skills', 'comet-open', 'SKILL.md'),
         'utf-8',
       );
 
-      expect(enOpen).toContain('openspec instructions proposal --change "<name>" --json');
-      expect(enOpen).toContain('openspec instructions design --change "<name>" --json');
-      expect(enOpen).toContain('openspec instructions tasks --change "<name>" --json');
+      expect(enOpen).toContain('openspec instructions <artifact-id> --change "<name>" --json');
+      expect(enOpen).toContain('Must not hard-code generation order');
+      expect(enOpen).not.toContain('openspec instructions proposal --change "<name>" --json');
       for (const field of [
         '`context`',
         '`rules`',
@@ -633,10 +1390,10 @@ describe('skills', () => {
       ]) {
         expect(enOpen).toContain(field);
       }
-      expect(enOpen).toContain('must not copy them into the artifact content');
-      expect(enOpen).toContain('After creating each artifact');
+      expect(enOpen).toContain('must not copy them into artifact content');
+      expect(enOpen).toContain('Re-run status after creating each artifact');
       expect(enOpen).toContain('openspec status --change "<name>" --json');
-      expect(enOpen).toContain('must immediately stop artifact creation');
+      expect(enOpen).toContain('Also stop if status/instructions fails');
       expect(enOpen).toContain('Must not fall back to hard-coded artifact prose');
     });
 
@@ -653,7 +1410,7 @@ describe('skills', () => {
       expect(zhTweak).toContain('使用 Skill 工具加载 `openspec-apply-change` 技能');
       expect(zhTweak).toContain('这条 apply 路径只属于 tweak');
       expect(zhTweak).toContain(
-        '完整 `/comet` 或 `workflow: full` 不得套用 tweak 的 `openspec-apply-change` 构建路径',
+        '完整 `/comet-classic` 或 `workflow: full` 不得套用 tweak 的 `openspec-apply-change` 构建路径',
       );
       expect(zhTweak).toContain('单一 OpenSpec change');
       expect(zhTweak).not.toContain('不新增 capability');
@@ -662,7 +1419,7 @@ describe('skills', () => {
 
     it('requires explicit user confirmation at full-workflow decision points', async () => {
       const zhComet = await fs.readFile(
-        path.resolve('assets', 'skills-zh', 'comet', 'SKILL.md'),
+        path.resolve('assets', 'skills-zh', 'comet-classic', 'SKILL.md'),
         'utf-8',
       );
       const zhOpen = await fs.readFile(
@@ -758,16 +1515,14 @@ describe('skills', () => {
         '若当前平台没有结构化提问工具，则必须在对话中提出明确选项并停止流程',
       );
       expect(zhDecisionPoint).toContain('不得用推荐规则、默认值、历史偏好');
-      expect(zhOpen).toContain('### 1b. 需求澄清完成确认（阻塞点）');
-      expect(zhOpen).toContain(
-        '不得在用户确认需求澄清完成前创建 proposal.md、design.md 或 tasks.md',
-      );
+      expect(zhOpen).toContain('### 1b. 需求与 Change 名称解析（默认不阻塞）');
+      expect(zhOpen).toContain('范围与命名都明确时直接继续');
       expect(zhOpen).toContain('`comet/reference/decision-point.md`');
       expect(zhOpen).toContain(
-        '完整 `/comet` 流程默认不得使用 Skill 工具加载 `openspec-propose` 技能',
+        '完整 `/comet-classic` 流程默认不得使用 Skill 工具加载 `openspec-propose` 技能',
       );
       expect(zhOpen).toContain(
-        '技能加载后，按其指引创建 change 骨架，但当 Step 1b 的已确认澄清摘要已存在于对话上下文时',
+        '当 Step 1b 已形成范围明确的 resolved brief 时，覆盖其"STOP and wait for user direction"行为',
       );
       expect(zhOpen).not.toContain('OpenSpec artifact 指令');
       expect(zhOpen).not.toContain('fast-forward');
@@ -786,18 +1541,17 @@ describe('skills', () => {
         '不得用“跳过重复上下文探索”削弱 Superpowers `brainstorming` 的澄清流程',
       );
       expect(zhDesign).not.toContain('跳过重复上下文探索，直接进入设计提问');
-      expect(zhBuild).toContain('不得根据推荐规则自行选择 `branch` 或 `worktree`');
-      expect(zhBuild).toContain('不得根据推荐规则自行选择执行方式');
+      expect(zhBuild).toContain('不得根据推荐规则自行选择 `current`、`branch` 或 `worktree`');
+      expect(zhBuild).toContain('也不得自行选择执行方式、TDD 模式或代码审查模式');
       expect(zhBuild).toContain('`comet/reference/decision-point.md`');
+      expect(zhVerify).toContain('前 3 次可修复失败自动回到 build');
       expect(zhVerify).toContain(
-        '验证不通过时**必须按 `comet/reference/decision-point.md` 的协议暂停并等待用户决定修复或接受偏差',
+        '只有接受 WARNING/SUGGESTION 偏差或第 4 次失败后的策略选择才是用户决策点',
       );
-      expect(zhVerify).toContain(
-        '必须按 `comet/reference/decision-point.md` 的协议暂停并等待用户选择分支处理方式',
-      );
-      expect(zhVerify).toContain(
-        '只有在用户完成选择且对应操作完成后，才允许写入 `branch_status: handled`',
-      );
+      expect(zhVerify).toContain('不要在 verify 阶段处理、合并或丢弃分支');
+      expect(zhVerify).toContain('不要写入 `branch_status: handled`');
+      expect(zhArchive).toContain('### 5. 归档提交后的分支处理');
+      expect(zhArchive).toContain('comet state set <change-name> branch_status handled');
       expect(zhArchive).toContain('### 1. 归档前最终确认（阻塞点）');
       expect(zhArchive).toContain('不得在用户确认前运行 `comet archive "<change-name>"`');
       expect(zhArchive).toContain('`comet/reference/decision-point.md`');
@@ -805,6 +1559,8 @@ describe('skills', () => {
       expect(zhArchive).toContain('「需要调整或重新验证」');
       expect(zhArchive).toContain('「暂不归档」');
       expect(zhArchive).toContain('`comet state transition <change-name> archive-reopen`');
+      expect(zhArchive).toContain('调用 `/comet-classic` 或 `/comet-open`');
+      expect(zhArchive).not.toContain('调用 `/comet` 或 `/comet-open`');
       expect(zhVerify).toContain('不得因为验证已通过就自动归档');
       expect(zhHotfix).toContain(
         '命中质变信号或文件数 tripwire 时，**必须按 `comet/reference/decision-point.md` 的协议暂停并等待用户明确选择**',
@@ -814,7 +1570,7 @@ describe('skills', () => {
         '命中质变信号或文件数 tripwire 时，**必须按 `comet/reference/decision-point.md` 的协议暂停并等待用户明确选择**',
       );
       expect(zhTweak).toContain('不得直接进入 `/comet-design`');
-      expect(zhComet).toContain('`verify_result: fail` → 进入验证失败决策阻塞点');
+      expect(zhComet).toContain('`verify_result: fail` → 自动调用 `/comet-build` 继续修复');
       expect(zhComet).not.toContain(
         '`verify_result: fail` → `node "$COMET_STATE" transition <name> verify-fail` 后 `/comet-build`',
       );
@@ -825,15 +1581,17 @@ describe('skills', () => {
       expect(zhTweak).toContain('带 delta spec 的验证分流');
 
       // HIGH: hotfix/tweak IMPORTANT blocks must acknowledge verify decision points
-      expect(zhHotfix).toContain('验证阶段（comet-verify）的验证失败决策和分支处理决策');
-      expect(zhTweak).toContain('验证阶段（comet-verify）的验证失败决策和分支处理决策');
+      expect(zhHotfix).toContain('验证阶段（comet-verify）接受 WARNING/SUGGESTION 偏差');
+      expect(zhTweak).toContain('验证阶段（comet-verify）接受 WARNING/SUGGESTION 偏差');
+      expect(zhHotfix).toContain('归档提交后的分支处理决策');
+      expect(zhTweak).toContain('归档提交后的分支处理决策');
       expect(zhHotfix).toContain('归档前最终确认');
       expect(zhTweak).toContain('归档前最终确认');
 
       // MEDIUM: comet-design brainstorming does not write Design Doc before confirmation
       expect(zhDesign).toContain('brainstorming 阶段不写入 Design Doc 文件');
       expect(zhDesign).toContain('增量更新 `brainstorm-summary.md`');
-      expect(zhDesign).toContain('### 1e. 主动式上下文压缩');
+      expect(zhDesign).toContain('### 3a. 可选主动式上下文压缩');
 
       // MEDIUM: comet-verify Spec drift requires user choice
       expect(zhVerify).toContain(
@@ -850,8 +1608,8 @@ describe('skills', () => {
         '若 `build_pause: plan-ready` 但 `isolation`、`build_mode`、`tdd_mode` 和 `review_mode` 都已经设置，则视为 stale pause',
       );
       expect(zhComet).toContain('工作区隔离、执行方式、TDD 模式和代码审查模式');
-      expect(zhBuild).toContain('提供 plan-ready 暂停点');
-      expect(zhBuild).toContain('不得自动继续，也不得把暂停写入 `build_mode`');
+      expect(zhBuild).toContain('一个联合决策点');
+      expect(zhBuild).toContain('不得自动选择，也不得把暂停写入 `build_mode`');
       expect(zhBuild).toContain('在 `executing-plans` 下，主会话直接执行任务');
       expect(zhBuild).toContain('review_mode');
       expect(zhBuild).toContain('| `off` | 不自动派发代码审查 |');
@@ -880,9 +1638,10 @@ describe('skills', () => {
       );
       expect(zhVerify).toContain('不能把该绕过标记视为可审计的验证或构建证据');
 
-      // MEDIUM: comet-verify Step 1b treats CRITICAL/IMPORTANT as blocking
-      expect(zhVerify).toContain('CRITICAL 或 IMPORTANT 失败项必须修复');
-      expect(zhVerify).toContain('不允许跳过修复直接全部接受');
+      // MEDIUM: comet-verify Step 1b auto-repairs CRITICAL/IMPORTANT findings
+      // without turning mandatory work into a user decision.
+      expect(zhVerify).toContain('不得创建“是否修复”的伪决策');
+      expect(zhVerify).toContain('CRITICAL/IMPORTANT 始终不可豁免');
       expect(zhVerify).toContain('当 `review_mode: standard` 或 `thorough` 时');
       expect(zhVerify).toContain('当 `review_mode: off` 时跳过自动代码审查');
       expect(zhVerify).toContain('只检查正确性、安全、边界条件');
@@ -891,8 +1650,8 @@ describe('skills', () => {
       expect(zhVerify).toContain('不执行 spec 覆盖率、Design Doc 一致性或漂移检查');
       expect(zhHotfix).toContain('默认 `review_mode: off`');
 
-      // MEDIUM: hotfix IMPORTANT covers >3-tasks comet-build decision points
-      expect(zhHotfix).toContain('任务超过 3 个转入 `/comet-build` 时的工作区隔离和执行方式选择');
+      // MEDIUM: hotfix task count alone does not escalate; only qualitative scope signals do.
+      expect(zhHotfix).toContain('任务数量本身不触发 `/comet-build`');
 
       // LOW: comet-build "中" level requires user confirmation before brainstorming
       expect(zhBuild).toContain(
@@ -929,13 +1688,13 @@ describe('skills', () => {
       expect(zhOpen).toContain(
         '批量拆分模式下，单个拆分项完成 open 阶段后不得自动流转到 `/comet-design`',
       );
-      expect(zhOpen).toContain('拆分完毕后必须暂停询问用户开始哪一个 change');
-      expect(zhOpen).toContain('恢复时先检查已创建的 active changes');
+      expect(zhOpen).toContain('只有所有拆分项都通过两项 CLI 检查后');
+      expect(zhOpen).toContain('断点恢复时先读取 `.comet/batches/<batch-id>.json`');
 
       // IMPORTANT: main entry and build subskill agree scope expansion is blocking
       expect(zhComet).toContain('build 阶段范围扩张需重新设计或拆分新 change');
       expect(zhComet).toContain('archive 阶段执行归档脚本前的最终确认');
-      expect(zhComet).toContain('open 阶段大型 PRD 需确认拆分为多个 change');
+      expect(zhComet).toContain('open 阶段大型 PRD 是否拆分为多个 changes');
 
       // IMPORTANT: accepted Spec drift edits must not loop back through dirty-worktree handling
       expect(zhVerify).toContain('选项 A 属于 verify 阶段允许产物');
@@ -948,13 +1707,13 @@ describe('skills', () => {
         '若 `build_mode: subagent-driven-development`，不得在主窗口直接执行任务',
       );
       expect(zhBuild).toContain('主会话只负责协调，禁止直接编写实现代码');
-      expect(zhBuild).toContain('如果当前平台没有真实后台 agent 调度能力');
+      expect(zhBuild).toContain('若无法确认真实后台调度能力');
       expect(zhBuild).toContain(
         '先确认当前平台存在可调用的真实后台 subagent / Task / multi-agent 调度能力',
       );
       expect(zhBuild).toContain('`comet state set <name> subagent_dispatch confirmed`');
       expect(zhBuild).toContain(
-        '用户选择改用主窗口执行后，必须先运行 `comet state set <name> build_mode executing-plans`',
+        '用户在该联合决策中选择主窗口执行后，先运行 `comet state set <name> build_mode executing-plans`',
       );
       expect(zhBuild).not.toContain('使用 Skill 工具加载对应技能');
       expect(zhBuild).toContain('tdd_mode');
@@ -994,7 +1753,7 @@ describe('skills', () => {
       expect(zhCometRule).toContain(
         'brainstorming in progress: incrementally update brainstorm-summary.md',
       );
-      expect(zhCometRule).toContain('active compaction gate');
+      expect(zhCometRule).toContain('Design Doc、状态和最新 handoff 落盘后按需执行');
       expect(zhCometRule).toContain(
         '使用 Skill 工具重新加载 Superpowers `subagent-driven-development` 技能',
       );
@@ -1004,7 +1763,7 @@ describe('skills', () => {
       expect(zhCometRule).toContain('禁止在主会话中直接执行 task');
       for (const content of [zhOpen, zhDesign]) {
         expect(content).toContain('自动衔接下一阶段');
-        expect(content).toContain('node "$COMET_STATE" next <change-name>');
+        expect(content).toContain('comet state next <change-name>');
         expect(content).toContain('`NEXT: auto`');
         expect(content).toContain('`NEXT: manual`');
         expect(content).toContain('按 `HINT`');
@@ -1017,13 +1776,13 @@ describe('skills', () => {
         expect(content).toContain('按 `HINT`');
       }
       expect(zhHotfix).toContain('自动衔接下一阶段');
-      expect(zhHotfix).toContain('node "$COMET_STATE" next <name>');
+      expect(zhHotfix).toContain('comet state next <name>');
       expect(zhHotfix).toContain('`NEXT: auto`');
       expect(zhHotfix).toContain(
         '`phase: build` 返回 `comet-hotfix`，`verify` 返回 `comet-verify`，`archive` 返回 `comet-archive`',
       );
       expect(zhTweak).toContain('自动衔接下一阶段');
-      expect(zhTweak).toContain('node "$COMET_STATE" next <name>');
+      expect(zhTweak).toContain('comet state next <name>');
       expect(zhTweak).toContain('`NEXT: auto`');
       expect(zhTweak).toContain(
         '`phase: build` 返回 `comet-tweak`，`verify` 返回 `comet-verify`，`archive` 返回 `comet-archive`',
@@ -1034,7 +1793,7 @@ describe('skills', () => {
   describe('English Comet workflow safeguards', () => {
     it('matches the Chinese workflow decision-point requirements', async () => {
       const enComet = await fs.readFile(
-        path.resolve('assets', 'skills', 'comet', 'SKILL.md'),
+        path.resolve('assets', 'skills', 'comet-classic', 'SKILL.md'),
         'utf-8',
       );
       const enOpen = await fs.readFile(
@@ -1074,7 +1833,7 @@ describe('skills', () => {
         'utf-8',
       );
       const enCometRule = await fs.readFile(
-        path.resolve('assets', 'skills', 'comet', 'rules', 'comet-phase-guard.md'),
+        path.resolve('assets', 'skills', 'comet', 'rules', 'comet-phase-guard.en.md'),
         'utf-8',
       );
       const enDecisionPoint = await fs.readFile(
@@ -1134,17 +1893,17 @@ describe('skills', () => {
         'Never substitute recommendation rules, defaults, historical preferences',
       );
       expect(enOpen).toContain(
-        '### 1b. Requirements Clarification Completion Confirmation (Blocking Point)',
+        '### 1b. Resolve Requirements and Change Name (Non-blocking by Default)',
       );
       expect(enOpen).toContain(
-        'Must not create proposal.md, design.md, or tasks.md before the user confirms requirements clarification is complete',
+        'Do not run `openspec new change` or create proposal/design/tasks while the resolved brief or name remains ambiguous',
       );
       expect(enOpen).toContain(
-        'Full `/comet` workflow must not use the Skill tool to load the `openspec-propose` skill',
+        'Full `/comet-classic` workflow must not use the Skill tool to load the `openspec-propose` skill',
       );
       expect(enOpen).toContain('`comet/reference/decision-point.md`');
       expect(enOpen).toContain(
-        'After the skill loads, follow its guidance to create the change skeleton, but override its "STOP and wait for user direction" behavior when a confirmed clarification summary from Step 1b is already available in the conversation context',
+        'When Step 1b has produced an unambiguous resolved brief, override its "STOP and wait for user direction" behavior',
       );
       expect(enOpen).toContain(
         'The clarification summary must include: goals, non-goals, scope boundaries, key unknowns, and draft acceptance scenarios',
@@ -1163,32 +1922,28 @@ describe('skills', () => {
         'must not weaken the Superpowers `brainstorming` clarification flow by "skipping redundant context exploration"',
       );
       expect(enDesign).not.toContain('Skip redundant context exploration');
+      expect(enBuild).toContain('provide exactly **one joint decision point**');
       expect(enBuild).toContain(
-        'proceed to Step 3 to choose workspace isolation, execution method, TDD mode, and code review mode',
+        'show the plan summary, pause option, and every executable Step 3 setting together',
       );
       expect(enBuild).toContain(
-        'Then continue this step to choose workspace isolation, execution method, TDD mode, and code review mode',
-      );
-      expect(enBuild).toContain(
-        'Must not choose `branch` or `worktree` based on recommendation rules',
-      );
-      expect(enBuild).toContain(
-        'must not choose the execution method, TDD mode, or code review mode based on recommendation rules',
+        'do not choose `current`, `branch`, or `worktree`, execution method, TDD mode, or review mode from recommendations',
       );
       expect(enBuild).toContain('`comet/reference/decision-point.md`');
       expect(enVerify).toContain(
-        'must follow the `comet/reference/decision-point.md` protocol to pause and wait for the user to decide whether to fix or accept the deviation',
+        'Automatically return to build for the first 3 repairable failures',
       );
       expect(enVerify).toContain(
-        'Must follow the `comet/reference/decision-point.md` protocol to pause and wait for the user to choose branch handling method',
+        'Only accepting WARNING/SUGGESTION deviations or choosing a strategy after the 4th failure is a user decision point',
       );
-      expect(enVerify).toContain(
-        'Only after the user completes selection and the corresponding operation finishes, may `branch_status: handled` be written',
-      );
+      expect(enVerify).toContain('Do not handle, merge, or discard branches in verify');
+      expect(enVerify).toContain('do not write `branch_status: handled`');
+      expect(enArchive).toContain('### 5. Handle the Branch After the Archive Commit');
+      expect(enArchive).toContain('comet state set <change-name> branch_status handled');
       expect(enTweak).toContain('Use the Skill tool to load the `openspec-apply-change` skill');
       expect(enTweak).toContain('This apply path belongs only to tweak');
       expect(enTweak).toContain(
-        "Full `/comet` or `workflow: full` must not use tweak's `openspec-apply-change` build path",
+        "Full `/comet-classic` or `workflow: full` must not use tweak's `openspec-apply-change` build path",
       );
       expect(enTweak).toContain('single OpenSpec change');
       expect(enTweak).not.toContain('No new capability');
@@ -1202,6 +1957,8 @@ describe('skills', () => {
       expect(enArchive).toContain('Needs adjustment or re-verification');
       expect(enArchive).toContain('Do not archive yet');
       expect(enArchive).toContain('`comet state transition <change-name> archive-reopen`');
+      expect(enArchive).toContain('invoke `/comet-classic` or `/comet-open`');
+      expect(enArchive).not.toContain('invoke `/comet` or `/comet-open`');
       expect(enVerify).toContain('Must not automatically archive just because verification passed');
       expect(enHotfix).toContain(
         "must pause under the `comet/reference/decision-point.md` protocol and wait for the user's explicit choice",
@@ -1213,7 +1970,7 @@ describe('skills', () => {
       expect(enTweak).toContain('Do not directly enter `/comet-design`');
       expect(enTweak).toContain('`comet/reference/debug-gate.md`');
       expect(enComet).toContain(
-        '`verify_result: fail` → Enter verification failure decision blocking point',
+        '`verify_result: fail` → Invoke `/comet-build` automatically to continue repair',
       );
       expect(enComet).not.toContain(
         '`verify_result: fail` → `node "$COMET_STATE" transition <name> verify-fail` then `/comet-build`',
@@ -1221,14 +1978,12 @@ describe('skills', () => {
 
       expect(enHotfix).toContain('handle it through this file\'s "Upgrade Assessment"');
       expect(enTweak).toContain('handle it through this file\'s "Upgrade Assessment"');
-      expect(enHotfix).toContain(
-        'verify phase (comet-verify) verification-failure and branch-handling decisions',
-      );
-      expect(enTweak).toContain(
-        'verify phase (comet-verify) verification-failure and branch-handling decisions',
-      );
+      expect(enHotfix).toContain('Verify-phase acceptance of WARNING/SUGGESTION deviations');
+      expect(enTweak).toContain('Verify-phase acceptance of WARNING/SUGGESTION deviations');
       expect(enHotfix).toContain('Final archive confirmation');
       expect(enTweak).toContain('Final archive confirmation');
+      expect(enHotfix).toContain('branch-handling decision after the archive commit');
+      expect(enTweak).toContain('branch-handling decision after the archive commit');
       expect(enDesign).toContain('The brainstorming phase does not write to the Design Doc file');
       expect(enVerify).toContain(
         "must use the current platform's available user input/confirmation mechanism as a single-select question to pause and wait for the user to choose the handling method",
@@ -1246,10 +2001,8 @@ describe('skills', () => {
       expect(enComet).toContain(
         'workspace isolation, execution method, TDD mode, and code review mode',
       );
-      expect(enBuild).toContain('Provide Plan-Ready Pause Point');
-      expect(enBuild).toContain(
-        'Must not auto-continue and must not write the pause into `build_mode`',
-      );
+      expect(enBuild).toContain('one joint decision point');
+      expect(enBuild).toContain('Do not auto-select or write the pause into `build_mode`');
       expect(enBuild).toContain(
         'Under `executing-plans`, the main session executes tasks directly',
       );
@@ -1283,8 +2036,8 @@ describe('skills', () => {
         '`COMET_SKIP_BUILD=1` is only a compatibility bypass for legacy workflows, not auditable build evidence',
       );
       expect(enVerify).toContain('cannot be treated as auditable verification or build evidence');
-      expect(enVerify).toContain('CRITICAL or IMPORTANT failures must be fixed');
-      expect(enVerify).toContain('skipping fix to accept all is not allowed');
+      expect(enVerify).toContain('Do not manufacture a "whether to fix" decision');
+      expect(enVerify).toContain('CRITICAL/IMPORTANT findings are never waivable');
       expect(enVerify).toContain('Code review strategy');
       expect(enVerify).toContain(
         'use the Skill tool to load the Superpowers `requesting-code-review` skill',
@@ -1295,11 +2048,9 @@ describe('skills', () => {
         'does not perform spec coverage, Design Doc consistency, or drift checks',
       );
       expect(enHotfix).toContain('6 quick checks');
-      expect(enHotfix).toContain(
-        'workspace isolation and execution-method selection when tasks exceed 3 and transfer to `/comet-build`',
-      );
+      expect(enHotfix).toContain('task count alone does not route to `/comet-build`');
       expect(enBuild).toContain(
-        'Must follow the `comet/reference/decision-point.md` protocol to pause and wait for the user to explicitly choose',
+        "Must use the current platform's available user input/confirmation mechanism to pause and wait for the user to explicitly confirm",
       );
       expect(enBuild).toContain(
         'must follow the `comet/reference/decision-point.md` protocol to pause and wait for the user to decide whether to split into a new change',
@@ -1324,19 +2075,15 @@ describe('skills', () => {
       expect(enOpen).toContain(
         'In batch split mode, a single split item must not auto-advance to `/comet-design` after completing the open phase',
       );
-      expect(enOpen).toContain(
-        'After splitting is complete, must pause and ask the user which change to start',
-      );
-      expect(enOpen).toContain('On resume, first check already-created active changes');
+      expect(enOpen).toContain('Only after every split item passes both CLI checks');
+      expect(enOpen).toContain('On resume, read `.comet/batches/<batch-id>.json` first');
       expect(enComet).toContain(
         'Build phase scope expansion requiring redesign or new change split',
       );
       expect(enComet).toContain(
         'Archive phase final confirmation before running the archive script',
       );
-      expect(enComet).toContain(
-        'Open phase large PRD requiring confirmation to split into multiple changes',
-      );
+      expect(enComet).toContain('Open phase large PRD split confirmation');
       expect(enVerify).toContain('Option A is a verify phase allowed artifact');
       expect(enBuild).toContain(
         'Must use the Skill tool to load the Superpowers `using-git-worktrees`',
@@ -1353,7 +2100,7 @@ describe('skills', () => {
       expect(enDesign).toContain('openspec/changes/<name>/.comet/handoff/spec-context.md');
       expect(enDesign).toContain('In beta mode, `spec-context.json` must be structurally valid');
       expect(enDesign).toContain('incrementally update `brainstorm-summary.md`');
-      expect(enDesign).toContain('### 1e. Active Context Compaction Gate');
+      expect(enDesign).toContain('### 3a. Optional Active Context Compaction');
       expect(enHotfix).toContain('immediately use the Skill tool to load the `comet-design` skill');
       expect(enTweak).toContain('immediately use the Skill tool to load the `comet-design` skill');
       expect(enVerify).toContain(
@@ -1392,40 +2139,42 @@ describe('skills', () => {
       ).not.toContain('AskUserQuestion');
       expect(enComet).toContain('`comet/reference/decision-point.md`');
       expect(enComet).toContain('`auto_transition`');
-      expect(enComet).toContain('does not block phase updates');
+      expect(enComet).toContain('only controls next skill invocation, not phase advancement');
       expect(enCometRule).toContain(
         'brainstorming in progress: incrementally update brainstorm-summary.md',
       );
-      expect(enCometRule).toContain('active compaction gate');
+      expect(enCometRule).toContain(
+        'only after the Design Doc, state evidence, and latest handoff are persisted',
+      );
       expect(enCometRule).toContain(
         'Use the Skill tool to reload the Superpowers `subagent-driven-development` skill',
       );
       expect(enCometRule).toContain(
-        're-read `comet/reference/subagent-dispatch.md` for Comet-specific extensions',
+        'Re-read `comet/reference/subagent-dispatch.md` for Comet-specific extensions',
       );
-      expect(enCometRule).toContain('Do not execute the pending task directly in the main window');
+      expect(enCometRule).toContain('Do not execute tasks directly in the main session');
       for (const content of [enOpen, enDesign]) {
         expect(content).toContain('Automatic Handoff to Next Phase');
-        expect(content).toContain('node "$COMET_STATE" next <change-name>');
+        expect(content).toContain('comet state next <change-name>');
         expect(content).toContain('`NEXT: auto`');
         expect(content).toContain('`NEXT: manual`');
-        expect(content).toContain('run `/<SKILL>` manually');
+        expect(content).toContain('return control with `HINT`');
       }
       for (const content of [enBuild, enVerify]) {
         expect(content).toContain('Automatic Handoff to Next Phase');
         expect(content).toContain('comet state next <change-name>');
         expect(content).toContain('`NEXT: auto`');
         expect(content).toContain('`NEXT: manual`');
-        expect(content).toContain('run `/<SKILL>` manually');
+        expect(content).toContain('return control with `HINT`');
       }
       expect(enHotfix).toContain('Automatic Handoff to Next Phase');
-      expect(enHotfix).toContain('node "$COMET_STATE" next <name>');
+      expect(enHotfix).toContain('comet state next <name>');
       expect(enHotfix).toContain('`NEXT: auto`');
       expect(enHotfix).toContain(
         '`phase: build` returns `comet-hotfix`, `verify` returns `comet-verify`, `archive` returns `comet-archive`',
       );
       expect(enTweak).toContain('Automatic Handoff to Next Phase');
-      expect(enTweak).toContain('node "$COMET_STATE" next <name>');
+      expect(enTweak).toContain('comet state next <name>');
       expect(enTweak).toContain('`NEXT: auto`');
       expect(enTweak).toContain(
         '`phase: build` returns `comet-tweak`, `verify` returns `comet-verify`, `archive` returns `comet-archive`',
@@ -1436,7 +2185,7 @@ describe('skills', () => {
   describe('Comet output language safeguards', () => {
     it('requires OpenSpec and Superpowers outputs to follow the configured Comet artifact language', async () => {
       const skillNames = [
-        'comet',
+        'comet-classic',
         'comet-open',
         'comet-design',
         'comet-build',
@@ -1462,22 +2211,22 @@ describe('skills', () => {
       const zhSkills = await readSkills('skills-zh');
       const enSkills = await readSkills('skills');
 
-      expect(zhSkills.comet).toContain('输出语言规则');
-      expect(zhSkills.comet).toContain(
+      expect(zhSkills['comet-classic']).toContain('输出语言规则');
+      expect(zhSkills['comet-classic']).toContain(
         '所有 OpenSpec 和 Superpowers 产物都必须使用 Comet 配置的产物语言',
       );
       expect(zhSkills['comet-open']).toContain(
         '传递给 OpenSpec 的所有提问和产物要求都必须包含解析后的 Comet 产物语言',
       );
       expect(zhSkills['comet-design']).toContain(
-        'Language: 使用 `"$COMET_BASH" "$COMET_STATE" get <name> language` 读取到的 Comet 配置产物语言输出',
+        'Language: 使用 `comet state get <name> language` 读取到的 Comet 配置产物语言输出',
       );
       expect(zhSkills['comet-build']).toContain(
         '计划文件和执行反馈必须使用 `comet state get <name> language` 读取到的 Comet 配置产物语言',
       );
       expect(zhSkills['comet-build']).toContain('ARGUMENTS 必须包含与 Step 1 相同的 Language 约束');
       expect(zhSkills['comet-verify']).toContain(
-        '验证报告和分支处理说明必须使用 `comet state get <name> language` 读取到的 Comet 配置产物语言',
+        '验证报告必须使用 `comet state get <name> language` 读取到的 Comet 配置产物语言',
       );
       expect(zhSkills['comet-archive']).toContain(
         '归档摘要和生命周期闭环说明必须使用 `comet state get <name> language` 读取到的 Comet 配置产物语言',
@@ -1485,15 +2234,15 @@ describe('skills', () => {
       expect(zhSkills['comet-hotfix']).toContain('精简版 OpenSpec 产物必须使用 Comet 配置产物语言');
       expect(zhSkills['comet-tweak']).toContain('精简版 OpenSpec 产物必须使用 Comet 配置产物语言');
 
-      expect(enSkills.comet).toContain('Output Language Rule');
-      expect(enSkills.comet).toContain(
+      expect(enSkills['comet-classic']).toContain('Output Language Rule');
+      expect(enSkills['comet-classic']).toContain(
         'Use the configured Comet artifact language as the output language for every OpenSpec and Superpowers artifact',
       );
       expect(enSkills['comet-open']).toContain(
         'Every prompt and artifact request passed to OpenSpec must include the resolved Comet artifact language',
       );
       expect(enSkills['comet-design']).toContain(
-        'Language: Use the configured Comet artifact language from `"$COMET_BASH" "$COMET_STATE" get <name> language`',
+        'Language: Use the configured Comet artifact language from `comet state get <name> language`',
       );
       expect(enSkills['comet-build']).toContain(
         'Plan files and execution feedback must use the configured Comet artifact language from `comet state get <name> language`',
@@ -1502,7 +2251,7 @@ describe('skills', () => {
         'ARGUMENTS must include the same Language constraint as Step 1',
       );
       expect(enSkills['comet-verify']).toContain(
-        'Verification reports and branch-handling notes must use the configured Comet artifact language from `comet state get <name> language`',
+        'Verification reports must use the configured Comet artifact language from `comet state get <name> language`',
       );
       expect(enSkills['comet-archive']).toContain(
         'Archive summaries and lifecycle closure notes must use the configured Comet artifact language from `comet state get <name> language`',
@@ -1538,7 +2287,8 @@ describe('skills', () => {
       expect(zhBuild).toContain(
         '使用 Skill 工具加载 Superpowers `subagent-driven-development` 技能',
       );
-      expect(zhBuild).toContain('选择工作区隔离、执行方式、TDD 模式和代码审查模式');
+      expect(zhBuild).toContain('一个联合决策点');
+      expect(zhBuild).toContain('工作区隔离、执行方式、TDD 模式和代码审查模式');
       expect(zhBuild).toContain('读取 `comet/reference/subagent-dispatch.md` 获取 Comet 专属扩展');
       expect(zhBuild).not.toContain('#### Subagent 调度协议');
       expect(zhDispatch).toContain('发生冲突时，以本文档中更具体的 Comet 约束为准');
@@ -1554,7 +2304,7 @@ describe('skills', () => {
       expect(zhDispatch).toContain('每个 task 派发一个全新的后台 implementer agent');
       expect(zhDispatch).toContain('task reviewer、修复 agent 和 final reviewer');
       expect(zhDispatch).toContain(
-        'Language: 使用 "$COMET_BASH" "$COMET_STATE" get <name> language 读取到的 Comet 配置产物语言输出',
+        'Language: 使用 comet state get <name> language 读取到的 Comet 配置产物语言输出',
       );
       expect(zhDispatch).toContain('允许修改的文件范围');
       expect(zhDispatch).toContain('必须执行的测试命令');
@@ -1610,16 +2360,15 @@ describe('skills', () => {
       ]) {
         expect(zhDispatch, `zh dispatch should not bind to ${forbidden}`).not.toContain(forbidden);
       }
-      expect(zhDispatch).toContain(
-        'node "$COMET_STATE" task-checkoff "$PLAN_FILE" "$PLAN_TASK_TEXT"',
-      );
+      expect(zhDispatch).toContain('comet state task-checkoff <plan-file> <plan-task-text>');
       expect(zhDispatch).not.toContain('PLAN_MATCHES="$(grep -cF');
       expect(zhDispatch).toContain('RED 失败命令与失败摘要');
       expect(zhDispatch).toContain('GREEN 通过命令与通过摘要');
       expect(zhDispatch).not.toContain("grep -n '\\- \\[ \\]' openspec/changes/<name>/tasks.md");
       expect(zhDispatch).toContain('禁止总结、禁止询问用户是否继续、禁止在任务之间等待用户输入');
       expect(zhDispatch).toContain('存在无法从仓库、计划或既有上下文消除的真实歧义');
-      expect(zhDispatch).toContain('平台没有真实后台 agent 调度能力');
+      expect(zhDispatch).toContain('后台调度能力在执行中失效属于运行停止条件');
+      expect(zhDispatch).toContain('不得另设“是否改用 executing-plans”的停顿点');
       expect(zhDispatch).toContain('不得加载 `finishing-a-development-branch`');
       expect(zhDispatch).toContain('返回 `comet-build` 继续执行退出条件、阶段守卫和后续阶段衔接');
       expect(zhRecovery).toContain('重新加载 Superpowers `subagent-driven-development` 技能');
@@ -1660,9 +2409,7 @@ describe('skills', () => {
       expect(enBuild).toContain(
         'workspace isolation, execution method, TDD mode, and code review mode',
       );
-      expect(enBuild).toContain(
-        'explicitly choose isolation method, execution method, TDD mode, and code review mode',
-      );
+      expect(enBuild).toContain('one joint decision point');
       expect(enBuild).toContain(
         'update `isolation`, execution method, TDD mode, and code review mode fields',
       );
@@ -1683,7 +2430,7 @@ describe('skills', () => {
       expect(enDispatch).toContain('fresh background implementer agent for every task');
       expect(enDispatch).toContain('task reviewer, fix agents, and the final reviewer');
       expect(enDispatch).toContain(
-        'Language: Use the configured Comet artifact language from "$COMET_BASH" "$COMET_STATE" get <name> language',
+        'Language: Use the configured Comet artifact language from comet state get <name> language',
       );
       expect(enDispatch).toContain('allowed file scope');
       expect(enDispatch).toContain('required test commands');
@@ -1713,7 +2460,10 @@ describe('skills', () => {
       );
       expect(enDispatch).toContain('Do NOT summarize');
       expect(enDispatch).toContain('irreducible ambiguity');
-      expect(enDispatch).toContain('real background agent dispatch capability');
+      expect(enDispatch).toContain(
+        'Background dispatch capability disappearing during execution is a runtime stop condition',
+      );
+      expect(enDispatch).toContain('Do not create a separate "switch to executing-plans" pause');
       expect(enDispatch).toContain('must not load `finishing-a-development-branch`');
       expect(enDispatch).toContain(
         'return control to `comet-build` for exit checks, the phase guard, and phase handoff',
@@ -1787,6 +2537,53 @@ describe('skills', () => {
       return nextHeading === -1 ? rest : rest.slice(0, nextHeading);
     };
 
+    it('ships one bilingual workflow Rule with shared ownership semantics', async () => {
+      const manifest = await readManifest();
+      expect(manifest.rules).toEqual([
+        'comet/rules/comet-workflow-guard.md',
+        'comet/rules/comet-workflow-guard.en.md',
+      ]);
+      expect(manifest.nativeRules).toBeUndefined();
+
+      const zhGuard = await fs.readFile(
+        path.resolve('assets', 'skills', 'comet', 'rules', 'comet-workflow-guard.md'),
+        'utf-8',
+      );
+      const enGuard = await fs.readFile(
+        path.resolve('assets', 'skills', 'comet', 'rules', 'comet-workflow-guard.en.md'),
+        'utf-8',
+      );
+      for (const guard of [zhGuard, enGuard]) {
+        expect(guard).toContain('default_workflow');
+        expect(guard).toContain('.comet/current-change.json');
+        expect(guard).toContain('Native');
+        expect(guard).toContain('Classic');
+        expect(guard).toContain('Hook Router');
+      }
+      expect(zhGuard).toContain('先记录失败并通过 Native Runtime 回到 Build');
+      expect(zhGuard).toContain('点号开头的普通项目文件');
+      expect(enGuard).toContain('record the failed result');
+      expect(enGuard).toContain('return to Build before modifying the implementation');
+      expect(enGuard).toContain('dot-prefixed project files');
+
+      await expect(
+        fs.access(
+          path.resolve('assets', 'skills', 'comet-native', 'rules', 'comet-native-phase-guard.md'),
+        ),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(
+        fs.access(
+          path.resolve(
+            'assets',
+            'skills',
+            'comet-native',
+            'rules',
+            'comet-native-phase-guard.en.md',
+          ),
+        ),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
     it('delegates post-guard handoff to comet-state next so auto_transition is honored', async () => {
       const zhGuard = await fs.readFile(
         path.resolve('assets', 'skills', 'comet', 'rules', 'comet-phase-guard.md'),
@@ -1798,7 +2595,7 @@ describe('skills', () => {
       );
 
       const zhSection = section(zhGuard, '## 阶段退出后自动过渡');
-      expect(zhSection).toContain('comet-state next <change-name>');
+      expect(zhSection).toContain('comet state next <change-name>');
       expect(zhSection).toContain('NEXT: auto');
       expect(zhSection).toContain('NEXT: manual');
       expect(zhSection).toContain('NEXT: done');
@@ -1806,7 +2603,7 @@ describe('skills', () => {
       expect(zhSection).not.toContain('open → `comet-design`');
 
       const enSection = section(enGuard, '## Automatic Transition After Phase Exit');
-      expect(enSection).toContain('comet-state next <change-name>');
+      expect(enSection).toContain('comet state next <change-name>');
       expect(enSection).toContain('NEXT: auto');
       expect(enSection).toContain('NEXT: manual');
       expect(enSection).toContain('NEXT: done');
@@ -1824,10 +2621,10 @@ describe('skills', () => {
         'utf-8',
       );
 
-      expect(zhGuard).toContain('`isolation` / `build_mode` / `tdd_mode` / `review_mode` 四项选择');
-      expect(enGuard).toContain(
-        'four choices: `isolation` / `build_mode` / `tdd_mode` / `review_mode`',
-      );
+      expect(zhGuard).toContain('`isolation` / `build_mode` / `tdd_mode` / `review_mode`');
+      expect(zhGuard).toContain('一个联合决策');
+      expect(enGuard).toContain('`isolation` / `build_mode` / `tdd_mode` / `review_mode`');
+      expect(enGuard).toContain('one joint decision');
     });
 
     it('documents the Superpowers workspace hook allowlist in both languages', async () => {
@@ -1872,10 +2669,13 @@ describe('skills', () => {
 
     it('documents Ambient Resume in both Comet entry Skills', async () => {
       const zh = await fs.readFile(
-        path.resolve('assets', 'skills-zh', 'comet', 'SKILL.md'),
+        path.resolve('assets', 'skills-zh', 'comet-classic', 'SKILL.md'),
         'utf-8',
       );
-      const en = await fs.readFile(path.resolve('assets', 'skills', 'comet', 'SKILL.md'), 'utf-8');
+      const en = await fs.readFile(
+        path.resolve('assets', 'skills', 'comet-classic', 'SKILL.md'),
+        'utf-8',
+      );
 
       expect(zh).toContain('Comet Ambient Resume');
       expect(zh).toContain('node "$COMET_RESUME_PROBE" probe --stdin');
@@ -2150,14 +2950,18 @@ describe('skills', () => {
   describe('renderProjectConfig', () => {
     it('renders all managed fields with defaults when no existing values', () => {
       const output = renderProjectConfig({});
-      expect(output).toContain('# language: en | zh-CN');
+      expect(output).toContain('# Artifact language used by Classic workflow documents');
       expect(output).toContain('language: en');
-      expect(output).toContain('# context_compression: off | beta');
+      expect(output).toContain('# Controls beta context compression');
       expect(output).toContain('context_compression: off');
-      expect(output).toContain('# review_mode: off | standard | thorough');
+      expect(output).toContain('# Sets the default review depth');
       expect(output).toContain('review_mode: standard');
-      expect(output).toContain('# auto_transition: true | false');
+      expect(output).toContain('# Automatically enters the next Classic phase');
       expect(output).toContain('auto_transition: true');
+      expect(output).toContain(
+        '# Enables automatic recovery through the read-only Ambient Resume probe',
+      );
+      expect(output).toContain('ambient_resume: true');
     });
 
     it('preserves existing managed field values', () => {
@@ -2176,6 +2980,9 @@ describe('skills', () => {
     it('uses the selected artifact language as the default language value', () => {
       const output = renderProjectConfig({}, 'zh-CN');
       expect(output).toContain('language: zh-CN');
+      expect(output).toContain('# Classic 工作流文档使用的产物语言');
+      expect(output).toContain('# 是否启用只读的环境感知恢复探针');
+      expect(output).not.toContain('# Artifact language used for workflow documents');
     });
 
     it('forces the language field to the passed value even when an existing value differs', () => {
@@ -2203,10 +3010,88 @@ describe('skills', () => {
     it('creates config with defaults when no file exists', async () => {
       await mergeProjectConfig(tmpDir);
       const content = await fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf-8');
-      expect(content).toContain('language: en');
-      expect(content).toContain('context_compression: off');
-      expect(content).toContain('review_mode: standard');
-      expect(content).toContain('auto_transition: true');
+      expect(parse(content)).toMatchObject({
+        ambient_resume: true,
+        classic: {
+          language: 'en',
+          context_compression: 'off',
+          review_mode: 'standard',
+          auto_transition: true,
+        },
+      });
+      expect(parse(content)).not.toHaveProperty('native');
+      expect(content).not.toMatch(/^(language|context_compression|review_mode|auto_transition):/mu);
+    });
+
+    it('adds the sequential clarification default only to an existing Native block', async () => {
+      const configDir = path.join(tmpDir, '.comet');
+      const configPath = path.join(configDir, 'config.yaml');
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(
+        configPath,
+        [
+          'schema: comet.project.v1',
+          'default_workflow: native',
+          'native:',
+          '  artifact_root: docs',
+          '  language: en',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      await mergeProjectConfig(tmpDir);
+
+      expect(parse(await fs.readFile(configPath, 'utf-8'))).toMatchObject({
+        native: {
+          artifact_root: 'docs',
+          language: 'en',
+          clarification_mode: 'sequential',
+        },
+      });
+    });
+
+    it('preserves batch clarification mode across idempotent config updates', async () => {
+      const configDir = path.join(tmpDir, '.comet');
+      const configPath = path.join(configDir, 'config.yaml');
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(
+        configPath,
+        [
+          'schema: comet.project.v1',
+          'default_workflow: native',
+          'native:',
+          '  artifact_root: docs',
+          '  language: en',
+          '  clarification_mode: batch',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      await mergeProjectConfig(tmpDir);
+      const first = await fs.readFile(configPath, 'utf-8');
+      await mergeProjectConfig(tmpDir);
+      const second = await fs.readFile(configPath, 'utf-8');
+
+      expect(parse(second)).toMatchObject({
+        native: { clarification_mode: 'batch' },
+      });
+      expect(second).toBe(first);
+    });
+
+    it('fails closed when updating an invalid Native clarification mode', async () => {
+      const configDir = path.join(tmpDir, '.comet');
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(
+        path.join(configDir, 'config.yaml'),
+        'native:\n  artifact_root: docs\n  clarification_mode: sometimes\n',
+        'utf-8',
+      );
+
+      await expect(mergeProjectConfig(tmpDir)).rejects.toThrow(
+        'native.clarification_mode must be sequential or batch',
+      );
     });
 
     it('preserves existing user values and fills missing managed fields', async () => {
@@ -2220,10 +3105,15 @@ describe('skills', () => {
 
       await mergeProjectConfig(tmpDir);
       const content = await fs.readFile(path.join(configDir, 'config.yaml'), 'utf-8');
-      expect(content).toContain('language: en');
-      expect(content).toContain('context_compression: beta');
-      expect(content).toContain('review_mode: standard');
-      expect(content).toContain('auto_transition: true');
+      expect(parse(content)).toMatchObject({
+        classic: {
+          language: 'en',
+          context_compression: 'beta',
+          review_mode: 'standard',
+          auto_transition: true,
+        },
+      });
+      expect(content).not.toMatch(/^(language|context_compression|review_mode|auto_transition):/mu);
     });
 
     it('preserves extra user fields', async () => {
@@ -2268,6 +3158,46 @@ describe('skills', () => {
       await mergeProjectConfig(tmpDir, null);
       const content = await fs.readFile(path.join(configDir, 'config.yaml'), 'utf-8');
       expect(content).toContain('language: zh-CN');
+    });
+
+    it('preserves new-format values when legacy top-level fields conflict', async () => {
+      const configDir = path.join(tmpDir, '.comet');
+      const configPath = path.join(configDir, 'config.yaml');
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(
+        configPath,
+        [
+          'language: en',
+          'review_mode: off',
+          'classic:',
+          '  language: zh-CN',
+          '  context_compression: beta',
+          '  review_mode: thorough',
+          '  auto_transition: false',
+          'native:',
+          '  artifact_root: docs',
+          '  language: en',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      await mergeProjectConfig(tmpDir, null);
+      const first = await fs.readFile(configPath, 'utf-8');
+      await mergeProjectConfig(tmpDir, null);
+      const second = await fs.readFile(configPath, 'utf-8');
+
+      expect(parse(second)).toMatchObject({
+        classic: {
+          language: 'zh-CN',
+          context_compression: 'beta',
+          review_mode: 'thorough',
+          auto_transition: false,
+        },
+        native: { artifact_root: 'docs', language: 'en' },
+      });
+      expect(second).not.toMatch(/^(language|context_compression|review_mode|auto_transition):/mu);
+      expect(second).toBe(first);
     });
   });
 

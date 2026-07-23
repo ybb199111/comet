@@ -21,8 +21,10 @@ tdd_mode: tdd
 review_mode: standard
 auto_transition: true
 isolation: branch
+bound_branch: null
 verify_mode: light
 verify_result: pending
+verify_failures: 0
 verification_report: null
 branch_status: pending
 created_at: 2026-05-26
@@ -36,7 +38,7 @@ archived: false
 | Field | Meaning |
 |-------|---------|
 | `workflow` | `full`, `hotfix`, or `tweak` |
-| `language` | Artifact language, `en` or `zh-CN`. Written to the project or global `.comet/config.yaml` according to install scope, snapshotted into `.comet.yaml` with project-over-global precedence when a change is created, and used as the main-language constraint for OpenSpec / Superpowers artifacts |
+| `language` | Artifact language, `en` or `zh-CN`. Written to `classic.language` in the project or global `.comet/config.yaml` according to install scope, snapshotted into `.comet.yaml` with project-over-global precedence when a change is created, and used as the main-language constraint for OpenSpec / Superpowers artifacts |
 | `phase` | Current phase: `open`, `design`, `build`, `verify`, `archive` (init sets `open`; guard handles transitions) |
 | `design_doc` | Associated Superpowers Design Doc path; may be empty |
 | `plan` | Associated Superpowers Plan path; may be empty |
@@ -44,14 +46,16 @@ archived: false
 | `build_mode` | Selected execution mode; may be empty. Values: `subagent-driven-development` (isolated background subagents implement and review each task), `executing-plans` (main session executes sequentially by plan), `direct` (main session codes directly; allowed by default only for hotfix/tweak, full workflow requires `direct_override: true`) |
 | `build_pause` | Build phase internal pause point. `null` = no pause, `plan-ready` = plan generated, paused for user model switch |
 | `subagent_dispatch` | `null` or `confirmed`. Only when the platform's real background subagent/Task/multi-agent dispatch capability is confirmed may `build_mode: subagent-driven-development` be written and used to leave the build phase |
-| `tdd_mode` | `tdd` or `direct`. Full workflow must select before leaving build. `tdd` forces write-failing-test-first per task; `direct` skips TDD enforcement. hotfix/tweak default to `direct` |
+| `tdd_mode` | `tdd` or `direct`. Full workflow must select before leaving build. `tdd` forces write-failing-test-first per task; `direct` skips per-task TDD but still requires relevant tests and bug-regression evidence. hotfix/tweak default to `direct` |
 | `review_mode` | `off`, `standard`, or `thorough`. Full workflow must select before leaving build; hotfix/tweak default to `off` |
-| `isolation` | `branch` or `worktree`, workspace isolation mode. Full init may be `null` but only until `/comet-build` Step 3; hotfix/tweak default to `branch` |
+| `isolation` | `current`, `branch`, or `worktree`. Full init may be `null`, but before leaving build the user must explicitly select `current`, create/select a real `branch`, or create/select a real `worktree`; hotfix/tweak may also truthfully use all three modes after the entry user decision point, and must not claim branch isolation before creating one |
+| `bound_branch` | Workspace branch binding record; may be empty. `isolation: current` / `branch` / `worktree` records the current Git branch of the directory the command runs in on first setting or entry check (for worktree mode, run set/check/guard inside that worktree, or the wrong branch gets bound/compared); switching `isolation` between workspace modes re-binds to the current branch, while repeating the same mode keeps the existing binding. Later `comet state select` / `comet state check` must confirm the bound branch still matches the current branch. On drift, `select` refuses and checks return `BLOCKED`; follow the decision-point protocol so the user chooses whether to switch back to the bound branch or explicitly confirm and run `comet state rebind <change-name>`. Clearing `isolation` clears this field |
 | `verify_mode` | `light` or `full`; may be empty |
 | `auto_transition` | `true` or `false`. Only controls whether to automatically invoke the next skill after phase guard advances phase; `false` outputs `manual` from `comet-state next`, pausing next-skill invocation but not blocking phase field updates |
 | `verify_result` | `pending`, `pass`, or `fail` |
+| `verify_failures` | Machine-owned consecutive verification failure count. `verify-fail` increments it; `verify-pass` or `archive-reopen` resets it to `0`. At `3`, the next failure requires the retry-limit strategy decision |
 | `verification_report` | Verification report file path; must point to an existing file before verify passes |
-| `branch_status` | `pending` or `handled`; set to `handled` after branch handling completes |
+| `branch_status` | `pending` or `handled`; keep pending through verify/archive, then set handled after the archive commit and selected branch handling complete |
 | `created_at` | Change creation date (auto-written at init), format `YYYY-MM-DD` |
 | `verified_at` | Verification pass timestamp; may be empty |
 | `archive_confirmation` | `null`, `pending`, or `confirmed`. `verify-pass` writes `pending` when entering the archive phase; after the user selects "Confirm archive" in `/comet-archive`, the `archive-confirm` transition writes `confirmed`; `archive-reopen` clears the field so an earlier confirmation cannot be reused |
@@ -65,7 +69,7 @@ archived: false
 
 ## State Machine Hard Constraints
 
-- Before `build → verify`, `isolation` must be `branch` or `worktree`
+- Before `build → verify`, `isolation` must be `current`, `branch`, or `worktree`
 - Before `build → verify`, `build_mode` must be selected
 - `build_mode: subagent-driven-development` requires `subagent_dispatch: confirmed`
 - Full workflow must select `tdd_mode` as `tdd` or `direct` before leaving build

@@ -10,14 +10,19 @@
 #   --max-turns N             Maximum number of subject<->simulator round trips (default 12)
 #   --model MODEL             Model for both subject and simulator
 #   --simulator-prompt-file   File containing the simulator system prompt
+#   --decision-reply TEXT     Deterministic reply for each detected decision point
 #   --continue-prompt TEXT    Nudge used when the workflow should continue
 #   --decision-pattern TEXT   Extra case-insensitive substring to treat as a decision point
+#   --fresh-resume-marker TEXT  Start the following turn in a new subject session
 #
 # Env: ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL for the proxy.
 # Stdout: concatenated stream-json from every subject turn (for event extraction).
 # Stderr: driver progress log.
 
 set -uo pipefail
+shopt -s nocasematch
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROMPT_ARG="${1:?usage: run-claude-loop.sh <prompt|@prompt-file> [--max-turns N]}"
 shift || true
@@ -31,7 +36,9 @@ fi
 MAX_TURNS=12
 MODEL="${ANTHROPIC_MODEL:-}"
 SIMULATOR_PROMPT=""
+DECISION_REPLY=""
 CONTINUE_PROMPT="Please continue with the next phase of the comet workflow."
+FRESH_RESUME_MARKER=""
 DECISION_PATTERNS=()
 PLUGIN_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -46,7 +53,9 @@ while [[ $# -gt 0 ]]; do
             SIMULATOR_PROMPT="$(cat "$2")"
             shift 2
             ;;
+        --decision-reply) DECISION_REPLY="$2"; shift 2 ;;
         --continue-prompt) CONTINUE_PROMPT="$2"; shift 2 ;;
+        --fresh-resume-marker) FRESH_RESUME_MARKER="$2"; shift 2 ;;
         --decision-pattern)
             DECISION_PATTERNS+=("$2")
             shift 2
@@ -60,21 +69,6 @@ MODEL_FLAG=()
 
 # Detect whether the last subject turn is waiting on the user. comet decision
 # points present as a question / confirmation request with no pending tool call.
-is_decision_point() {
-    local text="$1"
-    local pattern
-    for pattern in "${DECISION_PATTERNS[@]}"; do
-        if [[ -n "$pattern" ]] && echo "$text" | grep -qiF -- "$pattern"; then
-            return 0
-        fi
-    done
-    # Heuristics: question marks, explicit "confirm/choose/proceed/continue" asks.
-    if echo "$text" | grep -qiE '\?|confirm|choose|proceed|continue|approve|select an option|which (option|approach|name)|enter the|provide|would you|shall we|do you want|preferred'; then
-        return 0
-    fi
-    return 1
-}
-
 # Drive the user-simulator: given the subject's last message, produce a concise
 # affirmative/clarifying reply that lets the workflow proceed.
 simulate_user() {
@@ -110,25 +104,48 @@ EOF
 }
 
 SESSION_ID=""
+FRESH_PROMPT=""
 COMBINED_OUT=""
 TURN=0
 
 while [[ $TURN -lt $MAX_TURNS ]]; do
     TURN=$((TURN + 1))
     echo "[loop] turn $TURN/$MAX_TURNS" >&2
+    SUBJECT_STDERR=$(mktemp)
 
     if [[ -z "$SESSION_ID" ]]; then
-        # First turn: start fresh with the task prompt.
-        RAW=$(claude -p "$PROMPT" "${PLUGIN_ARGS[@]}" "${MODEL_FLAG[@]}" \
+        # The first turn uses the task prompt. A requested cold-resume boundary
+        # starts another session with only the continuation prompt.
+        SUBJECT_PROMPT="${FRESH_PROMPT:-$PROMPT}"
+        FRESH_PROMPT=""
+        RAW=$(claude -p "$SUBJECT_PROMPT" "${PLUGIN_ARGS[@]}" "${MODEL_FLAG[@]}" \
             --output-format stream-json --verbose \
-            --dangerously-skip-permissions 2>/dev/null) || RAW=""
+            --dangerously-skip-permissions 2>"$SUBJECT_STDERR")
+        SUBJECT_STATUS=$?
     else
         # Subsequent turns: resume the session with the simulated user reply.
         RAW=$(claude -p "$USER_REPLY" "${PLUGIN_ARGS[@]}" "${MODEL_FLAG[@]}" \
             --resume "$SESSION_ID" \
             --output-format stream-json --verbose \
-            --dangerously-skip-permissions 2>/dev/null) || RAW=""
+            --dangerously-skip-permissions 2>"$SUBJECT_STDERR")
+        SUBJECT_STATUS=$?
     fi
+
+    if [[ $SUBJECT_STATUS -ne 0 ]]; then
+        echo "[loop] subject turn $TURN failed (exit $SUBJECT_STATUS)" >&2
+        # Some Claude CLI failures write their diagnostic to stdout.  The
+        # command substitution above preserves it, so include it alongside
+        # stderr rather than turning a diagnosable subject failure into an
+        # opaque no-events sample.
+        if [[ -n "$RAW" ]]; then
+            echo "[loop] subject stdout:" >&2
+            printf '%s\n' "$RAW" >&2
+        fi
+        cat "$SUBJECT_STDERR" >&2
+        rm -f "$SUBJECT_STDERR"
+        exit "$SUBJECT_STATUS"
+    fi
+    rm -f "$SUBJECT_STDERR"
 
     COMBINED_OUT="${COMBINED_OUT}${RAW}"$'\n'
 
@@ -154,20 +171,33 @@ except: print('')
         break
     fi
 
-    if is_decision_point "$RESULT_TEXT"; then
+    if [[ -n "$FRESH_RESUME_MARKER" && "$RESULT_TEXT" == *"$FRESH_RESUME_MARKER"* ]]; then
+        echo "[loop] fresh resume boundary detected; starting a new subject session" >&2
+        SESSION_ID=""
+        FRESH_PROMPT="$CONTINUE_PROMPT"
+        continue
+    fi
+
+    # Completion is task-validated from exported artifacts after the loop. Stop
+    # only on an explicit, non-negated workflow/archive completion statement.
+    if bash "$SCRIPT_DIR/completion-point.sh" "$RESULT_TEXT"; then
+        echo "[loop] workflow completion detected; ending" >&2
+        break
+    fi
+
+    if bash "$SCRIPT_DIR/decision-point.sh" "$RESULT_TEXT" "${DECISION_PATTERNS[@]}"; then
         echo "[loop] decision point detected; simulating user reply" >&2
-        USER_REPLY=$(simulate_user "$RESULT_TEXT")
+        if [[ -n "$DECISION_REPLY" ]]; then
+            USER_REPLY="$DECISION_REPLY"
+            echo "[loop] deterministic decision reply applied" >&2
+        else
+            USER_REPLY=$(simulate_user "$RESULT_TEXT")
+        fi
         if [[ -z "$USER_REPLY" ]]; then
             USER_REPLY="Yes, please proceed with the recommended option."
         fi
         echo "[loop] simulated reply (${#USER_REPLY} chars)" >&2
         continue
-    fi
-
-    # Not a decision point: check if workflow looks complete.
-    if echo "$RESULT_TEXT" | grep -qiE 'archive(d)? complete|workflow complete|change archived|all (5|five) phases|finished|done'; then
-        echo "[loop] workflow appears complete; ending" >&2
-        break
     fi
 
     # If the result has no question and isn't complete, the subject likely finished
