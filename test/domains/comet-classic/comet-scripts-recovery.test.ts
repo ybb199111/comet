@@ -9,6 +9,7 @@ import { execFileSync, spawnSync } from 'child_process';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
+import { prepareClassicLegacyProject } from '../../helpers/classic-project.js';
 
 const scriptsDir = path.resolve('assets', 'skills', 'comet', 'scripts');
 const classicRuntimeRoot = path.resolve('assets', 'skills', 'comet', 'runtime', 'classic');
@@ -63,6 +64,7 @@ describe('check --recover', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-recovery-'));
+    await prepareClassicLegacyProject(tmpDir);
     const tmpScriptsDir = path.join(tmpDir, 'scripts');
     await fs.mkdir(tmpScriptsDir, { recursive: true });
     for (const name of [
@@ -103,10 +105,12 @@ describe('check --recover', () => {
   });
 
   it('outputs recovery context for build phase with partial progress', async () => {
+    const plan = 'docs/superpowers/plans/recover-build.md';
+    await writeFile(path.join(tmpDir, ...plan.split('/')), '- [ ] pending task\n');
     await createChange(
       tmpDir,
       'recover-build',
-      FULL_YAML,
+      FULL_YAML.replace('plan: null', `plan: ${plan}`),
       ['- [x] done task', '- [ ] pending task'].join('\n'),
     );
 
@@ -118,6 +122,90 @@ describe('check --recover', () => {
     expect(result.stdout).toContain('build_mode: PENDING');
     expect(result.stdout).toContain('Tasks: 1/2 done, 1 pending');
     expect(result.stdout).toContain("current platform's user confirmation mechanism");
+  });
+
+  it('returns full build recovery to plan creation when configuration is already selected', async () => {
+    await writeFile(
+      path.join(tmpDir, 'docs', 'superpowers', 'specs', 'recover-missing-plan-design.md'),
+      '# Design\n',
+    );
+    await createChange(
+      tmpDir,
+      'recover-missing-plan',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: executing-plans',
+        'build_pause: null',
+        'tdd_mode: direct',
+        'review_mode: standard',
+        'isolation: branch',
+        'verify_mode: null',
+        'design_doc: docs/superpowers/specs/recover-missing-plan-design.md',
+        'plan: null',
+        'verify_result: pending',
+        'archived: false',
+        '',
+      ].join('\n'),
+      ['- [x] done task', '- [ ] pending task'].join('\n'),
+    );
+
+    const result = runNode(tmpDir, stateScript, [
+      'check',
+      'recover-missing-plan',
+      'build',
+      '--recover',
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ERROR_CODE: classic-build-plan-missing');
+    expect(result.stdout).toContain('CHANGE: recover-missing-plan');
+    expect(result.stdout).toContain(
+      'comet state set recover-missing-plan plan <repository-relative-plan-path>',
+    );
+    expect(result.stdout).toContain('comet state check recover-missing-plan build --recover');
+    expect(result.stdout).toContain('SUCCESS:');
+    expect(result.stdout).toContain('RETRY:');
+    expect(result.stdout).toContain('PROHIBITED:');
+    expect(result.stdout).not.toContain('Read tasks.md and continue');
+  });
+
+  it('reports a recorded but missing full build plan as broken', async () => {
+    await createChange(
+      tmpDir,
+      'recover-broken-plan',
+      [
+        'workflow: full',
+        'phase: build',
+        'build_mode: executing-plans',
+        'build_pause: null',
+        'tdd_mode: direct',
+        'review_mode: standard',
+        'isolation: branch',
+        'verify_mode: null',
+        'design_doc: docs/superpowers/specs/recover-broken-plan-design.md',
+        'plan: docs/superpowers/plans/missing-plan.md',
+        'verify_result: pending',
+        'archived: false',
+        '',
+      ].join('\n'),
+      '- [ ] pending task\n',
+    );
+
+    const result = runNode(tmpDir, stateScript, [
+      'check',
+      'recover-broken-plan',
+      'build',
+      '--recover',
+    ]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('ERROR_CODE: classic-build-plan-broken');
+    expect(result.stdout).toContain('RECORDED_PLAN: docs/superpowers/plans/missing-plan.md');
+    expect(result.stdout).toContain(
+      'comet state set recover-broken-plan plan <new-repository-relative-plan-path>',
+    );
+    expect(result.stdout).toContain('comet state check recover-broken-plan build --recover');
   });
 
   it('outputs plan-ready pause recovery context for build phase', async () => {
@@ -156,6 +244,10 @@ describe('check --recover', () => {
   });
 
   it('outputs subagent dispatch guidance when recovering build phase with pending tasks', async () => {
+    await writeFile(
+      path.join(tmpDir, 'docs', 'superpowers', 'plans', 'subagent-plan.md'),
+      '- [ ] pending task\n',
+    );
     await createChange(
       tmpDir,
       'recover-subagent',
@@ -191,7 +283,7 @@ describe('check --recover', () => {
     expect(result.stdout).toContain(
       'inspect the first unchecked task against recent git history/diff',
     );
-    expect(result.stdout).toContain('dispatch a real background subagent');
+    expect(result.stdout).toContain('dispatch a subagent');
     expect(result.stdout).toContain('Do not execute the pending task directly in the main window');
   });
 

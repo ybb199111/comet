@@ -152,6 +152,18 @@ export interface NativeDashboardChangeProjection {
   repair: NativeDashboardRepairSummary | null;
 }
 
+export interface NativeDashboardChangeListItem {
+  workflow: 'native';
+  name: string;
+  status: 'active' | 'archived';
+  archiveName?: string;
+  archivedAt: string | null;
+  phase: NativePhase | 'invalid';
+  revision: number | null;
+  verificationResult: NativeVerificationResult;
+  verificationFreshness: NativeDashboardVerificationFreshness;
+}
+
 export interface NativeDashboardConflictSummary {
   available: boolean;
   definiteConflict: number;
@@ -167,6 +179,8 @@ export interface NativeDashboardProjection {
   schema: typeof NATIVE_DASHBOARD_SCHEMA;
   generatedAt: string;
   totalChangeCount: number;
+  activeChangeCount?: number;
+  archivedChangeCount?: number;
   visibleChangeCount: number;
   omittedChangeCount: number;
   changesTruncated: boolean;
@@ -181,6 +195,8 @@ export interface NativeDashboardAdapterInput {
   conflictRadar?: NativeConflictRadarSnapshot | null;
   /** Changes omitted by an upstream bounded collector before this adapter ran. */
   omittedSourceChangeCount?: number;
+  /** Optional page-specific cap; the lightweight overview keeps the default bounded cap. */
+  maxChanges?: number;
 }
 
 function byteLength(value: string): number {
@@ -516,7 +532,10 @@ export function adaptNativeDashboardProjection(
       names.add(status.name);
       return true;
     });
-  const visibleStatuses = accepted.slice(0, NATIVE_DASHBOARD_LIMITS.maxChanges);
+  const visibleStatuses = accepted.slice(
+    0,
+    Math.max(0, input.maxChanges ?? NATIVE_DASHBOARD_LIMITS.maxChanges),
+  );
   const budgetOmissions = accepted.length - visibleStatuses.length;
   const changes = visibleStatuses.map((status) =>
     projectChange(status, input.preflights?.[status.name], input.conflictRadar),

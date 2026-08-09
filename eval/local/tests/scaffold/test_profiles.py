@@ -303,6 +303,153 @@ def test_comet_profile_scores_full_with_full_specific_rubric(tmp_path: Path):
     assert any("workflow=full" in msg and "design=deep" in msg for msg in passed)
 
 
+def test_comet_profile_scores_docs_layout_from_treatment(tmp_path: Path):
+    change_dir = tmp_path / "docs" / "openspec" / "changes" / "archive" / "2026-07-28-add-sentences"
+    comet_dir = change_dir / ".comet"
+    (comet_dir / "handoff").mkdir(parents=True)
+    (change_dir / ".comet.yaml").write_text(
+        "workflow: full\nphase: archive\nverify_result: pass\narchived: true\n",
+        encoding="utf-8",
+    )
+    (comet_dir / "state-events.jsonl").write_text(
+        '{"event":"archived","from":{"phase":"archive"},"to":{"phase":"archive"}}\n',
+        encoding="utf-8",
+    )
+    (comet_dir / "trajectory.jsonl").write_text("{}\n", encoding="utf-8")
+    (comet_dir / "handoff" / "design-context.json").write_text(
+        '{"change":"add-sentences"}',
+        encoding="utf-8",
+    )
+    (change_dir / "proposal.md").write_text(
+        "\n".join(f"proposal line {index}" for index in range(12)),
+        encoding="utf-8",
+    )
+    (change_dir / "design.md").write_text(
+        "Tradeoff and alternative option with risk to consider.",
+        encoding="utf-8",
+    )
+    (change_dir / "tasks.md").write_text(
+        "- [x] Design\n- [x] Implement\n- [x] Verify\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs/superpowers/specs").mkdir(parents=True)
+    (tmp_path / "docs/superpowers/specs/add-sentences.md").write_text(
+        "# Design\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs/superpowers/plans").mkdir(parents=True)
+    (tmp_path / "docs/superpowers/plans/add-sentences.md").write_text(
+        "# Plan\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs/superpowers/reports").mkdir(parents=True)
+    (tmp_path / "docs/superpowers/reports/add-sentences.md").write_text(
+        "# Verification\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_sentences.py").write_text(
+        "def test_sentences():\n    assert True\n",
+        encoding="utf-8",
+    )
+    outputs = {
+        "treatment_name": "COMET_CLASSIC_DOCS_LAYOUT",
+        "completion": {"passed": ["sentences added"], "failed": []},
+        "events": {
+            "skills_invoked": [
+                "comet",
+                "comet-open",
+                "openspec-new-change",
+                "comet-design",
+                "brainstorming",
+                "comet-build",
+                "writing-plans",
+                "comet-verify",
+                "verification-before-completion",
+                "comet-archive",
+            ],
+            "commands_run": [],
+            "files_created": [
+                "docs/openspec/changes/archive/2026-07-28-add-sentences/proposal.md",
+                "docs/openspec/changes/archive/2026-07-28-add-sentences/tasks.md",
+                "docs/superpowers/specs/add-sentences.md",
+                "docs/superpowers/plans/add-sentences.md",
+                "docs/superpowers/reports/add-sentences.md",
+            ],
+            "files_modified": [],
+            "num_turns": 1,
+            "tool_calls": [],
+            "duration_seconds": 5,
+        },
+        "interaction": {"mode": "auto_user", "max_turns": 3},
+    }
+
+    passed, _ = run_profile_rubric("comet-workflow", tmp_path, outputs)
+
+    assert any("[RUBRIC] main_flow: 1.00 - workflow=full" in msg for msg in passed)
+    assert any("[RUBRIC] artifact_quality: 1.00" in msg for msg in passed)
+    assert any("[RUBRIC] recovery_resilience: 1.00" in msg for msg in passed)
+
+
+@pytest.mark.parametrize(
+    ("artifact_root", "treatment_name"),
+    [
+        ("openspec", "COMET_CLASSIC_LEGACY_LAYOUT"),
+        ("docs/openspec", "COMET_CLASSIC_DOCS_LAYOUT"),
+    ],
+)
+def test_comet_profile_recognizes_proxied_openspec_spec_reconciliation(
+    tmp_path: Path,
+    artifact_root: str,
+    treatment_name: str,
+):
+    outputs = {
+        "treatment_name": treatment_name,
+        "completion": {"passed": ["spec reconciled"], "failed": []},
+        "events": {
+            "skills_invoked": [],
+            "commands_run": ["comet classic openspec -- archive demo -y"],
+            "files_created": [
+                f"{artifact_root}/changes/demo/specs/example/spec.md",
+            ],
+            "files_modified": [],
+            "num_turns": 1,
+            "tool_calls": [],
+            "duration_seconds": 1,
+        },
+        "interaction": {"mode": "auto_user", "max_turns": 3},
+    }
+
+    passed, _ = run_profile_rubric("comet-workflow", tmp_path, outputs)
+
+    assert any(
+        "[RUBRIC] spec_drift: 1.00 - spec_written=True spec_synced=True" in msg
+        for msg in passed
+    )
+
+
+def test_comet_profile_still_recognizes_direct_openspec_spec_reconciliation(tmp_path: Path):
+    outputs = {
+        "completion": {"passed": ["spec reconciled"], "failed": []},
+        "events": {
+            "skills_invoked": [],
+            "commands_run": ["openspec sync demo"],
+            "files_created": ["openspec/changes/demo/specs/example/spec.md"],
+            "files_modified": [],
+            "num_turns": 1,
+            "tool_calls": [],
+            "duration_seconds": 1,
+        },
+        "interaction": {"mode": "auto_user", "max_turns": 3},
+    }
+
+    passed, _ = run_profile_rubric("comet-workflow", tmp_path, outputs)
+
+    assert any(
+        "[RUBRIC] spec_drift: 1.00 - spec_written=True spec_synced=True" in msg
+        for msg in passed
+    )
+
+
 def test_generic_profile_scores_completion_skill_artifact_and_efficiency(tmp_path: Path):
     (tmp_path / "result.md").write_text("done")
     outputs = {
@@ -326,6 +473,33 @@ def test_generic_profile_scores_completion_skill_artifact_and_efficiency(tmp_pat
     assert any("[RUBRIC] skill_invocation: 1.00" in msg for msg in passed)
     assert any("[RUBRIC] artifact_presence: 1.00" in msg for msg in passed)
     assert any("[RUBRIC] weighted_score:" in msg for msg in passed)
+
+
+def test_generic_profile_rejects_artifacts_outside_the_test_directory(tmp_path: Path):
+    outside = tmp_path.parent / "outside-artifact.txt"
+    outside.write_text("outside", encoding="utf-8")
+    try:
+        (tmp_path / "outside-link.txt").symlink_to(outside)
+        (tmp_path / "outside-dir").symlink_to(outside.parent, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Symbolic links are unavailable: {error}")
+
+    outputs = {
+        "completion": {"passed": ["validator ok"], "failed": []},
+        "events": {"skills_invoked": [], "commands_run": []},
+        "expected_artifacts": [
+            str(outside),
+            "../outside-artifact.txt",
+            "outside-link.txt",
+            "outside-dir/*.txt",
+        ],
+        "interaction": {"mode": "none"},
+    }
+
+    passed, failed = run_profile_rubric("generic", tmp_path, outputs)
+
+    assert failed == []
+    assert any("[RUBRIC] artifact_presence: 0.00 - 0/4 passed" in msg for msg in passed)
 
 
 def test_generic_profile_can_fail_required_skill_invocation(tmp_path: Path):
@@ -367,11 +541,11 @@ def test_authoring_profile_scores_generated_package_and_engine_contract(tmp_path
         encoding="utf-8",
     )
     (package / "reference" / "authoring-lanes.json").write_text(
-        '{"lanes":[{"lane":"skill-core"},{"lane":"script-contract"},{"lane":"reference"},{"lane":"pause-points"},{"lane":"eval"},{"lane":"skill-review"}],"review":{"passed":true,"blockingFindings":[]}}',
+        '{"lanes":[{"lane":"script"},{"lane":"reference"},{"lane":"pause-points"},{"lane":"workflow-entry"},{"lane":"skill-core"},{"lane":"skill-review"}],"review":{"passed":true,"blockingFindings":[]}}',
         encoding="utf-8",
     )
     (package / "reference" / "skill-review.md").write_text(
-        "# Skill Review\n\nStatus: Review passed\n",
+        "# Skill Review\n\nPassed: yes.\n",
         encoding="utf-8",
     )
     for name in ("skill.yaml", "guardrails.yaml", "checks.yaml"):
@@ -440,11 +614,11 @@ def test_authoring_profile_allows_lightweight_package_without_engine_files(tmp_p
         encoding="utf-8",
     )
     (package / "reference" / "authoring-lanes.json").write_text(
-        '{"lanes":[{"lane":"skill-core"},{"lane":"script-contract"},{"lane":"reference"},{"lane":"pause-points"},{"lane":"eval"},{"lane":"skill-review"}],"review":{"passed":true,"blockingFindings":[]}}',
+        '{"lanes":[{"lane":"script"},{"lane":"reference"},{"lane":"pause-points"},{"lane":"workflow-entry"},{"lane":"skill-core"},{"lane":"skill-review"}],"review":{"passed":true,"blockingFindings":[]}}',
         encoding="utf-8",
     )
     (package / "reference" / "skill-review.md").write_text(
-        "# Skill Review\n\nStatus: Review passed\n",
+        "# Skill Review\n\nPassed: yes.\n",
         encoding="utf-8",
     )
 
@@ -468,7 +642,10 @@ def test_authoring_profile_allows_lightweight_package_without_engine_files(tmp_p
     passed, failed = run_profile_rubric("authoring-skill", tmp_path, outputs)
 
     assert failed == []
-    assert any("[RUBRIC] engine_contract: 1.00 - Engine disabled for lightweight package" in msg for msg in passed)
+    assert any(
+        "[RUBRIC] engine_contract: 1.00 - Engine disabled for lightweight package" in msg
+        for msg in passed
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -588,8 +765,7 @@ def test_generic_interaction_compliance_uses_driver_turns(tmp_path: Path):
     passed, _ = run_profile_rubric("generic", tmp_path, outputs)
 
     assert any(
-        "[RUBRIC] interaction_compliance: 1.00 - turns=4, max=4" in message
-        for message in passed
+        "[RUBRIC] interaction_compliance: 1.00 - turns=4, max=4" in message for message in passed
     )
 
 
@@ -897,3 +1073,77 @@ def test_generic_llm_judge_parses_custom_dimensions(tmp_path: Path):
     assert "custom_0" in scores
     assert "custom_1" in scores
     assert scores["custom_0"] == (0.90, "handles edge cases well")
+
+
+def test_generic_rubric_scores_structured_expected_artifact_paths(tmp_path: Path):
+    artifact_dir = tmp_path / ".comet" / "runs" / "fix-from-issues"
+    artifact_dir.mkdir(parents=True)
+    for name in ("state.json", "plan.json", "verification.json"):
+        (artifact_dir / name).write_text("{}\n", encoding="utf-8")
+
+    passed, failed = run_profile_rubric(
+        "generic",
+        tmp_path,
+        {
+            "completion": {"passed": ["workflow completed"], "failed": []},
+            "expected_artifacts": [
+                {
+                    "node": "prepare",
+                    "schema": "fix-from-issues.prepare.v1",
+                    "artifact": "workflow-run-state",
+                    "paths": [".comet/runs/fix-from-issues/state.json"],
+                },
+                {
+                    "node": "plan",
+                    "schema": "fix-from-issues.plan.v1",
+                    "artifact": "repair-plan",
+                    "path": ".comet/runs/fix-from-issues/plan.json",
+                },
+                {
+                    "node": "verify",
+                    "schema": "fix-from-issues.implementation.v1",
+                    "artifact": "verification",
+                    "paths": [
+                        ".comet/runs/fix-from-issues/state.json",
+                        ".comet/runs/fix-from-issues/verification.json",
+                    ],
+                },
+                {
+                    "node": "watch",
+                    "schema": "fix-from-issues.watch.v1",
+                    "artifact": "run-records",
+                    "path": ".comet/runs/fix-from-issues/*.json",
+                },
+            ],
+        },
+    )
+
+    assert failed == []
+    assert any("[RUBRIC] artifact_presence: 1.00 - 4/4 passed" in item for item in passed)
+
+
+def test_generic_rubric_rejects_artifact_paths_outside_task_directory(tmp_path: Path):
+    outside = tmp_path.parent / "outside-artifact.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    escaped_link = tmp_path / "escaped-artifact.json"
+    try:
+        escaped_link.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"Symbolic links are unavailable: {error}")
+
+    passed, failed = run_profile_rubric(
+        "generic",
+        tmp_path,
+        {
+            "completion": {"passed": ["workflow completed"], "failed": []},
+            "expected_artifacts": [
+                {"path": "../outside-artifact.json"},
+                {"path": str(outside)},
+                {"path": "escaped-artifact.json"},
+                {"path": "escaped-*.json"},
+            ],
+        },
+    )
+
+    assert failed == []
+    assert any("[RUBRIC] artifact_presence: 0.00 - 0/4 passed" in item for item in passed)

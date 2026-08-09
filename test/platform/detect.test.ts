@@ -120,6 +120,10 @@ describe('detect', () => {
       expect(traeCn?.openspecToolId).toBe('trae');
       expect(traeCn?.rulesDir).toBe('rules');
       expect(traeCn?.rulesFormat).toBe('md');
+      expect(traeCn?.supportsHooks).toBe(true);
+      expect(traeCn?.hookFormat).toBe('trae');
+      expect(traeCn?.configDir).toBe('.trae');
+      expect(traeCn?.globalConfigDir).toBe('.trae-cn');
     });
   });
 
@@ -480,6 +484,32 @@ describe('detect', () => {
       await fs.mkdir(path.join(skillsDir, 'unrelated-skill'));
 
       expect(await hasPluginSuperpowers()).toBe(false);
+
+      if (origEnv !== undefined) {
+        process.env.CLAUDE_CONFIG_DIR = origEnv;
+      } else {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      }
+    });
+
+    it('skips a stray non-directory entry in the plugin cache instead of crashing', async () => {
+      const origEnv = process.env.CLAUDE_CONFIG_DIR;
+      const pluginDir = path.join(tmpDir, '.claude');
+      process.env.CLAUDE_CONFIG_DIR = pluginDir;
+
+      const cacheDir = path.join(pluginDir, 'plugins', 'cache');
+      await fs.mkdir(cacheDir, { recursive: true });
+      // A stray file (e.g. macOS .DS_Store) sitting where a marketplace
+      // directory is expected used to make fs.access throw ENOTDIR and crash
+      // comet init instead of being skipped like a missing marketplace.
+      await fs.writeFile(path.join(cacheDir, '.DS_Store'), '');
+
+      const skillsDir = path.join(cacheDir, 'test-marketplace', 'superpowers', '5.0.0', 'skills');
+      await fs.mkdir(skillsDir, { recursive: true });
+      await fs.mkdir(path.join(skillsDir, 'brainstorming'));
+      await fs.mkdir(path.join(skillsDir, 'using-superpowers'));
+
+      await expect(hasPluginSuperpowers()).resolves.toBe(true);
 
       if (origEnv !== undefined) {
         process.env.CLAUDE_CONFIG_DIR = origEnv;

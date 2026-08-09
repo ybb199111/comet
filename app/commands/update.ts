@@ -5,23 +5,38 @@ import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 import { select } from '@inquirer/prompts';
 import { fileExists, readJson } from '../../platform/fs/file-system.js';
-import { getBaseDir } from '../../platform/install/detect.js';
+import {
+  getBaseDir,
+  hasCodexPluginSuperpowers,
+  hasOpenCodePluginSuperpowers,
+  hasPluginSuperpowers,
+  hasSkills,
+} from '../../platform/install/detect.js';
 import {
   copyCometSkillsForPlatform,
   copyCometRulesForPlatform,
-  installCometHooksForPlatform,
+  detectInstalledWorkflowSelection,
   getManifestSkills,
   mergeProjectConfig,
   prepareManagedSkillCopyTarget,
 } from '../../domains/skill/platform-install.js';
+import {
+  reconcileCometHooksForPlatform,
+  reconcileProjectCometHooksForPlatform,
+} from '../../domains/skill/hook-lifecycle.js';
 import { removeLegacyCometSkillsForPlatform } from '../../domains/skill/uninstall.js';
-import { installCometProjectInstructions } from '../../domains/skill/project-instructions.js';
-import { LANGUAGES } from '../../domains/skill/languages.js';
+import { syncCometProjectInstructions } from '../../domains/skill/project-instructions.js';
+import {
+  artifactLanguageToSkillLanguage,
+  LANGUAGES,
+  type SkillLanguageId,
+} from '../../domains/skill/languages.js';
 import {
   getPlatformSkillsDir,
   getPlatformSkillsDirs,
   type Platform,
 } from '../../platform/install/platforms.js';
+import { resolvePlatformTarget } from '../../platform/install/platform-targets.js';
 import { resolveCanonicalSkillRootOwners } from '../../platform/install/skill-root-owner.js';
 import {
   listProjectRegistryEntries,
@@ -33,9 +48,27 @@ import {
   hasCodegraphProjectIndex,
   installCodegraph,
 } from '../../domains/integrations/codegraph.js';
+import {
+  installOpenSpec,
+  isProjectMutationGuardError,
+} from '../../domains/integrations/openspec.js';
+import { installSuperpowersForPlatforms } from '../../domains/integrations/superpowers.js';
+import {
+  assertClassicLayoutInitializationSafe,
+  beginClassicLayoutInitialization,
+  checkpointClassicLayoutInitialization,
+  completeClassicLayoutInitialization,
+  type ClassicLayoutInitializationPermit,
+} from '../../domains/comet-classic/classic-layout-initialization.js';
+import { classicLayoutPaths } from '../../domains/comet-classic/classic-layout.js';
+import { assertClassicOpenSpecRootHealthy } from '../../domains/comet-classic/classic-openspec-root.js';
 import { discoverNativeProject } from '../../domains/comet-native/native-paths.js';
-import { readProjectConfig } from '../../domains/comet-native/native-config.js';
-import { resolveCometEntry } from '../../domains/comet-entry/resolve-entry.js';
+import { defaultProjectConfig } from '../../domains/comet-native/native-config.js';
+import { readWorkflowProjectConfigSnapshot } from '../../domains/workflow-contract/project-config-reader.js';
+import {
+  readWorkflowGlobalConfig,
+  writeWorkflowGlobalConfig,
+} from '../../domains/workflow-contract/global-config.js';
 import type { InitWorkflowSelection } from '../../domains/comet-entry/types.js';
 import { migrateLegacyClassicSelection } from '../../domains/comet-entry/current-selection.js';
 import type { InstallScope, InstallMode } from '../../platform/install/types.js';
@@ -50,6 +83,7 @@ const OFFICIAL_REGISTRY = 'https://registry.npmjs.org';
 interface UpdateOptions {
   json?: boolean;
   language?: string;
+  classicLayout?: 'legacy' | 'docs';
   scope?: InstallScope;
   skipNpm?: boolean;
   skipSelfUpdate?: boolean;
@@ -62,11 +96,35 @@ interface UpdateOptions {
   failOnNpmFailure?: boolean;
   npmSkipReason?: string;
   skipPackageSelfUpdate?: boolean;
+  platform?: string;
 }
 
-type SkillLanguage = 'en' | 'zh';
+async function refreshGlobalWorkflowConfig(
+  homeDir: string,
+  language: 'en' | 'zh-CN' | null,
+): Promise<void> {
+  const existing = await readWorkflowGlobalConfig(homeDir);
+  const defaults = defaultProjectConfig('docs', language ?? 'en');
+  const config = existing ?? { ...defaults, schema: 'comet.global.v1' as const };
+  if (language && config.native) config.native.language = language;
+  if (language && config.classic) config.classic.language = language;
+  await writeWorkflowGlobalConfig(homeDir, config);
+}
+
+type SkillLanguage = SkillLanguageId;
 type NpmStatus = 'updated' | 'failed' | 'skipped';
 type CodegraphStatus = 'installed' | 'failed' | 'skipped';
+type OpenSpecStatus = 'installed' | 'failed' | 'skipped';
+type SuperpowersStatus = 'installed' | 'failed' | 'skipped';
+
+interface SuperpowersTargetResult {
+  scope: InstallScope;
+  platform: string;
+  platformName: string;
+  source: 'skills-cli' | 'plugin';
+  status: 'installed' | 'failed' | 'skipped';
+  reason?: string;
+}
 
 interface NpmUpdateFailure extends Error {
   npmScope: InstallScope;
@@ -196,6 +254,15 @@ interface SingleProjectUpdateResult {
     }>;
   };
   projectInstructions: { updated: number };
+  openspec: {
+    status: OpenSpecStatus;
+    reason?: string;
+  };
+  superpowers: {
+    status: SuperpowersStatus;
+    reason?: string;
+    targets: SuperpowersTargetResult[];
+  };
   codegraph: CodegraphStatus;
 }
 
@@ -210,7 +277,7 @@ interface ComponentFailureDetail {
 }
 
 interface CommandFailureDetail {
-  component: 'npm' | 'CodeGraph' | 'Skill' | 'Rule' | 'Hook';
+  component: 'npm' | 'OpenSpec' | 'Superpowers' | 'CodeGraph' | 'Skill' | 'Rule' | 'Hook';
   reason: string;
   scope?: InstallScope;
   platform?: string;
@@ -256,6 +323,32 @@ function languageToSkillsDir(languageId: SkillLanguage): string {
 
 function languageToArtifactLanguage(languageId: SkillLanguage): 'en' | 'zh-CN' {
   return LANGUAGES.find((entry) => entry.id === languageId)!.artifactLanguage;
+}
+
+async function resolveClassicArtifactLayout(
+  projectPath: string,
+  explicitLayout: 'legacy' | 'docs' | null,
+  options: UpdateOptions,
+  lang: string,
+): Promise<'legacy' | 'docs'> {
+  if (explicitLayout) return explicitLayout;
+  if (options.classicLayout) return options.classicLayout;
+
+  const hasLegacyRoot = await fileExists(path.join(projectPath, 'openspec'));
+  const hasDocsRoot = await fileExists(path.join(projectPath, 'docs', 'openspec'));
+  if (hasLegacyRoot && hasDocsRoot) {
+    if (options.json) {
+      throw new Error(t(lang, 'classicLayoutChoiceRequired'));
+    }
+    return select({
+      message: t(lang, 'classicLayoutChoice'),
+      choices: [
+        { name: t(lang, 'classicLayoutLegacy'), value: 'legacy' as const },
+        { name: t(lang, 'classicLayoutDocs'), value: 'docs' as const },
+      ],
+    });
+  }
+  return hasLegacyRoot ? 'legacy' : 'docs';
 }
 
 function getScopedBaseDir(
@@ -365,6 +458,13 @@ async function detectInstalledCometTargets(
   }
 
   return targets;
+}
+
+async function hasPluginManagedSuperpowers(platform: Platform): Promise<boolean> {
+  if (platform.id === 'claude') return hasPluginSuperpowers();
+  if (platform.id === 'codex') return hasCodexPluginSuperpowers();
+  if (platform.id === 'opencode') return hasOpenCodePluginSuperpowers();
+  return false;
 }
 
 function isSameOrInside(childPath: string, parentPath: string): boolean {
@@ -1017,6 +1117,8 @@ function currentProjectJson(result: SingleProjectUpdateResult): Record<string, u
     rules: result.rules,
     hooks: result.hooks,
     projectInstructions: result.projectInstructions,
+    openspec: result.openspec,
+    superpowers: result.superpowers,
     codegraph: result.codegraph,
   };
 }
@@ -1032,7 +1134,11 @@ function hasComponentFailures(result: SingleProjectUpdateResult): boolean {
 
 function hasUpdateFailures(result: SingleProjectUpdateResult): boolean {
   return (
-    result.npm.status === 'failed' || result.codegraph === 'failed' || hasComponentFailures(result)
+    result.npm.status === 'failed' ||
+    result.openspec.status === 'failed' ||
+    result.superpowers.status === 'failed' ||
+    result.codegraph === 'failed' ||
+    hasComponentFailures(result)
   );
 }
 
@@ -1092,6 +1198,18 @@ function collectCommandFailures(result: SingleProjectUpdateResult): CommandFailu
       reason: result.npm.reason ?? 'npm package update failed',
     });
   }
+  if (result.openspec.status === 'failed') {
+    failures.push({
+      component: 'OpenSpec',
+      reason: result.openspec.reason ?? 'OpenSpec update failed',
+    });
+  }
+  if (result.superpowers.status === 'failed') {
+    failures.push({
+      component: 'Superpowers',
+      reason: result.superpowers.reason ?? 'Superpowers update failed',
+    });
+  }
   failures.push(...collectComponentFailures(result));
   if (result.codegraph === 'failed') {
     failures.push({ component: 'CodeGraph', reason: 'CodeGraph installation failed' });
@@ -1146,16 +1264,20 @@ async function updateSingleProject(
     ? options.targetScopes.includes('project')
     : options.scope !== 'global';
   const projectPath = includesProjectScope ? await discoverNativeProject(startPath) : startPath;
-  const projectEntry = includesProjectScope ? await resolveCometEntry(projectPath) : null;
-  const projectConfig = includesProjectScope ? await readProjectConfig(projectPath) : null;
+  const projectConfigSnapshot = includesProjectScope
+    ? await readWorkflowProjectConfigSnapshot(projectPath, {
+        allowPartialProject: true,
+        allowMissingNativeFields: true,
+      })
+    : null;
+  const projectConfigDocument = projectConfigSnapshot?.document ?? null;
+  const projectConfig = projectConfigDocument?.config ?? null;
   const configuredWorkflows =
     projectConfig?.workflows ?? (projectConfig ? [projectConfig.default_workflow] : null);
   const nativeProject = configuredWorkflows
     ? configuredWorkflows.includes('native')
-    : projectEntry?.workflow === 'native';
-  const classicProject = configuredWorkflows
-    ? configuredWorkflows.includes('classic')
-    : projectEntry?.workflow === 'classic';
+    : projectConfigDocument?.native !== undefined;
+  const classicProject = configuredWorkflows ? configuredWorkflows.includes('classic') : true;
   const projectWorkflowSelection: InitWorkflowSelection =
     nativeProject && classicProject ? 'both' : nativeProject ? 'native' : 'classic';
   const packageScope =
@@ -1167,6 +1289,7 @@ async function updateSingleProject(
   let npmReason: string | undefined = options.npmSkipReason;
   let npmCommand: string | null = null;
   const skipPackageSelfUpdate = options.skipPackageSelfUpdate ?? options.skipNpm === true;
+  const updateClassicDependencies = options.selfUpdate === true && !skipPackageSelfUpdate;
   const skipRepeatedGlobalNpm =
     !skipPackageSelfUpdate && packageScope === 'global' && options.skipGlobalNpmUpdate === true;
   if (skipRepeatedGlobalNpm) {
@@ -1228,12 +1351,72 @@ async function updateSingleProject(
     }
   }
 
-  const targets = await detectInstalledCometTargets(projectPath, {
-    scopes: options.targetScopes ?? (options.scope ? [options.scope] : undefined),
-    respectDetectionPaths: options.scope === undefined,
-  });
+  const targets = options.platform
+    ? await Promise.all(
+        (options.targetScopes ?? [options.scope ?? 'project']).map(async (scope) => {
+          const existing = options.language
+            ? null
+            : (
+                await detectInstalledCometTargets(projectPath, {
+                  scopes: [scope],
+                  respectDetectionPaths: scope === 'project' && options.scope === undefined,
+                })
+              ).find((candidate) => candidate.platform.id === options.platform);
+          const fallbackLanguage =
+            existing?.language ??
+            (scope === 'project'
+              ? artifactLanguageToSkillLanguage(
+                  projectConfig?.native?.language ??
+                    projectConfig?.classic?.language ??
+                    projectConfigDocument?.native?.language ??
+                    projectConfigDocument?.classic?.language,
+                )
+              : 'en');
+          const target = resolvePlatformTarget(options.platform!, scope);
+          return {
+            scope,
+            platform: target.platform,
+            language: resolveTargetLanguage(options.language, fallbackLanguage),
+          };
+        }),
+      )
+    : await detectInstalledCometTargets(projectPath, {
+        scopes: options.targetScopes ?? (options.scope ? [options.scope] : undefined),
+        respectDetectionPaths: options.scope === undefined,
+      });
+
+  const rawClassic = projectConfigDocument?.value.classic;
+  const explicitClassicArtifactLayout =
+    rawClassic !== null &&
+    typeof rawClassic === 'object' &&
+    !Array.isArray(rawClassic) &&
+    ((rawClassic as Record<string, unknown>).artifact_layout === 'legacy' ||
+      (rawClassic as Record<string, unknown>).artifact_layout === 'docs')
+      ? ((rawClassic as Record<string, unknown>).artifact_layout as 'legacy' | 'docs')
+      : null;
+  const hasProjectTarget = targets.some((target) => target.scope === 'project');
+  const shouldRefreshExistingProjectConfig =
+    includesProjectScope && projectConfigDocument !== null && !hasProjectTarget;
+  const needsClassicLayout =
+    includesProjectScope && classicProject && (projectConfigDocument !== null || hasProjectTarget);
+  const classicArtifactLayout = needsClassicLayout
+    ? await resolveClassicArtifactLayout(projectPath, explicitClassicArtifactLayout, options, lang)
+    : 'docs';
+  const mergeExistingProjectConfig = async (): Promise<void> => {
+    if (!shouldRefreshExistingProjectConfig) return;
+    const languageId = options.language ? resolveTargetLanguage(options.language, 'en') : null;
+    await mergeProjectConfig(
+      projectPath,
+      languageId ? languageToArtifactLanguage(languageId) : null,
+      classicArtifactLayout,
+      true,
+      classicProject,
+    );
+    log(`  ${t(lang, 'configMerged')}`);
+  };
 
   if (targets.length === 0) {
+    await mergeExistingProjectConfig();
     return {
       projectPath,
       npm: {
@@ -1247,8 +1430,39 @@ async function updateSingleProject(
       rules: { totalCopied: 0, totalFailed: 0, targets: [] },
       hooks: { totalInstalled: 0, totalFailed: 0, targets: [] },
       projectInstructions: { updated: 0 },
+      openspec: { status: 'skipped' },
+      superpowers: { status: 'skipped', targets: [] },
       codegraph: 'skipped',
     };
+  }
+
+  const targetPlatforms = targets.map((target) => target.platform);
+  const openSpecTargets: InstalledCometTarget[] = [];
+  const superpowersTargets: InstalledCometTarget[] = [];
+  const pluginManagedSuperpowersTargets: InstalledCometTarget[] = [];
+  if (updateClassicDependencies) {
+    for (const target of targets) {
+      if (target.scope === 'project' && !classicProject) continue;
+      const baseDir = getBaseDir(target.scope, projectPath);
+      if (
+        await hasSkills(baseDir, target.platform, 'openspec', targetPlatforms, target.scope, {
+          includeGlobalFallback: false,
+          includePluginFallback: false,
+        })
+      ) {
+        openSpecTargets.push(target);
+      }
+      if (
+        await hasSkills(baseDir, target.platform, 'superpowers', targetPlatforms, target.scope, {
+          includeGlobalFallback: false,
+          includePluginFallback: false,
+        })
+      ) {
+        superpowersTargets.push(target);
+      } else if (await hasPluginManagedSuperpowers(target.platform)) {
+        pluginManagedSuperpowersTargets.push(target);
+      }
+    }
   }
 
   const hasClassicCompatibleTarget = targets.some(
@@ -1262,6 +1476,79 @@ async function updateSingleProject(
   const reportedInstallMode = targets.every((target) => nativeProject && target.scope === 'project')
     ? 'copy'
     : selectedInstallMode;
+  const refreshClassicArtifactRoot =
+    updateClassicDependencies &&
+    includesProjectScope &&
+    classicProject &&
+    targets.some((target) => target.scope === 'project');
+  let classicLayoutInitializationPermit: ClassicLayoutInitializationPermit | undefined;
+  if (refreshClassicArtifactRoot) {
+    try {
+      let initialization = await assertClassicLayoutInitializationSafe(
+        projectPath,
+        classicArtifactLayout,
+        undefined,
+        projectConfigSnapshot?.identity,
+      );
+      initialization = await beginClassicLayoutInitialization(projectPath, initialization);
+      classicLayoutInitializationPermit = initialization.initializationPermit;
+    } catch (error) {
+      const reason = `Classic layout preflight failed: ${(error as Error).message}`;
+      return {
+        projectPath,
+        npm: {
+          scope: skipPackageSelfUpdate ? 'skipped' : packageScope,
+          status: npmStatus,
+          command: npmCommand,
+          exitCode: npmExitCode,
+          reason: npmReason,
+        },
+        skills: {
+          totalCopied: 0,
+          totalFailed: 0,
+          cleanupFailed: 0,
+          installMode: reportedInstallMode,
+          targets: targets.map((target) => {
+            const languageId = resolveTargetLanguage(options.language, target.language);
+            const languageSkillsDir = languageToSkillsDir(languageId);
+            return {
+              scope: target.scope,
+              platform: target.platform.id,
+              platformName: target.platform.name,
+              language: languageId,
+              source: languageSkillsDir,
+              copied: 0,
+              skipped: 0,
+              failed: 0,
+              reason: 'skipped because Classic layout preflight failed',
+              cleanupFailed: 0,
+              command: formatSkillUpdateCommand(
+                target.scope,
+                target.platform,
+                languageSkillsDir,
+                installModeFor(target),
+              ),
+            };
+          }),
+        },
+        rules: { totalCopied: 0, totalFailed: 0, targets: [] },
+        hooks: { totalInstalled: 0, totalFailed: 0, targets: [] },
+        projectInstructions: { updated: 0 },
+        openspec: { status: 'failed', reason },
+        superpowers: { status: 'skipped', targets: [] },
+        codegraph: 'skipped',
+      };
+    }
+  }
+  const assertClassicProjectMutationAllowed = classicLayoutInitializationPermit
+    ? async () => {
+        await assertClassicLayoutInitializationSafe(
+          projectPath,
+          classicArtifactLayout,
+          classicLayoutInitializationPermit,
+        );
+      }
+    : undefined;
 
   log(`\n  ${t(lang, 'updatingSkillsOnTargets')} ${targets.length} target(s):`);
   for (const target of targets) {
@@ -1276,9 +1563,24 @@ async function updateSingleProject(
     );
   }
 
-  const targetWorkflowSelections = targets.map((target) =>
-    target.scope === 'global' ? 'classic' : projectWorkflowSelection,
-  );
+  // Global scope mirrors `comet init`: `comet update --scope global` must keep
+  // already-installed Skills in sync without expanding the workflow range the
+  // user chose at install time. The selection is derived from what is on disk
+  // by checking the two workflow markers (see detectInstalledWorkflowSelection
+  // in domains/skill/platform-install.ts). Project scope keeps honoring the
+  // project workflow configuration.
+  const skillWorkflowSelectionFor = async (
+    target: InstalledCometTarget,
+  ): Promise<InitWorkflowSelection> => {
+    if (target.scope !== 'global') return projectWorkflowSelection;
+    const skillsRoot = path.join(
+      getBaseDir('global', projectPath),
+      getPlatformSkillsDir(target.platform, 'global'),
+      'skills',
+    );
+    return detectInstalledWorkflowSelection(skillsRoot);
+  };
+  const targetWorkflowSelections = await Promise.all(targets.map(skillWorkflowSelectionFor));
   const updateSkillPaths = new Set(
     (
       await Promise.all(
@@ -1305,14 +1607,16 @@ async function updateSingleProject(
     const languageSkillsDir = languageToSkillsDir(languageId);
     const targetInstallMode = installModeFor(target);
     const nativeProjectTarget = nativeProject && target.scope === 'project';
-    const targetWorkflowSelection =
-      target.scope === 'global' ? 'classic' : projectWorkflowSelection;
+    const targetSkillWorkflowSelection = await skillWorkflowSelectionFor(target);
+    if (target.scope === 'project') {
+      await assertClassicProjectMutationAllowed?.();
+    }
     if (nativeProjectTarget) {
       await prepareManagedSkillCopyTarget(
         baseDir,
         target.platform,
         target.scope,
-        targetWorkflowSelection,
+        targetSkillWorkflowSelection,
       );
     }
     const { copied, skipped, failed } = await copyCometSkillsForPlatform(
@@ -1322,7 +1626,7 @@ async function updateSingleProject(
       languageSkillsDir,
       target.scope,
       targetInstallMode,
-      targetWorkflowSelection,
+      targetSkillWorkflowSelection,
     );
     const cleanupResult =
       failed === 0
@@ -1442,12 +1746,14 @@ async function updateSingleProject(
         status,
         reason,
         cleanupFailed = 0,
-      } = await installCometHooksForPlatform(
-        baseDir,
-        target.platform,
-        target.scope,
-        target.scope === 'global' ? 'classic' : projectWorkflowSelection,
-      );
+      } = target.scope === 'project'
+        ? await reconcileProjectCometHooksForPlatform(
+            baseDir,
+            target.platform,
+            projectWorkflowSelection,
+            { globalBaseDir: os.homedir() },
+          )
+        : await reconcileCometHooksForPlatform(baseDir, target.platform, target.scope, 'classic');
       const hookFailed = status === 'failed' ? 1 : cleanupFailed;
       totalHooksFailed += hookFailed;
       hookTargetResults.push({
@@ -1501,9 +1807,182 @@ async function updateSingleProject(
     }
   }
 
+  let openSpecStatus: OpenSpecStatus = 'skipped';
+  let openSpecReason: string | undefined;
+  let projectMutationBlocked = false;
+  let projectConfigCommitBlocked = false;
+  for (const scope of ['project', 'global'] as const) {
+    const scopeTargets = openSpecTargets.filter((target) => target.scope === scope);
+    const requiresArtifactOnlyRefresh =
+      updateClassicDependencies &&
+      scope === 'project' &&
+      refreshClassicArtifactRoot &&
+      scopeTargets.length === 0;
+    if (scopeTargets.length === 0 && !requiresArtifactOnlyRefresh) continue;
+    const toolIds = [...new Set(scopeTargets.map((target) => target.platform.openspecToolId))];
+    const mirrorOpenCodePlatformIds = scopeTargets
+      .map((target) => target.platform.id)
+      .filter((id) => id === 'zcode' || id === 'mimocode');
+    const artifactLayout = scope === 'project' ? classicArtifactLayout : 'legacy';
+    try {
+      if (scope === 'project') {
+        await assertClassicProjectMutationAllowed?.();
+      }
+      const status = await installOpenSpec(
+        projectPath,
+        toolIds,
+        scope,
+        !skipPackageSelfUpdate,
+        mirrorOpenCodePlatformIds,
+        artifactLayout,
+        scope === 'project' ? assertClassicProjectMutationAllowed : undefined,
+      );
+      if (status === 'failed') {
+        openSpecStatus = 'failed';
+        openSpecReason = `OpenSpec ${scope} asset update failed`;
+        if (scope === 'project' && refreshClassicArtifactRoot) {
+          projectConfigCommitBlocked = true;
+        }
+      } else if (status === 'skipped') {
+        openSpecStatus = 'failed';
+        openSpecReason = `OpenSpec ${scope} asset update skipped because a compatible OpenSpec CLI is unavailable`;
+        if (scope === 'project' && refreshClassicArtifactRoot) {
+          projectConfigCommitBlocked = true;
+        }
+      } else if (status === 'installed' && openSpecStatus !== 'failed') {
+        if (scope === 'project') {
+          try {
+            await assertClassicProjectMutationAllowed?.();
+            await assertClassicOpenSpecRootHealthy(
+              projectPath,
+              classicLayoutPaths(projectPath, classicArtifactLayout),
+            );
+            await assertClassicProjectMutationAllowed?.();
+            if (classicLayoutInitializationPermit) {
+              await checkpointClassicLayoutInitialization(
+                projectPath,
+                classicLayoutInitializationPermit,
+              );
+            }
+          } catch (error) {
+            projectConfigCommitBlocked = true;
+            throw error;
+          }
+        }
+        openSpecStatus = 'installed';
+      }
+      log(`  OpenSpec (${scope}): ${status}`);
+    } catch (error) {
+      openSpecStatus = 'failed';
+      openSpecReason = `OpenSpec ${scope} asset update failed: ${(error as Error).message}`;
+      if (scope === 'project' && isProjectMutationGuardError(error)) {
+        projectMutationBlocked = true;
+      }
+      if (scope === 'project' && refreshClassicArtifactRoot) {
+        projectConfigCommitBlocked = true;
+      }
+      log(`  ${openSpecReason}`);
+    }
+  }
+
+  let superpowersStatus: SuperpowersStatus = 'skipped';
+  let superpowersReason: string | undefined;
+  const superpowersTargetResults: SuperpowersTargetResult[] = [];
+  for (const scope of ['project', 'global'] as const) {
+    const scopeTargets = superpowersTargets.filter((target) => target.scope === scope);
+    const scopePluginTargets = pluginManagedSuperpowersTargets.filter(
+      (target) => target.scope === scope,
+    );
+    if (scopeTargets.length === 0) {
+      if (scopePluginTargets.length > 0) {
+        // Only attribute the overall reason to a plugin-managed skip when no
+        // earlier scope actually installed Superpowers; otherwise an
+        // 'installed' status would carry a misleading '...skipped' reason.
+        if (superpowersStatus === 'skipped') {
+          superpowersReason = 'plugin-managed Superpowers installation skipped';
+        }
+        superpowersTargetResults.push(
+          ...scopePluginTargets.map((target) => ({
+            scope: target.scope,
+            platform: target.platform.id,
+            platformName: target.platform.name,
+            source: 'plugin' as const,
+            status: 'skipped' as const,
+            reason: 'plugin-managed installation',
+          })),
+        );
+        log(`  Superpowers (${scope}): skipped (plugin-managed installation)`);
+      }
+      continue;
+    }
+    try {
+      const status = await installSuperpowersForPlatforms(
+        projectPath,
+        scope,
+        [...new Set(scopeTargets.map((target) => target.platform.id))],
+        true,
+      );
+      if (status === 'failed') {
+        superpowersStatus = 'failed';
+        superpowersReason = `Superpowers ${scope} update failed`;
+      } else if (status === 'installed' && superpowersStatus !== 'failed') {
+        superpowersStatus = 'installed';
+        // A successful install is the truth; do not overwrite the reason with a
+        // plugin-managed skip note from this scope's leftover plugin targets.
+      }
+      log(`  Superpowers (${scope}): ${status}`);
+      superpowersTargetResults.push(
+        ...scopeTargets.map((target) => ({
+          scope: target.scope,
+          platform: target.platform.id,
+          platformName: target.platform.name,
+          source: 'skills-cli' as const,
+          status,
+          ...(status === 'failed' ? { reason: superpowersReason } : {}),
+        })),
+      );
+    } catch (error) {
+      superpowersStatus = 'failed';
+      superpowersReason = `Superpowers ${scope} update failed: ${(error as Error).message}`;
+      superpowersTargetResults.push(
+        ...scopeTargets.map((target) => ({
+          scope: target.scope,
+          platform: target.platform.id,
+          platformName: target.platform.name,
+          source: 'skills-cli' as const,
+          status: 'failed' as const,
+          reason: superpowersReason,
+        })),
+      );
+      log(`  ${superpowersReason}`);
+    }
+  }
+
+  const projectTarget = targets.find((target) => target.scope === 'project');
+  if (projectTarget && !projectMutationBlocked) {
+    try {
+      await assertClassicProjectMutationAllowed?.();
+      const projectLanguageId = resolveTargetLanguage(options.language, projectTarget.language);
+      const projectInstructionResult = await syncCometProjectInstructions(
+        projectPath,
+        projectLanguageId,
+        nativeProject && (projectConfigDocument?.ambient_resume ?? true),
+      );
+      projectInstructionsUpdated = projectInstructionResult.changed;
+      if (projectInstructionsUpdated > 0) {
+        log(`  Comet project instructions -> ${projectInstructionsUpdated} file(s) updated`);
+      }
+    } catch (error) {
+      openSpecStatus = 'failed';
+      openSpecReason = `Classic layout update failed before project instruction mutation: ${(error as Error).message}`;
+      projectMutationBlocked = true;
+    }
+  }
+
   for (const scope of ['project', 'global'] as const) {
     const scopeTargets = targets.filter((candidate) => candidate.scope === scope);
     if (scopeTargets.length === 0) continue;
+    if (scope === 'project' && (projectMutationBlocked || projectConfigCommitBlocked)) continue;
     // An explicit --language always wins. Otherwise only force the persisted language when
     // every platform installed at this scope agrees — if two platforms disagree (e.g. one
     // installed with English skills, another with Chinese) and the user didn't say which one
@@ -1517,31 +1996,42 @@ async function updateSingleProject(
       ? resolveTargetLanguage(options.language, scopeTargets[0].language)
       : agreedLanguage;
     const configRoot = getBaseDir(scope, projectPath);
-    await mergeProjectConfig(
-      configRoot,
-      languageId ? languageToArtifactLanguage(languageId) : null,
-    );
+    if (scope === 'project') {
+      try {
+        await assertClassicProjectMutationAllowed?.();
+      } catch (error) {
+        openSpecStatus = 'failed';
+        openSpecReason = `Classic layout update failed before config mutation: ${(error as Error).message}`;
+        projectMutationBlocked = true;
+        continue;
+      }
+    }
+    const artifactLanguage = languageId ? languageToArtifactLanguage(languageId) : null;
+    if (scope === 'global') {
+      await refreshGlobalWorkflowConfig(configRoot, artifactLanguage);
+    } else {
+      await mergeProjectConfig(
+        configRoot,
+        artifactLanguage,
+        classicArtifactLayout,
+        true,
+        classicProject,
+      );
+    }
+    if (scope === 'project' && classicLayoutInitializationPermit) {
+      await completeClassicLayoutInitialization(projectPath, classicLayoutInitializationPermit);
+    }
     log(`  ${t(lang, 'configMerged')}`);
   }
-
-  const projectTarget = targets.find((target) => target.scope === 'project');
-  if (projectTarget) {
-    const projectLanguageId = resolveTargetLanguage(options.language, projectTarget.language);
-    const projectInstructionResult = await installCometProjectInstructions(
-      projectPath,
-      projectLanguageId,
-    );
-    projectInstructionsUpdated = projectInstructionResult.changed;
-    if (projectInstructionsUpdated > 0) {
-      log(`  Comet project instructions -> ${projectInstructionsUpdated} file(s) updated`);
-    }
-  }
+  await mergeExistingProjectConfig();
 
   let codegraphStatus: CodegraphStatus = 'skipped';
   const primaryScope = targets[0]?.scope ?? 'project';
   const codegraphAlreadyIndexed = hasCodegraphProjectIndex(projectPath);
 
-  if (options.json) {
+  if (projectMutationBlocked && primaryScope === 'project') {
+    codegraphStatus = 'skipped';
+  } else if (options.json) {
     codegraphStatus = 'skipped';
   } else if (nativeProject) {
     codegraphStatus = 'skipped';
@@ -1586,6 +2076,15 @@ async function updateSingleProject(
       targets: hookTargetResults,
     },
     projectInstructions: { updated: projectInstructionsUpdated },
+    openspec: {
+      status: openSpecStatus,
+      ...(openSpecReason ? { reason: openSpecReason } : {}),
+    },
+    superpowers: {
+      status: superpowersStatus,
+      ...(superpowersReason ? { reason: superpowersReason } : {}),
+      targets: superpowersTargetResults,
+    },
     codegraph: codegraphStatus,
   };
 }
@@ -1844,6 +2343,10 @@ function resolveSelfUpdateOptions(
         : 'self-update disabled by --skip-npm',
     };
   }
+  // A current-project refresh touches one project only, so it must not upgrade
+  // the shared npm package by default; an explicit --self-update opts back in.
+  // The default project/global `comet update` keeps upgrading the package and
+  // refreshing assets together, matching the documented update contract.
   if (refreshesOnlyCurrentProject && !options.selfUpdate) {
     return {
       ...options,
@@ -1864,6 +2367,9 @@ export async function updateCommand(
   const lang = options.language ?? 'en';
 
   assertProjectScopeOptions(options);
+  if (options.platform && options.allProjects) {
+    throw new Error('--platform cannot be combined with --all-projects');
+  }
   const registryProjects = await listProjectRegistryEntries({ strict: true });
 
   log(`\n  ${t(lang, 'updateTitle')}`);
@@ -1872,6 +2378,42 @@ export async function updateCommand(
   }
   log('');
 
+  const usesImplicitIndexedProjectUpdate =
+    options.scope === undefined &&
+    options.currentProject !== true &&
+    options.platform === undefined &&
+    options.targetScopes === undefined;
+  if (registryProjects.length === 0 && usesImplicitIndexedProjectUpdate) {
+    const currentProjectPath = await discoverNativeProject(projectPath);
+    const currentProjectTargets = await detectInstalledCometTargets(currentProjectPath, {
+      scopes: ['project'],
+      respectDetectionPaths: true,
+    });
+    if (currentProjectTargets.length > 0) {
+      options = { ...options, targetScopes: ['project'] };
+    } else {
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            {
+              mode: 'all-projects',
+              status: 'complete',
+              registry: { projectsFound: 0, staleRemoved: 0 },
+              projects: [],
+              reason: 'no indexed Comet projects found',
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        log('  No indexed Comet projects found. Nothing to update.');
+        log('  Run `comet init` in a project first, or use `comet update --scope global`.\n');
+      }
+      return { status: 'complete' };
+    }
+  }
+
   const scopeMode = await resolveProjectScopeMode('update', options, registryProjects.length);
   options = resolveSelfUpdateOptions(
     options,
@@ -1879,6 +2421,14 @@ export async function updateCommand(
   );
   if (scopeMode === 'all-projects') {
     return updateAllIndexedProjects(registryProjects, options, log);
+  }
+
+  if (
+    scopeMode === 'current-project' &&
+    options.scope === undefined &&
+    options.targetScopes === undefined
+  ) {
+    options = { ...options, targetScopes: ['project'] };
   }
 
   const result = await updateSingleProject(projectPath, options, log);

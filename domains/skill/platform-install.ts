@@ -2,7 +2,6 @@ import path from 'path';
 import { existsSync } from 'fs';
 import { readFile, writeFile, lstat, unlink, symlink, rm, readdir } from 'fs/promises';
 import { fileURLToPath } from 'url';
-import { parseDocument } from 'yaml';
 
 import { fileExists, readJson, copyFile, ensureDir } from '../../platform/fs/file-system.js';
 import {
@@ -17,9 +16,19 @@ import { installCometProjectInstructions } from './project-instructions.js';
 import { readJsonObjectFile } from './json-object.js';
 import type { InitWorkflowSelection } from '../comet-entry/types.js';
 import {
+  assertClassicLayoutInitializationSafe,
+  checkpointClassicLayoutInitialization,
+  type ClassicLayoutInitializationPermit,
+} from '../comet-classic/classic-layout-initialization.js';
+import {
+  DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG,
+  parseWorkflowProjectConfigDocument,
   projectConfigComment,
   renderStructuredProjectConfig,
 } from '../workflow-contract/project-config.js';
+import { readWorkflowProjectConfigSnapshot } from '../workflow-contract/project-config-reader.js';
+import { writeWorkflowProjectConfigSource } from '../workflow-contract/project-config-writer.js';
+import { ensureProtectedProjectDirectory } from '../workflow-contract/protected-project-path.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -104,6 +113,30 @@ function isManagedSkillPathForSelection(
     skillPath.startsWith('comet-native/') ||
     skillPath.startsWith('comet-any/')
   );
+}
+
+/**
+ * Derive the workflow selection from the Skills already on disk by checking
+ * the two workflow markers (comet-native/SKILL.md and comet-classic/SKILL.md).
+ * This lets `comet update` keep already-installed workflows in sync without
+ * expanding the range the user chose at install time:
+ *   neither / classic only -> 'classic'  (no Native added)
+ *   native only            -> 'native'   (no Classic added)
+ *   both                   -> 'both'
+ * The caller is responsible for computing `skillsRoot` (e.g. base dir +
+ * platform skills dir + 'skills'); this function only performs the marker
+ * check and mapping.
+ */
+export async function detectInstalledWorkflowSelection(
+  skillsRoot: string,
+): Promise<InitWorkflowSelection> {
+  const [hasNative, hasClassic] = await Promise.all([
+    fileExists(path.join(skillsRoot, 'comet-native', 'SKILL.md')),
+    fileExists(path.join(skillsRoot, 'comet-classic', 'SKILL.md')),
+  ]);
+  if (hasNative && hasClassic) return 'both';
+  if (hasNative) return 'native';
+  return 'classic';
 }
 
 function getManagedSkillPathsForSelection(
@@ -449,6 +482,9 @@ async function installSkillsAsSymlink(
   let copied = 0;
   let skippedCount = 0;
   let failedCount = 0;
+  // Count manifest entries filtered out by the workflow selection so the
+  // symlink path reports skipped files consistently with copy mode.
+  skippedCount += getManagedSkillPaths(manifest).length - managedSkillPaths.length;
 
   for (const skillRelPath of managedSkillPaths) {
     const isScript = skillRelPath.includes('/scripts/');
@@ -557,6 +593,11 @@ async function copyCometSkillsForPlatform(
   let failedCount = 0;
   const managedSkillPaths = getManagedSkillPathsForSelection(manifest, workflowSelection);
   const userFacingSkillPaths = getUserFacingSkillPathsForSelection(manifest, workflowSelection);
+  // Count manifest entries that the workflow selection filters out so the
+  // update summary stays honest: a Classic-only update reports the Native
+  // files it intentionally skips instead of pretending they do not exist.
+  const filteredCount = getManagedSkillPaths(manifest).length - managedSkillPaths.length;
+  skippedCount += filteredCount;
 
   for (const skillRelPath of managedSkillPaths) {
     const isScript = skillRelPath.includes('/scripts/');
@@ -965,6 +1006,7 @@ ${content}`;
  *   'windsurf' — hooks.json with pre_write_code array
  *   'copilot' — hooks/*.json with preToolUse
  *   'kiro' — hooks/*.kiro.hook JSON files
+ *   'trae' — hooks.json with version and PreToolUse grouped command hooks
  */
 async function installCometHooksForPlatform(
   baseDir: string,
@@ -979,6 +1021,13 @@ async function installCometHooksForPlatform(
     return {
       status: 'failed',
       reason: 'hook-capable platform does not declare a hook format',
+    };
+  }
+
+  if (scope === 'global' && platform.hookFormat !== 'trae') {
+    return {
+      status: 'skipped',
+      reason: 'blocking Hooks are project-scoped',
     };
   }
 
@@ -1019,7 +1068,7 @@ async function installCometHooksForPlatform(
           }
           if (failedLegacyFiles.length > 0) {
             return {
-              status: 'installed',
+              status: 'failed',
               reason: `legacy Hook cleanup failed for ${failedLegacyFiles.join(', ')}`,
               cleanupFailed: failedLegacyFiles.length,
             };
@@ -1066,6 +1115,15 @@ async function installCometHooksForPlatform(
           platformId: platform.id,
           scope,
         });
+      case 'trae':
+        return await installTraeHooks(
+          baseDir,
+          platformBase,
+          skillsDir,
+          hooksConfig,
+          platform.name,
+          { platformId: platform.id, scope },
+        );
       default:
         return { status: 'failed', reason: `unsupported hook format: ${hookFormat}` };
     }
@@ -1164,46 +1222,72 @@ function isManagedHookCommand(command: unknown, scriptRelPaths: string[]): boole
   );
 }
 
+const COPILOT_COMMAND_FIELDS = ['command', 'bash', 'powershell'] as const;
+
+interface ManagedCopilotHookCleanup {
+  entries: unknown[];
+  removed: number;
+  detachedMetadata: Array<Record<string, unknown>>;
+}
+
+/** Remove Comet-owned command fields without discarding unrelated Copilot metadata. */
+function removeManagedCopilotHookEntries(
+  entries: unknown[],
+  scriptRelPaths: string[],
+): ManagedCopilotHookCleanup {
+  let removed = 0;
+  const detachedMetadata: Array<Record<string, unknown>> = [];
+  const cleaned = entries.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [entry];
+
+    const record = { ...(entry as Record<string, unknown>) };
+    let changed = false;
+    for (const field of COPILOT_COMMAND_FIELDS) {
+      if (isManagedHookCommand(record[field], scriptRelPaths)) {
+        delete record[field];
+        changed = true;
+      }
+    }
+    if (!changed) return [entry];
+
+    removed++;
+    const hasCommand = COPILOT_COMMAND_FIELDS.some((field) => typeof record[field] === 'string');
+    if (!hasCommand) {
+      for (const field of COPILOT_COMMAND_FIELDS) delete record[field];
+      if (Object.keys(record).length > 0) detachedMetadata.push(record);
+      return [];
+    }
+    return [record];
+  });
+
+  return { entries: cleaned, removed, detachedMetadata };
+}
+
 function mergeHookGroups<T extends { command: string }>(
   existingGroups: unknown[],
   newGroups: Array<{ matcher: string; hooks: T[] }>,
   scriptRelPaths: string[],
 ): unknown[] {
-  const mergedGroups = existingGroups.map((group) => {
-    if (!group || typeof group !== 'object' || Array.isArray(group)) return group;
+  const mergedGroups = existingGroups.flatMap((group) => {
+    if (!group || typeof group !== 'object' || Array.isArray(group)) return [group];
     const record = group as Record<string, unknown>;
-    if (!Array.isArray(record.hooks)) return record;
+    if (!Array.isArray(record.hooks)) return [record];
 
     const hooks = record.hooks.filter((hook) => {
       const command =
         hook && typeof hook === 'object' ? (hook as Record<string, unknown>).command : undefined;
       return !isManagedHookCommand(command, scriptRelPaths);
     });
+    const removedManagedHook = hooks.length !== record.hooks.length;
+    const isPlainManagedGroup = Object.keys(record).every(
+      (key) => key === 'matcher' || key === 'hooks',
+    );
+    if (removedManagedHook && hooks.length === 0 && isPlainManagedGroup) return [];
 
-    return { ...record, hooks };
+    return [{ ...record, hooks }];
   });
 
-  for (const newGroup of newGroups) {
-    const existingGroupIndex = mergedGroups.findIndex(
-      (group) =>
-        Boolean(group) &&
-        typeof group === 'object' &&
-        !Array.isArray(group) &&
-        (group as Record<string, unknown>).matcher === newGroup.matcher &&
-        Array.isArray((group as Record<string, unknown>).hooks),
-    );
-    if (existingGroupIndex >= 0) {
-      const existingGroup = mergedGroups[existingGroupIndex] as Record<string, unknown>;
-      mergedGroups[existingGroupIndex] = {
-        ...existingGroup,
-        hooks: [...(existingGroup.hooks as unknown[]), ...newGroup.hooks],
-      };
-    } else {
-      mergedGroups.push(newGroup);
-    }
-  }
-
-  return mergedGroups;
+  return [...mergedGroups, ...newGroups];
 }
 
 /**
@@ -1469,6 +1553,53 @@ async function installWindsurfHooks(
 }
 
 /**
+ * Trae format:
+ * Writes to hooks.json with { version: 1, hooks: { PreToolUse: [{ matcher, hooks: [{ type, command, timeout }] }] } }
+ */
+async function installTraeHooks(
+  baseDir: string,
+  platformBase: string,
+  skillsDir: string,
+  hooksConfig: Record<string, HookConfig>,
+  platformName: string,
+  context: HookCommandContext,
+): Promise<HookInstallResult> {
+  const hooksPath = path.join(platformBase, 'hooks.json');
+  const matcherGroups: Record<
+    string,
+    Array<{ type: string; command: string; timeout: number }>
+  > = {};
+
+  for (const [scriptRelPath, config] of Object.entries(hooksConfig)) {
+    matcherGroups[config.matcher] ??= [];
+    matcherGroups[config.matcher].push({
+      type: 'command',
+      command: buildHookCommand(baseDir, skillsDir, scriptRelPath, context),
+      timeout: 30,
+    });
+  }
+
+  const preToolUseEntries = Object.entries(matcherGroups).map(([matcher, hooks]) => ({
+    matcher,
+    hooks,
+  }));
+  const hooksFile = await readSettingsJsonObject(hooksPath, platformName);
+  const existingHooks = (hooksFile.hooks as Record<string, unknown>) ?? {};
+  const existingPreToolUse = asHookGroup(existingHooks.PreToolUse);
+  const merged = mergeHookGroups(
+    existingPreToolUse,
+    preToolUseEntries,
+    managedHookScriptPaths(hooksConfig),
+  );
+
+  hooksFile.version = hooksFile.version ?? 1;
+  hooksFile.hooks = { ...existingHooks, PreToolUse: merged };
+  await ensureDir(path.dirname(hooksPath));
+  await writeFile(hooksPath, JSON.stringify(hooksFile, null, 2) + '\n', 'utf-8');
+  return { status: 'installed' };
+}
+
+/**
  * GitHub Copilot format:
  * Writes to .github/hooks/comet-guard.json with preToolUse hooks config.
  */
@@ -1493,15 +1624,32 @@ async function installCopilotHooks(
     scriptEntries.push({ matcher, bash: cmd, powershell: cmd });
   }
 
-  const hookConfig = {
-    version: 1,
-    hooks: {
-      preToolUse: scriptEntries,
-    },
+  const settings = await readSettingsJsonObject(hookFilePath, 'GitHub Copilot');
+  const existingHooks =
+    settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
+      ? (settings.hooks as Record<string, unknown>)
+      : {};
+  const existingPreToolUse = asHookGroup(existingHooks.preToolUse);
+  const cleaned = removeManagedCopilotHookEntries(
+    existingPreToolUse,
+    managedHookScriptPaths(hooksConfig),
+  );
+  const detachedMetadata = Object.assign(
+    {},
+    ...cleaned.detachedMetadata.map(({ matcher: _matcher, ...metadata }) => metadata),
+  );
+  if (settings.version === undefined) settings.version = 1;
+  settings.hooks = {
+    ...existingHooks,
+    preToolUse: [
+      ...cleaned.entries,
+      ...scriptEntries.map((entry, index) =>
+        index === 0 ? { ...detachedMetadata, ...entry } : entry,
+      ),
+    ],
   };
-
   await ensureDir(hooksDir);
-  await writeFile(hookFilePath, JSON.stringify(hookConfig, null, 2) + '\n', 'utf-8');
+  await writeFile(hookFilePath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
   return { status: 'installed' };
 }
 
@@ -1517,10 +1665,31 @@ async function installKiroHooks(
   context: HookCommandContext,
 ): Promise<HookInstallResult> {
   const hooksDir = path.join(platformBase, 'hooks');
+  const managedScriptPaths = managedHookScriptPaths(hooksConfig);
 
   for (const [scriptRelPath, config] of Object.entries(hooksConfig)) {
     const hookFileName = path.basename(scriptRelPath).replace(/\.mjs$/, '.kiro.hook');
     const hookFilePath = path.join(hooksDir, hookFileName);
+    const existing = await readJsonObjectFile(hookFilePath);
+    if (existing.status === 'error') {
+      return {
+        status: 'failed',
+        reason: `invalid or unreadable Kiro Hook at ${hookFilePath}: ${existing.error.message}`,
+      };
+    }
+    if (existing.status === 'present') {
+      const then = existing.value.then;
+      const command =
+        then && typeof then === 'object' && !Array.isArray(then)
+          ? (then as Record<string, unknown>).command
+          : undefined;
+      if (!isManagedHookCommand(command, managedScriptPaths)) {
+        return {
+          status: 'failed',
+          reason: `refusing to overwrite user-owned Kiro Hook at ${hookFilePath}`,
+        };
+      }
+    }
 
     // Map Write|Edit matcher to Kiro's write tool category
     const toolName = config.matcher === 'Write|Edit' ? 'write' : '*';
@@ -1544,12 +1713,36 @@ async function installKiroHooks(
     await writeFile(hookFilePath, JSON.stringify(hookConfig, null, 2) + '\n', 'utf-8');
   }
 
+  const failedLegacyFiles: string[] = [];
   for (const legacyScript of LEGACY_HOOK_SCRIPTS) {
     const legacyFile = path.join(
       hooksDir,
       path.basename(legacyScript).replace(/\.mjs$/u, '.kiro.hook'),
     );
-    await rm(legacyFile, { force: true });
+    const existing = await readJsonObjectFile(legacyFile);
+    if (existing.status === 'error') {
+      failedLegacyFiles.push(path.basename(legacyFile));
+      continue;
+    }
+    if (existing.status === 'missing') continue;
+    const then = existing.value.then;
+    const command =
+      then && typeof then === 'object' && !Array.isArray(then)
+        ? (then as Record<string, unknown>).command
+        : undefined;
+    if (!isManagedHookCommand(command, managedScriptPaths)) continue;
+    try {
+      await rm(legacyFile);
+    } catch {
+      failedLegacyFiles.push(path.basename(legacyFile));
+    }
+  }
+  if (failedLegacyFiles.length > 0) {
+    return {
+      status: 'failed',
+      reason: `legacy Hook cleanup failed for ${failedLegacyFiles.join(', ')}`,
+      cleanupFailed: failedLegacyFiles.length,
+    };
   }
 
   return { status: 'installed' };
@@ -1579,6 +1772,11 @@ function managedConfigFields(language: string = 'en'): ManagedConfigFields {
   ];
   const classic: ManagedConfigField[] = [
     {
+      key: 'artifact_layout',
+      def: 'docs',
+      comment: projectConfigComment('classic.artifact_layout', commentLanguage),
+    },
+    {
       key: 'language',
       def: artifactLanguage.id,
       comment: projectConfigComment('classic.language', commentLanguage),
@@ -1601,9 +1799,29 @@ function managedConfigFields(language: string = 'en'): ManagedConfigFields {
   ];
   const native: ManagedConfigField[] = [
     {
+      key: 'artifact_root',
+      def: 'docs',
+      comment: projectConfigComment('native.artifact_root', commentLanguage),
+    },
+    {
+      key: 'language',
+      def: 'en',
+      comment: projectConfigComment('native.language', commentLanguage),
+    },
+    {
       key: 'clarification_mode',
       def: 'sequential',
       comment: projectConfigComment('native.clarification_mode', commentLanguage),
+    },
+    {
+      key: 'archive_confirmation',
+      def: 'automatic',
+      comment: projectConfigComment('native.archive_confirmation', commentLanguage),
+    },
+    {
+      key: 'max_verify_failures',
+      def: '5',
+      comment: projectConfigComment('native.max_verify_failures', commentLanguage),
     },
   ];
   return { top, native, classic };
@@ -1615,14 +1833,9 @@ function getManagedConfigFields(language: string = 'en'): ManagedConfigFields {
   return language === 'en' ? MANAGED_CONFIG_FIELDS : managedConfigFields(language);
 }
 
-function parseProjectConfigOverrides(content: string): Record<string, string> {
-  if (!content.trim()) return {};
-  const doc = parseDocument(content, { uniqueKeys: false });
-  if (doc.errors.length > 0) return {};
-  const js = doc.toJS();
-  if (!js || typeof js !== 'object' || Array.isArray(js)) return {};
+function projectConfigOverrides(value: Record<string, unknown>): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(js as Record<string, unknown>)) {
+  for (const [k, v] of Object.entries(value)) {
     if (v === null || v === undefined) continue;
     if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
       out[k] = String(v);
@@ -1631,11 +1844,19 @@ function parseProjectConfigOverrides(content: string): Record<string, string> {
   return out;
 }
 
+function parseProjectConfigOverrides(content: string): Record<string, string> {
+  if (!content.trim()) return {};
+  return projectConfigOverrides(
+    parseWorkflowProjectConfigDocument(content, { allowPartialProject: true }).value,
+  );
+}
+
 // Coerce the string forms captured by `parseProjectConfigOverrides` back into YAML scalars
 // so booleans render as bare true/false rather than quoted strings.
 function coerceConfigScalar(raw: unknown): unknown {
   if (raw === 'true') return true;
   if (raw === 'false') return false;
+  if (typeof raw === 'string' && /^(?:0|[1-9]\d*)$/u.test(raw)) return Number(raw);
   return raw;
 }
 
@@ -1673,25 +1894,40 @@ function renderProjectConfig(
 async function mergeProjectConfig(
   projectPath: string,
   language: string | null = null,
+  artifactLayoutDefault: 'legacy' | 'docs' = 'docs',
+  completeProjectConfig = false,
+  enableClassicWorkflow = completeProjectConfig,
 ): Promise<void> {
-  const configPath = path.join(projectPath, '.comet', 'config.yaml');
   let existing: Record<string, string> = {};
-  let existingSource = '';
-  if (await fileExists(configPath)) {
-    existingSource = await readFile(configPath, 'utf-8');
-    existing = parseProjectConfigOverrides(existingSource);
+  let parsedRoot: Record<string, unknown> = {};
+  const snapshot = await readWorkflowProjectConfigSnapshot(projectPath, {
+    allowPartialProject: true,
+    allowMissingNativeFields: true,
+  });
+  const parsed = snapshot.document;
+  if (parsed) {
+    parsedRoot = parsed.value;
+    existing = projectConfigOverrides(parsedRoot);
   }
-  await ensureDir(path.dirname(configPath));
 
-  // Preserve the full parsed structure (e.g. the `native:` block) plus any legacy top-level
-  // Classic fields pending migration. Falling back to an empty mapping keeps this idempotent
-  // for a missing or unparseable config.
-  const document = parseDocument(existingSource, { uniqueKeys: false });
-  const parsedRoot = document.errors.length === 0 ? document.toJS() : null;
-  const root: Record<string, unknown> =
-    parsedRoot && typeof parsedRoot === 'object' && !Array.isArray(parsedRoot)
-      ? { ...(parsedRoot as Record<string, unknown>) }
-      : {};
+  // Preserve the full shared-parser value (including unknown extensions) plus
+  // legacy top-level Classic fields pending migration.
+  const root: Record<string, unknown> = { ...parsedRoot };
+  if (completeProjectConfig) {
+    root.schema = 'comet.project.v1';
+    const inferredDefault =
+      root.default_workflow === 'native' || root.default_workflow === 'classic'
+        ? root.default_workflow
+        : root.native && typeof root.native === 'object' && !Array.isArray(root.native)
+          ? 'native'
+          : 'classic';
+    root.default_workflow = inferredDefault;
+    const workflows = Array.isArray(root.workflows)
+      ? root.workflows.filter((workflow) => workflow === 'native' || workflow === 'classic')
+      : [inferredDefault];
+    if (enableClassicWorkflow && !workflows.includes('classic')) workflows.push('classic');
+    root.workflows = workflows;
+  }
   const prevClassic =
     root.classic && typeof root.classic === 'object' && !Array.isArray(root.classic)
       ? { ...(root.classic as Record<string, unknown>) }
@@ -1719,52 +1955,113 @@ async function mergeProjectConfig(
       if (f.key === 'clarification_mode' && value !== 'sequential' && value !== 'batch') {
         throw new Error('native.clarification_mode must be sequential or batch');
       }
+      if (f.key === 'archive_confirmation' && value !== 'automatic' && value !== 'required') {
+        throw new Error('native.archive_confirmation must be automatic or required');
+      }
+      if (
+        f.key === 'max_verify_failures' &&
+        (!Number.isSafeInteger(coerceConfigScalar(value)) ||
+          (coerceConfigScalar(value) as number) < 1)
+      ) {
+        throw new Error('native.max_verify_failures must be a positive integer');
+      }
       nativeBlock[f.key] = coerceConfigScalar(value);
+    }
+    if (nativeBlock.snapshot === undefined) {
+      nativeBlock.snapshot = {
+        ...DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG,
+        include: [...DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG.include],
+        exclude: [...DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG.exclude],
+      };
+    } else if (
+      nativeBlock.snapshot &&
+      typeof nativeBlock.snapshot === 'object' &&
+      !Array.isArray(nativeBlock.snapshot)
+    ) {
+      const snapshot = { ...(nativeBlock.snapshot as Record<string, unknown>) };
+      if (snapshot.include === undefined) {
+        snapshot.include = [...DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG.include];
+      }
+      if (snapshot.exclude === undefined) {
+        snapshot.exclude = [...DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG.exclude];
+      }
+      if (snapshot.max_files === undefined) {
+        snapshot.max_files = DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG.max_files;
+      }
+      if (snapshot.max_total_bytes === undefined) {
+        snapshot.max_total_bytes = DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG.max_total_bytes;
+      }
+      if (snapshot.max_duration_ms === undefined) {
+        snapshot.max_duration_ms = DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG.max_duration_ms;
+      }
+      nativeBlock.snapshot = snapshot;
     }
     root.native = nativeBlock;
   }
 
-  // Classic block: preserve explicit new-format values, then migrate legacy top-level values,
+  // Classic block: preserve explicit new-format values and unknown extension fields, then migrate legacy top-level values,
   // then apply defaults. An explicit language argument still represents the caller's requested
   // install/update language and therefore overrides both stored forms.
-  const classicBlock: Record<string, unknown> = {};
-  for (const f of fields.classic) {
-    let value: unknown;
-    if (f.key === 'language') {
-      value = resolvedLanguage;
-    } else {
-      const legacyTop = root[f.key];
-      if (prevClassic[f.key] !== undefined) value = prevClassic[f.key];
-      else if (legacyTop !== undefined) value = legacyTop;
-      else value = f.def;
+  const shouldMergeClassic = !completeProjectConfig || enableClassicWorkflow || root.classic;
+  if (shouldMergeClassic) {
+    const classicBlock: Record<string, unknown> = { ...prevClassic };
+    for (const f of fields.classic) {
+      let value: unknown;
+      if (f.key === 'language') {
+        value = resolvedLanguage;
+      } else if (f.key === 'artifact_layout') {
+        value = prevClassic[f.key] ?? artifactLayoutDefault;
+      } else {
+        const legacyTop = root[f.key];
+        if (prevClassic[f.key] !== undefined) value = prevClassic[f.key];
+        else if (legacyTop !== undefined) value = legacyTop;
+        else value = f.def;
+      }
+      classicBlock[f.key] = coerceConfigScalar(value);
     }
-    classicBlock[f.key] = coerceConfigScalar(value);
+    root.classic = classicBlock;
+    // Remove migrated legacy top-level Classic fields so they don't linger at the root.
+    for (const f of fields.classic) {
+      delete root[f.key];
+    }
   }
-  // Remove migrated legacy top-level Classic fields so they don't linger at the root.
-  for (const f of fields.classic) {
-    delete root[f.key];
-  }
-  root.classic = classicBlock;
 
-  await writeFile(
-    configPath,
-    renderStructuredProjectConfig(root, resolvedLanguage === 'zh-CN' ? 'zh-CN' : 'en'),
-    'utf-8',
-  );
+  const output = renderStructuredProjectConfig(root, resolvedLanguage === 'zh-CN' ? 'zh-CN' : 'en');
+  parseWorkflowProjectConfigDocument(output, { allowPartialProject: true });
+  await writeWorkflowProjectConfigSource(projectPath, output, {
+    allowPartialProject: !completeProjectConfig,
+    expectedIdentity: snapshot.identity,
+  });
 }
 
-async function createWorkingDirs(projectPath: string, language: string = 'en'): Promise<void> {
+async function createWorkingDirs(
+  projectPath: string,
+  language: string = 'en',
+  artifactLayout: 'legacy' | 'docs' = 'docs',
+  initializationPermit?: ClassicLayoutInitializationPermit,
+): Promise<void> {
+  const layout = await assertClassicLayoutInitializationSafe(
+    projectPath,
+    artifactLayout,
+    initializationPermit,
+  );
   const dirs = [
-    path.join(projectPath, 'docs', 'superpowers', 'specs'),
-    path.join(projectPath, 'docs', 'superpowers', 'plans'),
+    layout.archiveDir,
+    layout.specsDir,
+    layout.superpowersSpecsDir,
+    layout.superpowersPlansDir,
+    layout.superpowersReportsDir,
     path.join(projectPath, '.comet'),
   ];
 
   for (const dir of dirs) {
-    await ensureDir(dir);
+    const relative = path.relative(layout.projectRoot, dir).replaceAll('\\', '/');
+    await ensureProtectedProjectDirectory(layout.projectRoot, relative, {
+      label: `Classic working directory ${relative}`,
+    });
   }
+  await checkpointClassicLayoutInitialization(projectPath, layout.initializationPermit);
 
-  await mergeProjectConfig(projectPath, language);
   await installCometProjectInstructions(projectPath, language === 'zh-CN' ? 'zh' : 'en');
 }
 
@@ -1782,6 +2079,7 @@ export {
   computeRuleDestPath,
   formatRuleContent,
   isManagedHookCommand,
+  removeManagedCopilotHookEntries,
   buildHookCommand,
   removeManagedHooksFromJsonFile,
   planSkillDirectoryCopy,

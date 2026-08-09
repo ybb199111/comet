@@ -5,6 +5,8 @@ description: "Use only when explicitly invoked as /comet-build or routed by the 
 
 # Comet Phase 3: Plan and Build (Build)
 
+Before starting or recovering, read and follow `comet/reference/classic-layout.md`. Every OpenSpec CLI call in this file must use the adapter, and every file path must use the `<classic-*>` logical roots bound by that protocol.
+
 ## Prerequisites
 
 - Design Doc has been created (Phase 2 complete)
@@ -37,7 +39,7 @@ You are an implementation planning expert. Create an implementation plan based o
 
 1. **Immediately execute:** Use the Skill tool to load the Superpowers `writing-plans` skill. Skipping this step is prohibited. After the skill loads, ARGUMENTS must include: `Language: Use the configured Comet artifact language from comet state get <name> language`
 2. Read the Design Doc (technical design document under `docs/superpowers/specs/`)
-3. Read `openspec/changes/<name>/tasks.md` (task boundaries)
+3. Read `<classic-change-dir>/tasks.md` (task boundaries)
 4. Follow the skill's guidance to create the plan
 
 Plan requirements:
@@ -61,7 +63,7 @@ git rev-parse HEAD
 
 Write the plan to file, then return the file path.
 
-**Execute subagent**: Use the current platform's subagent dispatch mechanism to send the above task.
+**Execute subagent**: Dispatch the above task to a subagent.
 
 After the subagent completes:
 - If a valid file path is returned and the file exists, record it as the plan
@@ -77,9 +79,9 @@ comet state set <name> plan docs/superpowers/plans/YYYY-MM-DD-feature.md
 
 No manual phase update needed — guard auto-transitions when exit conditions are met.
 
-Check current platform capabilities before presenting the joint decision: verify whether `using-git-worktrees` is available, whether a real background subagent/Task/multi-agent dispatcher exists, and whether the repository can safely create a branch. Show only isolation and execution options that are currently executable. If a field has only one valid value, explain why and apply it without manufacturing another pause.
+When presenting the joint decision, provide every workspace-isolation and execution choice supported by this workflow. After the user chooses, run the corresponding action; if it fails, stop and report the original error. If a field has only one workflow-valid value, explain why and apply it without manufacturing another pause.
 
-After recording the plan, provide exactly **one joint decision point** that collects whether to continue now, available workspace isolation, available execution method, TDD mode, and code review mode. The branch name must be confirmed in the same Step 2 joint decision when `branch` is selected. Do not ask continue/pause first and then create another configuration or naming blocker.
+After recording the plan, provide exactly **one joint decision point** that collects whether to continue now, workspace isolation, execution method, TDD mode, and code review mode. The branch name must be confirmed in the same Step 2 joint decision when `branch` is selected. Do not ask continue/pause first and then create another configuration or naming blocker.
 
 | Option | Behavior | Description |
 |--------|----------|-------------|
@@ -132,14 +134,14 @@ The plan is on the current branch. These settings are all part of the single Ste
 | Option | Skill | Applicable Scenario |
 |------|------|-------------------|
 | A | Superpowers `subagent-driven-development` | Independent tasks, high complexity; each task runs in an isolated implementer subagent with review driven by `review_mode` |
-| B | Superpowers `executing-plans` | Simple tasks, no subagent environment, lightweight and fast |
+| B | Superpowers `executing-plans` | The main session executes the plan sequentially; suitable for fewer or tightly coupled tasks |
 
 **Execution method recommendation rules**:
 - Task count ≥ 3 → Recommend A
 - Task count ≤ 2 and no cross-module dependencies → Recommend B
 - From hotfix path → Recommend B
 
-These tables are part of the Step 2 joint decision and do not create another pause. First remove options that capability preflight found unavailable. When multiple valid options remain, do not choose `current`, `branch`, or `worktree`, execution method, TDD mode, or review mode from recommendations. Recommendations explain a preference; they never replace user confirmation.
+These tables are part of the Step 2 joint decision and do not create another pause. Always show the isolation and execution options supported by this workflow; do not remove an option by predicting that an action will fail. When multiple valid options remain, do not choose `current`, `branch`, or `worktree`, execution method, TDD mode, or review mode from recommendations. Recommendations explain a preference; they never replace user confirmation.
 
 After user selection, update `isolation`, execution method, TDD mode, and code review mode fields:
 
@@ -148,8 +150,7 @@ comet state set <name> isolation <current|branch|worktree>
 ```
 
 - If the user chooses `executing-plans`: run `comet state set <name> subagent_dispatch null`, then run `comet state set <name> build_mode executing-plans`
-- If the user chooses `subagent-driven-development`: first confirm the current platform has real background subagent / Task / multi-agent dispatch capability; after confirming, run `comet state set <name> subagent_dispatch confirmed`, then run `comet state set <name> build_mode subagent-driven-development`
-- If real background dispatch capability cannot be confirmed, do not show or write `build_mode: subagent-driven-development`. If recovered state already records that mode but capability is unavailable, return to the same Step 2 joint decision with only executable modes; do not create a separate "switch to executing-plans" pause
+- If the user chooses `subagent-driven-development`: run `comet state set <name> subagent_dispatch confirmed` to record the selected subagent execution, then run `comet state set <name> build_mode subagent-driven-development`
 
 **TDD Mode**:
 
@@ -172,7 +173,7 @@ Run `comet state set <name> review_mode <off|standard|thorough>`
 
 `isolation` is a script-enforced hard constraint. Full workflow init may temporarily leave it as `null`, but only before this step. If it remains `null`, both the `build → verify` guard and `comet state transition build-complete` will fail. Full workflow allows `current`, `branch`, or `worktree`, but `current` must be written only after the user explicitly selects it in Step 2; never make it a silent default.
 
-`subagent_dispatch` is a script-enforced hard constraint. `build_mode: subagent-driven-development` requires `subagent_dispatch: confirmed` before leaving the build phase, otherwise both `comet guard build --apply` and `comet state transition build-complete` will fail.
+`subagent_dispatch` is a script-enforced hard constraint that records the user's selected subagent execution. `build_mode: subagent-driven-development` requires `subagent_dispatch: confirmed` before leaving the build phase, otherwise both `comet guard build --apply` and `comet state transition build-complete` will fail; it is not a capability check.
 
 `tdd_mode` is a script-enforced hard constraint. Full workflow must have `tdd_mode` selected as `tdd` or `direct` before leaving the build phase, otherwise both `comet guard build --apply` and `comet state transition build-complete` will fail.
 
@@ -204,7 +205,7 @@ Without `direct_override: true`, `build_mode=direct` in full workflow is blocked
 
   Immediately after Step 2 confirms the branch name, run `git checkout -b <branch-name>`, then run `comet state set <name> isolation branch` to write the new branch to `bound_branch`. Continue on the new branch.
 
-- **worktree**: Must use the Skill tool to load the Superpowers `using-git-worktrees` skill to create isolated workspace. Do not bypass this skill with plain shell commands or native tools; if the skill is unavailable, stop the process and prompt to install or enable Superpowers skills.
+- **worktree**: **Immediately execute:** Use the Skill tool to load the Superpowers `using-git-worktrees` skill to create an isolated workspace. Do not bypass this skill with plain shell commands or native tools. If loading it fails because it is unavailable, stop and report that error.
 
 After creating isolation, confirm plan file is accessible (naturally accessible with branch method; for worktree method, confirm plan has been committed). If the plan file has not been committed under worktree mode, commit it first before creating the worktree:
 
@@ -223,9 +224,9 @@ Do not begin source writes until this binding succeeds.
 
 **Execute plan**: Must handle execution according to the actual runtime of `build_mode`.
 
-- `build_mode: executing-plans`: **Immediately execute:** Use the Skill tool to load the Superpowers `executing-plans` skill. Skipping this step is prohibited. If the skill is unavailable, stop the process and prompt to install or enable the corresponding skill; do not substitute with normal conversation. After the skill loads, ARGUMENTS must include the same Language constraint as Step 1: `Language: Use the configured Comet artifact language from comet state get <name> language`. Execute according to plan.
-- `build_mode: subagent-driven-development`: The main session only coordinates and must not write implementation code directly. **Immediately execute:** Use the Skill tool to load the Superpowers `subagent-driven-development` skill. After the skill loads, read `comet/reference/subagent-dispatch.md` for Comet-specific extensions (real background dispatch, task isolation, checkoff verification, TDD constraints, continuous execution, context recovery) and apply them alongside the skill's workflow. If they conflict, the more specific Comet extensions take precedence.
-- If the execution preflight finds that background dispatch capability has disappeared, do not execute directly in the main window and do not create a new second decision. Return to the same Step 2 joint decision with the unavailable mode removed. After the user selects main-window execution there, run `comet state set <name> build_mode executing-plans`, then continue through that branch.
+- `build_mode: executing-plans`: **Immediately execute:** Use the Skill tool to load the Superpowers `executing-plans` skill. Skipping this step is prohibited. If loading fails, stop and report the error; do not substitute with normal conversation. After the skill loads, ARGUMENTS must include the same Language constraint as Step 1: `Language: Use the configured Comet artifact language from comet state get <name> language`. Execute according to plan.
+- `build_mode: subagent-driven-development`: The main session only coordinates and must not write implementation code directly. **Immediately execute:** Use the Skill tool to load the Superpowers `subagent-driven-development` skill. After the skill loads, read `comet/reference/subagent-dispatch.md` for Comet-specific extensions (subagent dispatch, task isolation, checkoff verification, TDD constraints, continuous execution, context recovery) and apply them alongside the skill's workflow. If they conflict, the more specific Comet extensions take precedence.
+- If subagent dispatch fails, follow `comet/reference/subagent-dispatch.md` to record the current task as `BLOCKED` with the failure reason; the main session must not take over implementation.
 
 **TDD Mode Execution Constraints**:
 
@@ -245,7 +246,7 @@ Under `executing-plans`, the main session executes tasks directly (no isolated i
 
 Requirements (apply to `standard` and `thorough`):
 - the `requesting-code-review` skill must be loaded before `comet guard <change-name> build --apply`
-- if `requesting-code-review` is unavailable under `standard` or `thorough`, stop and ask the user to install/enable it and retry, or explicitly switch to `review_mode: off` with a recorded reason; never skip the gate or continue guard before that explicit switch
+- if loading `requesting-code-review` fails under `standard` or `thorough`, stop and ask the user to resolve the error and retry, or explicitly switch to `review_mode: off` with a recorded reason; never skip the gate or continue guard before that explicit switch
 - CRITICAL review findings (security vulnerabilities, data loss risk, build/test failures) must be fixed first and must not be carried into verify
 - if non-CRITICAL review findings are accepted, record the acceptance reason and impact scope in tasks.md, the commit body, a verification report draft, or another durable artifact
 
@@ -262,8 +263,8 @@ When the initial spec is found incomplete during implementation, handle by scale
 | Scale | Trigger Conditions | Approach |
 |------|-------------------|----------|
 | Small | Missing acceptance scenarios, edge cases | Directly edit delta spec + design.md, append tasks.md tasks |
-| Medium | Interface changes, new components, data flow changes | **Must use the current platform's available user input/confirmation mechanism to pause and wait for the user to explicitly confirm**, then must use Skill tool to load the Superpowers `brainstorming` skill to update Design Doc + delta spec |
-| Large | Brand-new capability requirements | **Must use the current platform's available user input/confirmation mechanism to pause and wait for the user to explicitly confirm the split**; after user confirms, create independent change through `/comet-open` |
+| Medium | Interface changes, new components, data flow changes | **Pause, present the choice, and wait for the user to explicitly confirm**, then must use Skill tool to load the Superpowers `brainstorming` skill to update Design Doc + delta spec |
+| Large | Brand-new capability requirements | **Pause, present the split choice, and wait for the user to explicitly confirm**; after user confirms, create independent change through `/comet-open` |
 
 **50% Threshold Determination**: Using initial task count in tasks.md as baseline, if new tasks exceed half of that total, it's considered outside original plan scope, **must follow the `comet/reference/decision-point.md` protocol to pause and wait for the user to decide whether to split into a new change**.
 

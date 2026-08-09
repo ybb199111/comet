@@ -19,10 +19,10 @@ import {
   writeNativeRunState,
 } from '../../../domains/comet-native/native-run-store.js';
 import { NATIVE_LEGACY_RUNTIME_IDENTITIES } from '../../../domains/comet-native/native-runtime-package.js';
-import { advanceNativeChange } from '../../../domains/comet-native/native-transitions.js';
 import type { NativeProjectPaths } from '../../../domains/comet-native/native-types.js';
 import { inspectNativeVerificationFreshness } from '../../../domains/comet-native/native-verification-runtime.js';
 import { nativeVerificationFixtureReport } from '../../helpers/native-verification.js';
+import { advanceNativeChange } from '../../helpers/native-confirmed-transition.js';
 
 const brief = `# Outcome
 Ship evidence-bound behavior.
@@ -52,7 +52,12 @@ describe('Native evidence-bound phase transitions', () => {
     await fs.mkdir(path.join(projectRoot, 'src'), { recursive: true });
     await fs.writeFile(path.join(projectRoot, 'src', 'feature.ts'), 'export const value = 1;\n');
     paths = await nativeProjectPaths(projectRoot, '.');
-    const state = await createNativeChange({ paths, name: 'evidence-change', language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name: 'evidence-change',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     changeDir = nativeChangeDir(paths, state.name);
     await fs.writeFile(path.join(changeDir, 'brief.md'), brief);
     await advanceNativeChange({
@@ -488,18 +493,20 @@ describe('Native evidence-bound phase transitions', () => {
     );
 
     await writeVerification();
-    const verified = await advanceNativeChange({
-      paths,
-      name: 'evidence-change',
-      evidence: {
-        summary: 'The accepted partial scope passed.',
-        verificationResult: 'pass',
-        verificationReport: 'verification.md',
-      },
-    });
     await expect(
-      inspectNativeVerificationFreshness({ paths, state: verified.change }),
-    ).resolves.toMatchObject({ freshness: 'partial', findingCodes: [] });
+      advanceNativeChange({
+        paths,
+        name: 'evidence-change',
+        evidence: {
+          summary: 'The accepted partial scope passed.',
+          verificationResult: 'pass',
+          verificationReport: 'verification.md',
+        },
+      }),
+    ).resolves.toMatchObject({
+      change: { phase: 'archive', verification_result: 'pass' },
+      next: 'auto',
+    });
   });
 
   it('redacts credential-shaped transition and partial-allowance text before hashing or persistence', async () => {

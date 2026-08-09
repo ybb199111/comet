@@ -134,6 +134,18 @@ npm install -g @rpamis/comet
 
 ## Quick Start
 
+A single global initialization makes `/comet` available through the selected hosts in every project:
+
+```bash
+comet init --scope global
+cd your-project
+# Invoke /comet in the host
+```
+
+The first `/comet` invocation in an unconfigured project snapshots the defaults from `~/.comet/config.yaml` into the project's `.comet/config.yaml` and creates artifacts only inside that project. Later global-default changes do not rewrite activated projects. Hooks then recognize the project config and `.comet/current-change.json`; Hook events, `comet status`, and ordinary read-only resolution never initialize a project by themselves.
+
+Run project initialization only when you want project-local copies of Skills, Rules, and Hooks, or explicit project overrides:
+
 ```bash
 cd your-project
 comet init
@@ -157,6 +169,7 @@ Classic-specific defaults live under `classic:`. The next `comet init` or `comet
 
 ```yaml
 classic:
+  artifact_layout: docs
   language: en
   context_compression: off
   review_mode: standard
@@ -212,15 +225,17 @@ Comet Eval's automated dual-agent architecture can integrate online with LangSmi
 <details>
 <summary><code>comet init [path]</code> — Initialize Comet workflow</summary>
 
-Initializes Comet for selected AI coding platforms. Interactive setup selects Native, Classic, or both; new non-interactive projects default to self-contained Native, while projects with existing Classic state remain Classic. The workflows keep independent entries, state, artifacts, and Guards. Each platform installs one `comet-workflow-guard` Rule, and platforms with Hook support install only `comet-hook-router.mjs`. The Router uses `.comet/current-change.json` to send each write to exactly one current Native or Classic Guard. Only Classic installs OpenSpec and Superpowers; Native depends on no external Skill.
+Initializes Comet for selected AI coding platforms. Interactive setup selects Native, Classic, or both; new non-interactive projects default to self-contained Native, while projects with existing Classic state remain Classic. Pass `--platform` to initialize only that platform; unknown but valid platform ids are treated as project-scoped custom platforms installed under `.<platform>/` with the selected workflow's skills, scripts, rules, and hooks. The workflows keep independent entries, state, artifacts, and Guards. Each platform installs one `comet-workflow-guard` Rule, and platforms with Hook support install only `comet-hook-router.mjs`. The Router uses `.comet/current-change.json` to send each write to exactly one current Native or Classic Guard. Only Classic installs OpenSpec and Superpowers; Native depends on no external Skill.
 
 | Option              | Description                                                                    |
 | ------------------- | ------------------------------------------------------------------------------ |
 | `--yes`             | Non-interactive mode, auto-select detected platforms (or all if none detected) |
 | `--scope <scope>`   | Install scope: `project` or `global`                                           |
 | `--language <lang>` | Skill language: `en` or `zh` (skips interactive language prompt)               |
+| `--platform <platform>` | Initialize only this platform; project scope accepts custom platform ids    |
 | `--workflow <mode>` | Workflows to initialize: `native`, `classic`, or `both`                        |
-| `--root <path>`     | Project-relative Native artifact root, such as `docs`                          |
+| `--root <path>`     | Project-relative Native artifact root; global scope stores it as a project default |
+| `--codegraph <action>` | Non-interactive project index action: explicitly choose `init` or `skip`    |
 | `--skip-existing`   | Skip already installed components                                              |
 | `--overwrite`       | Overwrite already installed components                                         |
 | `--json`            | Output structured JSON                                                         |
@@ -272,26 +287,31 @@ Starts a local HTTP server that displays a visual dashboard with active changes,
 <details>
 <summary><code>comet doctor [path]</code> — Diagnose Comet installation health</summary>
 
-Checks project/global installation health, working directories, installed skills, scripts, and active change
+Checks project/global installation health, working directories, installed skills, scripts, CodeGraph indexes, and active change
 diagnostics. `comet doctor` reports diagnostic status for malformed `.comet.yaml` files, current step / runtime mode
-for valid changes, and runtime evidence gaps that block safe resume.
+for valid changes, and runtime evidence gaps that block safe resume. In a Git secondary worktree, it separately reports
+the current worktree, primary worktree, and global fallback installation state. Ignored assets in the primary worktree
+are inspected only for classification and are never executed across worktrees.
 
-| Option            | Description                                                     |
-| ----------------- | --------------------------------------------------------------- |
-| `--json`          | Output structured diagnostic results                            |
-| `--scope <scope>` | Diagnose `auto`, `project`, or `global` scope (default: `auto`) |
+| Option            | Description                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `--json`          | Output structured diagnostics, including CodeGraph state and the effective runtime source    |
+| `--scope <scope>` | Diagnose `auto`, `project`, or `global` scope (default: `auto`)                               |
+| `--repair`        | Repair deterministic managed-install and state problems                                       |
+| `--yes`           | Use with `--repair` to authorize potentially expensive CodeGraph initialization, rebuild, or sync |
 
 </details>
 
 <details>
 <summary><code>comet update [path]</code> — Update Comet package and skills</summary>
 
-Refreshes installed Comet skills in detected project/global targets. A current-project refresh does not mutate any npm installation, whether global or project-local, by default; pass `--self-update` explicitly when the CLI should be upgraded too. Explicit `--scope global` deterministically uses the current-project asset scope, never opens the all-projects selector, and still does not update the npm package implicitly. Self-update compares full semver values, including prereleases, refuses downgrades, and validates the candidate package's version, Workflow command, and Native command in isolation before installation. A failed install attempts to restore the exact installed version.
+Refreshes installed Comet skills in detected project/global targets. Pass `--platform` to refresh only that platform, including project-scoped custom platforms. A current-project refresh does not mutate any npm installation, whether global or project-local, by default; pass `--self-update` explicitly when the CLI should be upgraded too. Explicit `--scope global` deterministically uses the current-project asset scope, never opens the all-projects selector, and still does not update the npm package implicitly. Self-update compares full semver values, including prereleases, refuses downgrades, and validates the candidate package's version, Workflow command, and Native command in isolation before installation. A failed install attempts to restore the exact installed version.
 
 | Option               | Description                                      |
 | -------------------- | ------------------------------------------------ |
 | `--json`             | Output npm and skill update results as JSON      |
 | `--language <lang>`  | Override detected skill language (`en`, `zh`)    |
+| `--platform <platform>` | Refresh only this platform; project scope accepts custom platform ids |
 | `--scope <scope>`    | Update only the `global` or `project` install scope |
 | `--current-project`  | Refresh only the current project                 |
 | `--all-projects`     | Refresh all registered project installations     |
@@ -600,11 +620,12 @@ Classic uses a decoupled state architecture with separate files:
 | File                                      | Owner    | Purpose                                             |
 | ----------------------------------------- | -------- | --------------------------------------------------- |
 | `.openspec.yaml`                          | OpenSpec | Spec lifecycle, change metadata                     |
-| `openspec/changes/<name>/.comet.yaml`     | Comet    | Workflow phase, execution mode, verification status |
+| `<classic-change-dir>/.comet.yaml`        | Comet    | Workflow phase, execution mode, verification status |
 | `.comet/run-state.json`                   | Engine   | Run identity and execution state (machine-owned)    |
 | `.comet/state-events.jsonl`               | Comet    | Append-only state transition audit log              |
 
 Each change-level `.comet.yaml` stores Classic workflow state and only keeps `run_id` as the link to the Engine Run.
+`<classic-change-dir>` is resolved from the project's `classic.artifact_layout`; use `comet classic root show` to inspect the current OpenSpec root.
 Machine-owned Engine state lives in the change's `.comet/run-state.json` with camelCase fields such as `currentStep`,
 `status`, and `iteration`. Legacy Run fields left in YAML are migrated after compatibility reads, and `skill` is no
 longer a valid current `.comet.yaml` field. Project defaults live in `.comet/config.yaml`.
@@ -761,23 +782,29 @@ your-project/
 │   ├── comet-*/SKILL.md
 │   ├── openspec-*/SKILL.md
 │   └── brainstorming/SKILL.md
-├── openspec/                    # OpenSpec — WHAT
-│   ├── config.yaml
-│   └── changes/
-│       └── <name>/
-│           ├── .openspec.yaml       # OpenSpec state
-│           ├── .comet.yaml          # Comet workflow state (Classic fields + run_id link)
-│           ├── .comet/
-│           │   ├── run-state.json   # Engine Run state (machine-owned, auto-migrated)
-│           │   └── state-events.jsonl # State transition audit log (append-only)
-│           ├── proposal.md
-│           ├── design.md
-│           ├── specs/<capability>/spec.md
-│           └── tasks.md
-└── docs/superpowers/            # Superpowers — HOW
-    ├── specs/                   # Design documents
-    └── plans/                   # Implementation plans
+└── docs/
+    ├── openspec/                    # OpenSpec — WHAT (classic.artifact_layout: docs)
+    │   ├── config.yaml
+    │   ├── specs/<capability>/spec.md # Main specs after archive
+    │   └── changes/
+    │       ├── archive/YYYY-MM-DD-<name>/ # Archived changes
+    │       └── <name>/
+    │           ├── .openspec.yaml       # OpenSpec state
+    │           ├── .comet.yaml          # Comet workflow state (Classic fields + run_id link)
+    │           ├── .comet/
+    │           │   ├── run-state.json   # Engine Run state (machine-owned, auto-migrated)
+    │           │   └── state-events.jsonl # State transition audit log (append-only)
+    │           ├── proposal.md
+    │           ├── design.md
+    │           ├── specs/<capability>/spec.md
+    │           └── tasks.md
+    └── superpowers/                 # Superpowers — HOW
+        ├── specs/                   # Design documents
+        ├── plans/                   # Implementation plans
+        └── reports/                 # Verification reports
 ```
+
+New Classic and dual-workflow projects default to `classic.artifact_layout: docs`. Projects that retain the legacy layout keep the OpenSpec root at repository-level `openspec/`, while Superpowers artifacts remain under `docs/superpowers/`. Use `comet classic root show` to inspect the current layout. To migrate, run `comet classic root move docs --dry-run` first and then apply the returned plan with `--apply`; do not edit the configuration field by itself.
 
 </details>
 
@@ -837,7 +864,7 @@ Track our development progress and upcoming features on the [Comet Roadmap](http
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=rpamis/comet&type=date&legend=top-left&sealed_token=vRfs1efclBxdyNz7q0GUHGe9kUU96aSUCa1eHI8CEWehNHvZoop01eCjM0jpVMgeYBjvnGBcd0OUHnhQBC8p6gXP2Drpmo3pLXl_r0prKSuNW6OTqddOBCgaPtSt_KDlRgXjHZhx94_zcXWkIg5HOJEjPq4Qp2TMEa6inFxm7TixQQRIdPgKw2Z00nie)](https://www.star-history.com/?repos=rpamis%2Fcomet&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=rpamis/comet&type=date&legend=top-left&sealed_token=UMxkYc2GrflG4LawVBIB1HY-k5O2WqatK4llgyINHBnPZRAl9PdOtca_ciCdXoKWpzzOF_K2YLyQ0CQ1Lx1tJjeO53J5mgRo9yK0DanAT_ClPsf4O2XxBQ)](https://www.star-history.com/?repos=rpamis%2Fcomet&type=date&legend=top-left)
 
 ## Contributors
 

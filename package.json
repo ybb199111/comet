@@ -1,13 +1,19 @@
 {
   "name": "@rpamis/comet",
-  "version": "0.4.0-beta.8",
+  "version": "0.4.0-beta.18",
   "description": "Agent Skill Harness For Turning Ideas Into Evaluated Workflows",
   "keywords": [
     "comet",
     "openspec",
     "superpowers",
     "skills",
-    "workflow"
+    "workflow",
+    "ai-coding",
+    "agent-workflow",
+    "spec-workflow",
+    "loop-engineering",
+    "skill-creator",
+    "skill-evaluation"
   ],
   "license": "MIT",
   "author": "benym",
@@ -91,13 +97,17 @@
   },
   "packageManager": "pnpm@10.18.3",
   "overrides": {
-    "brace-expansion": "5.0.7",
-    "esbuild": "0.28.1"
+    "brace-expansion": "5.0.9",
+    "esbuild": "0.28.1",
+    "postcss": "8.5.25",
+    "undici": "7.29.0"
   },
   "pnpm": {
     "overrides": {
-      "brace-expansion": "5.0.7",
-      "esbuild": "0.28.1"
+      "brace-expansion": "5.0.9",
+      "esbuild": "0.28.1",
+      "postcss": "8.5.25",
+      "undici": "7.29.0"
     }
   },
   "engines": {
@@ -127,12 +137,14 @@
     "vitest": "^4.1.6"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.3.2",
     "@fission-ai/openspec": "^1.5.0",
     "@inquirer/ansi": "^2.0.5",
     "@inquirer/core": "^11.1.10",
     "@inquirer/figures": "^2.0.5",
     "@inquirer/prompts": "^8.4.3",
     "@inquirer/type": "^4.0.5",
+    "antd": "^6.5.2",
     "commander": "^14.0.0",
     "dompurify": "^3.4.12",
     "highlight.js": "^11.11.1",

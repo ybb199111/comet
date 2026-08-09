@@ -81,6 +81,22 @@ def test_unit_test_detection_keeps_task_runs_as_experiments():
     assert conftest._is_unit_tests_only(Config()) is False
 
 
+
+
+def test_experiment_id_uses_explicit_comet_eval_run_id(monkeypatch):
+    monkeypatch.setenv("COMET_EVAL_EXPERIMENT_ID", "comet-eval-1234")
+
+    assert conftest._get_or_create_experiment_id("ignored", False) == "comet-eval-1234"
+    assert conftest._get_or_create_experiment_id("ignored", True) == "comet-eval-1234"
+
+
+def test_experiment_id_rejects_unsafe_explicit_value(monkeypatch):
+    monkeypatch.setenv("COMET_EVAL_EXPERIMENT_ID", "../escape")
+
+    with pytest.raises(ValueError, match="COMET_EVAL_EXPERIMENT_ID"):
+        conftest._get_or_create_experiment_id("ignored", False)
+
+
 def test_extract_loop_turns_reads_driver_completion_line():
     stderr = (
         "[loop] turn 1/4\n"
@@ -99,6 +115,154 @@ def test_extract_loop_turns_reads_driver_completion_line():
         "fresh_resume_boundaries": 0,
     }
     assert conftest._extract_loop_turns("ordinary stderr") is None
+
+
+def test_extract_subject_turn_evidence_groups_results_and_tool_calls():
+    stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Investigating."},
+                            {
+                                "type": "tool_use",
+                                "id": "read-1",
+                                "name": "Read",
+                                "input": {"file_path": "x"},
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "bash-1",
+                                "name": "Bash",
+                                "input": {"command": "AUTH_TOKEN=topsecret cat > wordcount.py"},
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "edit-failed",
+                                "name": "Edit",
+                                "input": {"file_path": "sentence.py"},
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "bash-failed",
+                                "name": "Bash",
+                                "input": {"command": "cat > fallback.py"},
+                            },
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "read-1",
+                                "content": "source",
+                            },
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "bash-1",
+                                "content": "updated",
+                            },
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "edit-failed",
+                                "content": "permission denied",
+                                "is_error": True,
+                            },
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "bash-failed",
+                                "content": "Process exited with code 1",
+                            },
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "[blocking] QUESTION\nShould empty input return zero?",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "write-1",
+                                "name": "Write",
+                                "input": {"file_path": "y"},
+                            },
+                            {
+                                "type": "text",
+                                "text": "Implementation completed through archive.",
+                            },
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "write-1",
+                                "content": "created",
+                            }
+                        ]
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "",
+                }
+            ),
+        ]
+    )
+
+    assert conftest._extract_subject_turn_evidence(stdout) == [
+        {
+            "turn": 1,
+            "result": "[blocking] QUESTION\nShould empty input return zero?",
+            "tool_calls": [
+                {"name": "Read", "success": True, "path": "x"},
+                {
+                    "name": "Bash",
+                    "success": True,
+                    "command": "AUTH_TOKEN=[REDACTED] cat > wordcount.py",
+                },
+                {
+                    "name": "Edit",
+                    "success": False,
+                    "path": "sentence.py",
+                },
+                {
+                    "name": "Bash",
+                    "success": False,
+                    "command": "cat > fallback.py",
+                },
+            ],
+        },
+        {
+            "turn": 2,
+            "result": "Implementation completed through archive.",
+            "tool_calls": [{"name": "Write", "success": True, "path": "y"}],
+        },
+    ]
 
 
 def test_capture_execution_identity_separates_runtime_image_from_safe_report(
@@ -201,7 +365,8 @@ def test_auto_user_prompt_paths_bypass_msys_path_conversion():
 
     assert '"@//workspace/.eval-task-prompt.txt"' in source
     assert '"//workspace/.eval-simulator-prompt.txt"' in source
-    assert "interaction.simulator_prompt and not interaction.decision_reply" in source
+    assert "and not interaction.decision_reply" in source
+    assert "and not interaction.decision_replies" in source
 
 
 def test_dynamic_treatment_config_from_skill_path(tmp_path: Path):
@@ -270,6 +435,44 @@ def test_resolve_interaction_config_uses_profile_default_prompt():
     assert interaction.mode == "auto_user"
     assert interaction.max_turns == 12
     assert interaction.simulator_prompt is not None
+
+
+def test_resolve_interaction_config_preserves_task_simulator_prompt(monkeypatch):
+    task = load_task("comet-native-clarification-modes")
+    monkeypatch.delenv("BENCH_SIMULATOR_PROMPT_FILE", raising=False)
+
+    class Config:
+        def getoption(self, name):
+            return {
+                "--interaction-mode": None,
+                "--max-turns": None,
+                "--simulator-prompt": None,
+            }.get(name)
+
+    interaction = conftest._resolve_interaction_config(task, "generic", Config())
+
+    assert interaction.simulator_prompt == task.config.interaction.simulator_prompt
+
+
+def test_resolve_interaction_config_allows_explicit_prompt_file_override(
+    tmp_path: Path, monkeypatch
+):
+    task = load_task("comet-native-clarification-modes")
+    prompt_file = tmp_path / "simulator.md"
+    prompt_file.write_text("Use the explicit simulator.", encoding="utf-8")
+    monkeypatch.setenv("BENCH_SIMULATOR_PROMPT_FILE", str(prompt_file))
+
+    class Config:
+        def getoption(self, name):
+            return {
+                "--interaction-mode": None,
+                "--max-turns": None,
+                "--simulator-prompt": None,
+            }.get(name)
+
+    interaction = conftest._resolve_interaction_config(task, "generic", Config())
+
+    assert interaction.simulator_prompt == "Use the explicit simulator."
 
 
 def test_build_eval_claude_md_injects_comet_workflow_contract():
@@ -712,3 +915,66 @@ def test_build_report_payload_marks_timeout_as_excluded():
     assert report["sample_quality"]["status"] == "excluded"
     assert report["sample_quality"]["reason_code"] == "runner_timeout"
     assert report["sample_quality"]["include_in_analysis"] is False
+
+
+def test_prebuild_docker_image_allows_a_cold_image_build_to_run_for_fifteen_minutes(
+    tmp_path: Path, monkeypatch
+):
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    (environment / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+    calls = []
+
+    def fake_run_shell(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, "skillbench:test\n", "")
+
+    monkeypatch.setattr(conftest, "run_shell", fake_run_shell)
+    monkeypatch.setattr(conftest, "DOCKER_BUILD_LOCK", tmp_path / "docker-build.lock")
+
+    assert conftest._build_docker_image_with_lock(environment) == "skillbench:test"
+    assert calls == [
+        (
+            ("docker.sh", "build", str(environment)),
+            {"timeout": 900, "check": False},
+        )
+    ]
+
+
+def test_docker_prebuild_uses_only_the_tasks_selected_by_an_eval_manifest(
+    tmp_path: Path,
+):
+    tasks_dir = tmp_path / "tasks"
+    for task_name in ("authoring-skill-smoke", "workflow-route-conformance", "unrelated"):
+        environment = tasks_dir / task_name / "environment"
+        environment.mkdir(parents=True)
+        (environment / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    manifest = tmp_path / "eval.yaml"
+    manifest.write_text(
+        """
+apiVersion: comet.eval/v1alpha1
+kind: SkillEvalManifest
+metadata:
+  name: selected-tasks
+skill:
+  name: selected-tasks
+  source: .
+evaluation:
+  recommendedTasks:
+    - authoring-skill-smoke
+    - workflow-route-conformance
+""",
+        encoding="utf-8",
+    )
+
+    class Config:
+        def getoption(self, name):
+            return {"--task": None, "--eval-manifest": str(manifest)}[name]
+
+    request = SimpleNamespace(config=Config())
+
+    assert conftest._docker_environment_dirs_for_request(request, tasks_dir) == [
+        tasks_dir / "authoring-skill-smoke" / "environment",
+        tasks_dir / "workflow-route-conformance" / "environment",
+    ]

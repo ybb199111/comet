@@ -1,6 +1,5 @@
 import { spawnSync } from 'child_process';
-import { randomUUID } from 'crypto';
-import { existsSync, promises as fs } from 'fs';
+import { promises as fs } from 'fs';
 import path from 'path';
 import { Document, parseDocument } from 'yaml';
 import type { ClassicCommandHandler, ClassicCommandResult } from './classic-cli.js';
@@ -20,7 +19,17 @@ import {
   unboundDetachedMessage,
 } from './classic-branch-binding.js';
 import { collectClassicEvidence } from './classic-evidence.js';
-import { openSpecChangeNameError, resolveClassicChangeDirectory } from './classic-paths.js';
+import {
+  ensureClassicActiveChangeDirectory,
+  openSpecChangeNameError,
+  resolveClassicChangeDirectory,
+} from './classic-paths.js';
+import { assertClassicLayoutWritable, assertClassicLayoutReadable } from './classic-layout.js';
+import {
+  classicCommandInvocationCwd,
+  classicCommandProjectRoot,
+  withClassicCommandContext,
+} from './classic-command-context.js';
 import { resolveClassicStepId } from './classic-resolver.js';
 import { transitionClassicRuntimeRun, validateClassicRuntimeRun } from './classic-runtime-run.js';
 import { appendClassicStateEvent } from './classic-state-events.js';
@@ -40,6 +49,17 @@ import { readRunState } from '../../domains/engine/state.js';
 import { appendTrajectory, readTrajectory } from '../../domains/engine/run-store.js';
 import { recordCommandCheck, type CommandCheckScope } from './classic-command-checks.js';
 import { readClassicConfigValue } from './classic-project-config.js';
+import {
+  classicProjectFileNonempty,
+  classicProjectTargetExists,
+  inspectClassicProjectTarget,
+  readClassicProjectFile,
+  writeClassicProjectText,
+} from './classic-protected-path.js';
+import {
+  inspectClassicPlanReadiness,
+  type ClassicPlanReadiness,
+} from './classic-plan-readiness.js';
 
 const GREEN = '\u001b[32m';
 const RED = '\u001b[31m';
@@ -165,36 +185,36 @@ function validateRelativePath(value: string, field: string): void {
 }
 
 async function exists(file: string): Promise<boolean> {
-  try {
-    await fs.access(file);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
+  const projectRoot = classicCommandProjectRoot();
+  return classicProjectTargetExists(projectRoot, file, {
+    label: `Classic project path ${path.relative(projectRoot, path.resolve(projectRoot, file)).replaceAll('\\', '/')}`,
+  });
 }
 
 async function nonempty(file: string): Promise<boolean> {
-  try {
-    return (await fs.stat(file)).size > 0;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
+  const projectRoot = classicCommandProjectRoot();
+  return classicProjectFileNonempty(
+    projectRoot,
+    file,
+    `Classic project file ${path.relative(projectRoot, path.resolve(projectRoot, file)).replaceAll('\\', '/')}`,
+  );
 }
 
 async function changeDirectory(name: string): Promise<{ label: string; directory: string }> {
-  return resolveClassicChangeDirectory(name);
+  return resolveClassicChangeDirectory(name, classicCommandProjectRoot());
 }
 
 async function readDocument(file: string): Promise<Document> {
   let source: string;
+  const projectRoot = classicCommandProjectRoot();
   try {
-    source = await fs.readFile(file, 'utf8');
+    source = await readClassicProjectFile(projectRoot, file, {
+      label: `Classic state ${path.relative(projectRoot, file).replaceAll('\\', '/')}`,
+    });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       fail(
-        `ERROR: .comet.yaml not found at ${path.relative(process.cwd(), file).replaceAll('\\', '/')}`,
+        `ERROR: .comet.yaml not found at ${path.relative(projectRoot, file).replaceAll('\\', '/')}`,
       );
     }
     throw error;
@@ -205,15 +225,9 @@ async function readDocument(file: string): Promise<Document> {
 }
 
 async function atomicWrite(file: string, content: string): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  try {
-    await fs.writeFile(temporary, content, 'utf8');
-    await fs.rename(temporary, file);
-  } catch (error) {
-    await fs.rm(temporary, { force: true });
-    throw error;
-  }
+  await writeClassicProjectText(classicCommandProjectRoot(), file, content, {
+    label: 'Classic state write target',
+  });
 }
 
 function scalar(value: unknown): string {
@@ -336,13 +350,15 @@ function sparseClassicState(record: Record<string, unknown>): ClassicState {
 async function projectConfigValue(
   field: 'context_compression' | 'auto_transition' | 'review_mode' | 'language',
 ): Promise<string | null> {
-  return (await readClassicConfigValue(field))?.value ?? null;
+  return (await readClassicConfigValue(field, { cwd: classicCommandProjectRoot() }))?.value ?? null;
 }
 
 async function projectLanguageDefault(): Promise<string> {
   if (process.env.COMET_LANGUAGE)
     return validateLanguage(process.env.COMET_LANGUAGE, 'COMET_LANGUAGE');
-  const configured = await readClassicConfigValue('language');
+  const configured = await readClassicConfigValue('language', {
+    cwd: classicCommandProjectRoot(),
+  });
   if (configured) return validateLanguage(configured.value, configured.source);
   return 'en';
 }
@@ -385,6 +401,14 @@ async function stateFile(
   name: string,
 ): Promise<{ file: string; label: string; directory: string }> {
   const change = await changeDirectory(name);
+  await inspectClassicProjectTarget(
+    classicCommandProjectRoot(),
+    path.join(change.directory, '.comet'),
+    {
+      label: `Classic runtime directory for ${name}`,
+      expected: 'directory',
+    },
+  );
   return {
     ...change,
     file: path.join(change.directory, '.comet.yaml'),
@@ -416,14 +440,22 @@ function parsedValue(field: string, value: string): unknown {
   return document.get(field);
 }
 
-function validateSetValue(field: string, value: string): void {
+async function validateSetValue(field: string, value: string): Promise<void> {
   if (field === 'language') {
     validateLanguage(value, 'language');
     return;
   }
   const enumValues = FIELD_ENUMS[field];
   if (enumValues) validateEnum(value, enumValues);
-  if (PATH_FIELDS.has(field)) validateRelativePath(value, field);
+  if (PATH_FIELDS.has(field)) {
+    validateRelativePath(value, field);
+    if (value && value !== 'null') {
+      await inspectClassicProjectTarget(classicCommandProjectRoot(), value, {
+        label: `${field} artifact pointer`,
+        expected: 'file',
+      });
+    }
+  }
   if ((field === 'skill_hash' || field === 'handoff_hash') && !/^[a-f0-9]{64}$/u.test(value)) {
     fail(`ERROR: ${field} must be a sha256 hex digest`);
   }
@@ -452,7 +484,7 @@ async function setField(
         '  Repair-only escape hatch: COMET_FORCE_PHASE=1 comet-state.mjs set <change-name> phase <value>',
     );
   }
-  validateSetValue(field, value);
+  await validateSetValue(field, value);
   const { file, directory } = await stateFile(name);
   const document = await readDocument(file);
   const previousRecord = (document.toJS() ?? {}) as Record<string, unknown>;
@@ -467,12 +499,13 @@ async function setField(
       // decision and re-points the binding; repeating the same mode keeps
       // the sticky binding that drift checks rely on.
       if (!alreadyBound || previousIsolation !== value) {
-        const currentBranch = liveGitBranch(process.cwd());
+        const invocationCwd = classicCommandInvocationCwd();
+        const currentBranch = liveGitBranch(invocationCwd);
         const verdict = evaluateBranchBinding({
           isolation: value,
           boundBranch: null,
           currentBranch,
-          gitWorkTree: currentBranch === null ? isGitWorkTree(process.cwd()) : true,
+          gitWorkTree: currentBranch === null ? isGitWorkTree(invocationCwd) : true,
         });
         if (verdict.status === 'needs-heal') {
           document.set('bound_branch', verdict.branch);
@@ -536,9 +569,10 @@ async function setField(
 async function init(output: CommandOutput, name: string, workflow: string): Promise<void> {
   validateChangeName(name);
   validateEnum(workflow, PROFILES);
-  const { file, label, directory } = await stateFile(name);
+  const change = await ensureClassicActiveChangeDirectory(name, classicCommandProjectRoot());
+  const { label, directory } = change;
+  const file = path.join(directory, '.comet.yaml');
   if (await exists(file)) fail(`ERROR: .comet.yaml already exists at ${label}/.comet.yaml`);
-  await fs.mkdir(directory, { recursive: true });
 
   const preset = workflow !== 'full';
   const reviewMode = preset ? 'off' : await reviewModeDefault();
@@ -814,9 +848,13 @@ async function taskCheckoff(
 ): Promise<void> {
   validateRelativePath(taskFile, 'task file');
   if (!taskText) fail('ERROR: Task text cannot be empty');
-  const file = path.resolve(taskFile);
+  const file = path.resolve(classicCommandProjectRoot(), taskFile);
   if (!(await exists(file))) fail(`ERROR: Task file not found: ${taskFile}`);
-  const lines = (await fs.readFile(file, 'utf8')).split(/\r?\n/u);
+  const lines = (
+    await readClassicProjectFile(classicCommandProjectRoot(), file, {
+      label: 'Classic task-checkoff file',
+    })
+  ).split(/\r?\n/u);
   const matches = lines.filter((line) =>
     [`- [ ] ${taskText}`, `- [x] ${taskText}`, `- [X] ${taskText}`].includes(line),
   );
@@ -884,7 +922,10 @@ async function check(output: CommandOutput, name: string, phase: string): Promis
     const archived = await readField(name, 'archived');
     (archived !== 'true' ? pass : reject)(`archived=${archived} (expected: not true)`);
   }
-  const binding = await resolveBranchBinding(directory, { heal: true, cwd: process.cwd() });
+  const binding = await resolveBranchBinding(directory, {
+    heal: true,
+    cwd: classicCommandInvocationCwd(),
+  });
   if (binding.bindingRequired) {
     switch (binding.status) {
       case 'drift':
@@ -915,9 +956,9 @@ async function check(output: CommandOutput, name: string, phase: string): Promis
   output.stderr.push(green('ALL CHECKS PASSED — ready to proceed'));
 }
 
-function fieldStatus(field: string, value: string, file?: string): string {
+async function fieldStatus(field: string, value: string, file?: string): Promise<string> {
   if (!value || value === 'null') return `  - ${field}: PENDING`;
-  if (file && !existsSync(path.resolve(file))) {
+  if (file && !(await exists(path.resolve(file)))) {
     return `  - ${field}: BROKEN (path ${value} does not exist)`;
   }
   return `  - ${field}: DONE (${value})`;
@@ -958,9 +999,9 @@ async function recoverDesign(
   output.stdout.push(
     '',
     '  Design progress:',
-    fieldStatus('handoff_context', handoff, handoff),
-    fieldStatus('handoff_hash', hash),
-    fieldStatus('design_doc', design, design),
+    await fieldStatus('handoff_context', handoff, handoff),
+    await fieldStatus('handoff_hash', hash),
+    await fieldStatus('design_doc', design, design),
     '',
   );
   if (design && design !== 'null' && (await exists(path.resolve(design)))) {
@@ -991,21 +1032,22 @@ async function recoverBuild(
   const tdd = await readField(name, 'tdd_mode');
   const review = await readField(name, 'review_mode');
   const plan = await readField(name, 'plan');
+  const planReadiness = await inspectClassicPlanReadiness(classicCommandProjectRoot(), plan);
   const decisions = [
     '  Build decisions:',
-    fieldStatus('isolation', isolation),
-    fieldStatus('build_mode', buildMode),
-    fieldStatus('build_pause', pause),
-    fieldStatus('tdd_mode', tdd),
-    fieldStatus('review_mode', review),
+    await fieldStatus('isolation', isolation),
+    await fieldStatus('build_mode', buildMode),
+    await fieldStatus('build_pause', pause),
+    await fieldStatus('tdd_mode', tdd),
+    await fieldStatus('review_mode', review),
   ];
   if (
     buildMode === 'subagent-driven-development' ||
     (subagentDispatch && subagentDispatch !== 'null')
   ) {
-    decisions.push(fieldStatus('subagent_dispatch', subagentDispatch));
+    decisions.push(await fieldStatus('subagent_dispatch', subagentDispatch));
   }
-  output.stdout.push(...decisions, '', '  Plan:', fieldStatus('plan', plan, plan), '');
+  output.stdout.push(...decisions, '', '  Plan:', await fieldStatus('plan', plan, plan), '');
   const tasks = path.join(directory, 'tasks.md');
   if (!(await exists(tasks))) {
     output.stdout.push(
@@ -1015,14 +1057,22 @@ async function recoverBuild(
     );
     return;
   }
-  const lines = (await fs.readFile(tasks, 'utf8')).split(/\r?\n/u);
+  const lines = (
+    await readClassicProjectFile(classicCommandProjectRoot(), tasks, {
+      label: 'Classic change tasks',
+    })
+  ).split(/\r?\n/u);
   const total = lines.filter((line) => /^\s*- \[[ xX]\] /u.test(line)).length;
   const done = lines.filter((line) => /^\s*- \[[xX]\] /u.test(line)).length;
   const pending = total - done;
   let planTotal = 0;
   let planDone = 0;
-  if (plan && plan !== 'null' && (await exists(path.resolve(plan)))) {
-    const planLines = (await fs.readFile(path.resolve(plan), 'utf8')).split(/\r?\n/u);
+  if (planReadiness.status === 'ready') {
+    const planLines = (
+      await readClassicProjectFile(classicCommandProjectRoot(), plan, {
+        label: 'Classic build plan',
+      })
+    ).split(/\r?\n/u);
     planTotal = planLines.filter((line) => /^\s*- \[[ xX]\] /u.test(line)).length;
     planDone = planLines.filter((line) => /^\s*- \[[xX]\] /u.test(line)).length;
   }
@@ -1034,6 +1084,8 @@ async function recoverBuild(
   output.stdout.push('');
 
   const action = resolveBuildRecoveryAction(
+    name,
+    path.relative(classicCommandProjectRoot(), directory).replaceAll('\\', '/'),
     workflow,
     isolation,
     buildMode,
@@ -1041,7 +1093,7 @@ async function recoverBuild(
     subagentDispatch,
     tdd,
     review,
-    plan,
+    planReadiness,
     pending,
     planPending,
   );
@@ -1053,6 +1105,8 @@ function isMissingStateValue(value: string): boolean {
 }
 
 function resolveBuildRecoveryAction(
+  name: string,
+  changeDirectory: string,
   workflow: string,
   isolation: string,
   buildMode: string,
@@ -1060,30 +1114,30 @@ function resolveBuildRecoveryAction(
   subagentDispatch: string,
   tdd: string,
   review: string,
-  plan: string,
+  planReadiness: ClassicPlanReadiness,
   pending: number,
   planPending: number,
 ): string {
-  const planExists = plan && plan !== 'null';
+  const planReady = planReadiness.status === 'ready';
   const missingWorkflowChoices =
     workflow === 'full' && (isMissingStateValue(tdd) || isMissingStateValue(review));
   if (
     pause === 'plan-ready' &&
-    planExists &&
+    planReady &&
     (isMissingStateValue(isolation) || isMissingStateValue(buildMode) || missingWorkflowChoices)
   ) {
     return workflow === 'full'
       ? 'Recovery action: Plan-ready pause detected. Ask the user whether to continue, then choose isolation, build mode, TDD mode, and review mode without regenerating the plan.'
       : 'Recovery action: Plan-ready pause detected. Ask the user whether to continue, then choose isolation and build mode without regenerating the plan.';
   }
-  if (pause === 'plan-ready' && !planExists) {
-    return 'Recovery action: Plan-ready pause is recorded, but the plan file is missing. Restore the plan file or rerun writing-plans before choosing execution.';
+  if (workflow === 'full' && !planReady) {
+    return buildPlanRecoveryAction(name, changeDirectory, planReadiness);
   }
   if (pause === 'plan-ready') {
     if (buildMode === 'subagent-driven-development' && (pending > 0 || planPending > 0)) {
       return subagentDispatch === 'confirmed'
-        ? 'Recovery action: Plan-ready pause is stale because build decisions are already selected. Clear build_pause to null, then inspect the first unchecked task (OpenSpec or plan additions) against recent git history/diff. If implemented, check it off; otherwise dispatch a real background subagent. Do not execute the pending task directly in the main window.'
-        : 'Recovery action: Plan-ready pause is stale and subagent dispatch is not confirmed. Return to /comet-build Step 2 capability preflight. Confirm a real background subagent/Task/multi-agent dispatcher and set subagent_dispatch to confirmed, or remove the unavailable mode and set build_mode to executing-plans before continuing.';
+        ? 'Recovery action: Plan-ready pause is stale because build decisions are already selected. Clear build_pause to null, then inspect the first unchecked task (OpenSpec or plan additions) against recent git history/diff. If implemented, check it off; otherwise dispatch a subagent. Do not execute the pending task directly in the main window.'
+        : 'Recovery action: Plan-ready pause is stale and selected subagent execution is not recorded. Run comet state set <change-name> subagent_dispatch confirmed, then continue from the first unchecked task through subagent execution.';
     }
     if (pending > 0 || planPending > 0) {
       return 'Recovery action: Plan-ready pause is stale because build decisions are already selected. Clear build_pause to null, then continue from the first unchecked task.';
@@ -1105,20 +1159,75 @@ function resolveBuildRecoveryAction(
   if (pending > 0) {
     if (buildMode === 'subagent-driven-development') {
       return subagentDispatch === 'confirmed'
-        ? 'Recovery action: Read tasks.md and the Superpowers plan (which may include additions beyond OpenSpec), then inspect the first unchecked task against recent git history/diff. If implemented, check it off; otherwise dispatch a real background subagent. Do not execute the pending task directly in the main window.'
-        : 'Recovery action: Subagent dispatch is not confirmed. Return to /comet-build Step 2 capability preflight. Confirm a real background subagent/Task/multi-agent dispatcher and set subagent_dispatch to confirmed, or remove the unavailable mode and set build_mode to executing-plans before continuing.';
+        ? 'Recovery action: Read tasks.md and the Superpowers plan (which may include additions beyond OpenSpec), then inspect the first unchecked task against recent git history/diff. If implemented, check it off; otherwise dispatch a subagent. Do not execute the pending task directly in the main window.'
+        : 'Recovery action: Selected subagent execution is not recorded. Run comet state set <change-name> subagent_dispatch confirmed, then continue from the first unchecked task through subagent execution.';
     }
     return 'Recovery action: Read tasks.md and continue from first unchecked task.';
   }
   if (planPending > 0) {
     if (buildMode === 'subagent-driven-development') {
       return subagentDispatch === 'confirmed'
-        ? 'Recovery action: Read the Superpowers plan, then inspect the first unchecked Superpowers plan task against recent git history/diff. If implemented, check it off; otherwise dispatch a real background subagent. Do not execute the pending task directly in the main window.'
-        : 'Recovery action: Subagent dispatch is not confirmed. Return to /comet-build Step 2 capability preflight. Confirm a real background subagent/Task/multi-agent dispatcher and set subagent_dispatch to confirmed, or remove the unavailable mode and set build_mode to executing-plans before continuing.';
+        ? 'Recovery action: Read the Superpowers plan, then inspect the first unchecked Superpowers plan task against recent git history/diff. If implemented, check it off; otherwise dispatch a subagent. Do not execute the pending task directly in the main window.'
+        : 'Recovery action: Selected subagent execution is not recorded. Run comet state set <change-name> subagent_dispatch confirmed, then continue from the first unchecked task through subagent execution.';
     }
     return 'Recovery action: Read the Superpowers plan and continue from the first unchecked plan task.';
   }
   return 'Recovery action: All tasks done. Run guard to transition to verify.';
+}
+
+function buildPlanRecoveryAction(
+  name: string,
+  changeDirectory: string,
+  planReadiness: Exclude<ClassicPlanReadiness, { status: 'ready' }>,
+): string {
+  const missing = planReadiness.status === 'missing';
+  const errorCode = missing ? 'classic-build-plan-missing' : 'classic-build-plan-broken';
+  const state = missing
+    ? 'plan is not recorded'
+    : 'the recorded plan path does not resolve to a file';
+  const recorded = missing ? [] : [`RECORDED_PLAN: ${planReadiness.recordedPath}`];
+  const createCommand = missing
+    ? `comet state set ${name} plan <repository-relative-plan-path>`
+    : `comet state set ${name} plan <new-repository-relative-plan-path>`;
+  const repair = missing
+    ? [
+        '2. Load the Superpowers writing-plans Skill.',
+        `3. Read the Design Doc path from "comet state get ${name} design_doc" and read ${changeDirectory}/tasks.md.`,
+        '4. Create the implementation plan under docs/superpowers/plans/.',
+        '5. Record the plan path:',
+        `   ${createCommand}`,
+      ]
+    : [
+        `2. Restore the plan file at ${planReadiness.recordedPath}, or load the Superpowers writing-plans Skill and create a replacement under docs/superpowers/plans/.`,
+        '3. When creating a replacement, record its path:',
+        `   ${createCommand}`,
+      ];
+
+  return [
+    'COMET_RECOVERY: required',
+    `ERROR_CODE: ${errorCode}`,
+    `CHANGE: ${name}`,
+    'WORKFLOW: full',
+    'PHASE: build',
+    `STATE: ${state}`,
+    ...recorded,
+    '',
+    'ALLOWED_RECOVERY_WRITES:',
+    '- docs/superpowers/plans/<plan-file>.md',
+    '- Comet state updates performed by the comet CLI',
+    `- ${changeDirectory} artifacts allowed by the build phase`,
+    '',
+    'RECOVERY:',
+    `1. Resume /comet-build for ${name} and return to Step 1.`,
+    ...repair,
+    `${missing ? '6' : '4'}. Verify recovery:`,
+    `   comet state check ${name} build --recover`,
+    '',
+    'SUCCESS: plan is reported as DONE and recovery no longer returns classic-build-plan-missing or classic-build-plan-broken.',
+    'RETRY: resume build configuration or retry the blocked Write/Edit only after SUCCESS.',
+    'PROHIBITED: do not execute tasks.md or write project source before SUCCESS; tasks.md is not a substitute for the implementation plan.',
+    'If writing-plans is unavailable, stop and report the missing Skill instead of bypassing this recovery.',
+  ].join('\n');
 }
 
 async function recoverVerify(output: CommandOutput, name: string): Promise<void> {
@@ -1129,10 +1238,10 @@ async function recoverVerify(output: CommandOutput, name: string): Promise<void>
   const branch = await readField(name, 'branch_status');
   output.stdout.push(
     '  Verification:',
-    fieldStatus('verify_result', result),
+    await fieldStatus('verify_result', result),
     `  - verify_failures: ${failures || '0'}`,
-    fieldStatus('verify_mode', mode),
-    fieldStatus('verification_report', report, report),
+    await fieldStatus('verify_mode', mode),
+    await fieldStatus('verification_report', report, report),
     branch === 'handled'
       ? '  - branch_status: LEGACY (handled before archive; archive still owns final closure)'
       : '  - branch_status: DEFERRED (handled after the archive commit)',
@@ -1149,9 +1258,9 @@ async function recoverArchive(output: CommandOutput, name: string): Promise<void
   const archiveConfirmation = await readField(name, 'archive_confirmation');
   output.stdout.push(
     '  Archive:',
-    fieldStatus('verify_result', await readField(name, 'verify_result')),
-    fieldStatus('archive_confirmation', archiveConfirmation),
-    fieldStatus('archived', await readField(name, 'archived')),
+    await fieldStatus('verify_result', await readField(name, 'verify_result')),
+    await fieldStatus('archive_confirmation', archiveConfirmation),
+    await fieldStatus('archived', await readField(name, 'archived')),
     '',
     archiveConfirmation === 'confirmed'
       ? 'Recovery action: Archive is confirmed. Run /comet-archive to complete archiving.'
@@ -1194,8 +1303,13 @@ async function scale(output: CommandOutput, name: string): Promise<void> {
   if (!(await exists(file))) fail(`ERROR: .comet.yaml not found at ${label}/.comet.yaml`);
   const tasksFile = path.join(directory, 'tasks.md');
   const taskCount = (await exists(tasksFile))
-    ? (await fs.readFile(tasksFile, 'utf8')).split(/\r?\n/u).filter((line) => /^- \[/u.test(line))
-        .length
+    ? (
+        await readClassicProjectFile(classicCommandProjectRoot(), tasksFile, {
+          label: 'Classic scale task file',
+        })
+      )
+        .split(/\r?\n/u)
+        .filter((line) => /^- \[/u.test(line)).length
     : 0;
   const specs = path.join(directory, 'specs');
   let deltaSpecs = 0;
@@ -1206,8 +1320,12 @@ async function scale(output: CommandOutput, name: string): Promise<void> {
   }
   const plan = await readField(name, 'plan');
   let baseRef = '';
-  if (plan && plan !== 'null' && (await exists(path.resolve(plan)))) {
-    const match = (await fs.readFile(path.resolve(plan), 'utf8')).match(/^base-ref:\s*(.+)$/mu);
+  if (plan && plan !== 'null' && (await exists(plan))) {
+    const match = (
+      await readClassicProjectFile(classicCommandProjectRoot(), plan, {
+        label: 'Classic scale plan',
+      })
+    ).match(/^base-ref:\s*(.+)$/mu);
     baseRef = match?.[1].trim() ?? '';
   }
   if (!baseRef) baseRef = await readField(name, 'base_ref');
@@ -1265,8 +1383,10 @@ async function recordCheck(
     fail(`ERROR: Invalid command check scope: '${scopeText}'`);
   }
   const options = parseRecordCheckOptions(args);
-  const { label, directory, file } = await stateFile(name);
-  if (label !== `openspec/changes/${name}` || !(await exists(file))) {
+  const { directory, file } = await stateFile(name);
+  const projectRoot = classicCommandProjectRoot();
+  const activeChangesDir = (await assertClassicLayoutReadable(projectRoot)).changesDir;
+  if (path.dirname(directory) !== activeChangesDir || !(await exists(file))) {
     fail(`ERROR: command checks require an active change: ${name}`);
   }
   try {
@@ -1275,9 +1395,12 @@ async function recordCheck(
       throw new Error('command checks require an existing synchronized Classic Run');
     }
     const { run } = await validateClassicRuntimeRun(directory, projection);
-    const recorded = await recordCommandCheck(directory, run, {
+    const recorded = await recordCommandCheck(projectRoot, directory, run, {
       scope: scopeText as CommandCheckScope,
       ...options,
+      cwd:
+        options.cwd ??
+        (path.relative(projectRoot, classicCommandInvocationCwd()).replaceAll('\\', '/') || '.'),
     });
     output.stderr.push(
       green(
@@ -1297,10 +1420,31 @@ function requiredExact(args: string[], count: number, usage: string): void {
   if (args.length !== count) fail(usage);
 }
 
+const MUTATING_STATE_COMMANDS = new Set([
+  'init',
+  'set',
+  'transition',
+  'check',
+  'scale',
+  'record-check',
+  'rebind',
+  'select',
+  'clear-selection',
+]);
+
+async function assertStateCommandWritable(subcommand: string | undefined): Promise<void> {
+  if (!subcommand || !MUTATING_STATE_COMMANDS.has(subcommand)) return;
+  try {
+    await assertClassicLayoutWritable(classicCommandProjectRoot());
+  } catch (error) {
+    fail(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function selectChange(output: CommandOutput, name: string): Promise<void> {
   validateChangeName(name);
   try {
-    const selection = await selectCurrentChange(process.cwd(), name);
+    const selection = await selectCurrentChange(classicCommandProjectRoot(), name);
     const boundBranch = await readField(name, 'bound_branch');
     const bound = boundBranch && boundBranch !== 'null' ? boundBranch : null;
     output.stderr.push(
@@ -1320,7 +1464,7 @@ async function rebind(output: CommandOutput, name: string): Promise<void> {
       `ERROR: '${name}' is not yet bound; use 'comet state set ${name} isolation <current|branch|worktree>' to establish the first binding`,
     );
   }
-  const branch = liveGitBranch(process.cwd());
+  const branch = liveGitBranch(classicCommandInvocationCwd());
   if (branch === null) {
     fail('ERROR: cannot rebind while HEAD is detached; checkout a branch first');
   }
@@ -1340,7 +1484,7 @@ async function rebind(output: CommandOutput, name: string): Promise<void> {
 }
 
 async function currentChange(output: CommandOutput): Promise<void> {
-  const resolution = await resolveCurrentChange(process.cwd());
+  const resolution = await resolveCurrentChange(classicCommandProjectRoot());
   if (resolution.status === 'selected') {
     output.stdout.push(resolution.selection.change);
     return;
@@ -1354,73 +1498,75 @@ async function currentChange(output: CommandOutput): Promise<void> {
 }
 
 async function clearSelection(output: CommandOutput): Promise<void> {
-  await clearCurrentChange(process.cwd());
+  await clearCurrentChange(classicCommandProjectRoot());
   output.stderr.push(green('[CLEARED] current change selection'));
 }
 
-export const classicStateCommand: ClassicCommandHandler = async (args) => {
-  const output = new CommandOutput();
-  try {
-    const [subcommand, ...rest] = args;
-    if (subcommand === 'init') {
-      required(rest, 2, 'Usage: comet-state.mjs init <change-name> <workflow>');
-      await init(output, rest[0], rest[1]);
-    } else if (subcommand === 'get') {
-      required(rest, 2, 'Usage: comet-state.mjs get <change-name> <field>');
-      validateChangeName(rest[0]);
-      output.stdout.push(await readField(rest[0], rest[1]));
-    } else if (subcommand === 'set') {
-      required(rest, 3, 'Usage: comet-state.mjs set <change-name> <field> <value>');
-      validateChangeName(rest[0]);
-      await setField(output, rest[0], rest[1], rest[2]);
-    } else if (subcommand === 'transition') {
-      required(rest, 2, 'Usage: comet-state.mjs transition <change-name> <event>');
-      await transition(output, rest[0], rest[1]);
-    } else if (subcommand === 'check') {
-      required(rest, 2, 'Usage: comet-state.mjs check <change-name> <phase> [--recover]');
-      if (rest[2] === '--recover') await recover(output, rest[0]);
-      else await check(output, rest[0], rest[1]);
-    } else if (subcommand === 'scale') {
-      required(rest, 1, 'Usage: comet-state.mjs scale <change-name>');
-      await scale(output, rest[0]);
-    } else if (subcommand === 'record-check') {
-      required(
-        rest,
-        2,
-        'Usage: comet state record-check <change> <build|verify> --command <text> --exit-code <int> [--cwd <path>]',
-      );
-      await recordCheck(output, rest[0], rest[1], rest.slice(2));
-    } else if (subcommand === 'task-checkoff') {
-      required(rest, 2, 'Usage: comet-state.mjs task-checkoff <file> <task-text>');
-      await taskCheckoff(output, rest[0], rest[1]);
-    } else if (subcommand === 'rebind') {
-      requiredExact(rest, 1, 'Usage: comet-state.mjs rebind <change-name>');
-      await rebind(output, rest[0]);
-    } else if (subcommand === 'select') {
-      requiredExact(rest, 1, 'Usage: comet-state.mjs select <change-name>');
-      await selectChange(output, rest[0]);
-    } else if (subcommand === 'current') {
-      requiredExact(rest, 0, 'Usage: comet-state.mjs current');
-      await currentChange(output);
-    } else if (subcommand === 'clear-selection') {
-      requiredExact(rest, 0, 'Usage: comet-state.mjs clear-selection');
-      await clearSelection(output);
-    } else if (subcommand === 'next') {
-      required(rest, 1, 'Usage: comet-state.mjs next <change-name>');
-      await next(output, rest[0]);
-    } else {
-      fail(`Unknown subcommand: ${subcommand ?? ''}`);
+export const classicStateCommand: ClassicCommandHandler = async (args, options) =>
+  withClassicCommandContext(options, async () => {
+    const output = new CommandOutput();
+    try {
+      const [subcommand, ...rest] = args;
+      await assertStateCommandWritable(subcommand);
+      if (subcommand === 'init') {
+        required(rest, 2, 'Usage: comet-state.mjs init <change-name> <workflow>');
+        await init(output, rest[0], rest[1]);
+      } else if (subcommand === 'get') {
+        required(rest, 2, 'Usage: comet-state.mjs get <change-name> <field>');
+        validateChangeName(rest[0]);
+        output.stdout.push(await readField(rest[0], rest[1]));
+      } else if (subcommand === 'set') {
+        required(rest, 3, 'Usage: comet-state.mjs set <change-name> <field> <value>');
+        validateChangeName(rest[0]);
+        await setField(output, rest[0], rest[1], rest[2]);
+      } else if (subcommand === 'transition') {
+        required(rest, 2, 'Usage: comet-state.mjs transition <change-name> <event>');
+        await transition(output, rest[0], rest[1]);
+      } else if (subcommand === 'check') {
+        required(rest, 2, 'Usage: comet-state.mjs check <change-name> <phase> [--recover]');
+        if (rest[2] === '--recover') await recover(output, rest[0]);
+        else await check(output, rest[0], rest[1]);
+      } else if (subcommand === 'scale') {
+        required(rest, 1, 'Usage: comet-state.mjs scale <change-name>');
+        await scale(output, rest[0]);
+      } else if (subcommand === 'record-check') {
+        required(
+          rest,
+          2,
+          'Usage: comet state record-check <change> <build|verify> --command <text> --exit-code <int> [--cwd <path>]',
+        );
+        await recordCheck(output, rest[0], rest[1], rest.slice(2));
+      } else if (subcommand === 'task-checkoff') {
+        required(rest, 2, 'Usage: comet-state.mjs task-checkoff <file> <task-text>');
+        await taskCheckoff(output, rest[0], rest[1]);
+      } else if (subcommand === 'rebind') {
+        requiredExact(rest, 1, 'Usage: comet-state.mjs rebind <change-name>');
+        await rebind(output, rest[0]);
+      } else if (subcommand === 'select') {
+        requiredExact(rest, 1, 'Usage: comet-state.mjs select <change-name>');
+        await selectChange(output, rest[0]);
+      } else if (subcommand === 'current') {
+        requiredExact(rest, 0, 'Usage: comet-state.mjs current');
+        await currentChange(output);
+      } else if (subcommand === 'clear-selection') {
+        requiredExact(rest, 0, 'Usage: comet-state.mjs clear-selection');
+        await clearSelection(output);
+      } else if (subcommand === 'next') {
+        required(rest, 1, 'Usage: comet-state.mjs next <change-name>');
+        await next(output, rest[0]);
+      } else {
+        fail(`Unknown subcommand: ${subcommand ?? ''}`);
+      }
+      return output.result();
+    } catch (error) {
+      if (!(error instanceof CommandFailure)) throw error;
+      // The frozen 0.3.8 shell calls red() once per line and never embeds newlines
+      // inside a single color call. Mirror that contract by wrapping each line of
+      // the message in its own span so multi-line errors (e.g. validateEnum) render
+      // as separate colored lines rather than one span across a newline.
+      if (error.message) {
+        for (const line of error.message.split('\n')) output.stderr.push(red(line));
+      }
+      return output.result(error.exitCode);
     }
-    return output.result();
-  } catch (error) {
-    if (!(error instanceof CommandFailure)) throw error;
-    // The frozen 0.3.8 shell calls red() once per line and never embeds newlines
-    // inside a single color call. Mirror that contract by wrapping each line of
-    // the message in its own span so multi-line errors (e.g. validateEnum) render
-    // as separate colored lines rather than one span across a newline.
-    if (error.message) {
-      for (const line of error.message.split('\n')) output.stderr.push(red(line));
-    }
-    return output.result(error.exitCode);
-  }
-};
+  });

@@ -1,54 +1,92 @@
-# Native command reference
+# Native Command Reference
 
-Prefer the installed `comet native` command. If the host exposes only Skill files, use this Skill's bundled runtime:
+Read this file only when you need options not listed by the main Skill, receipts, partial scope, or recovery commands.
 
-```text
-node <comet-native-skill-root>/scripts/comet-native-runtime.mjs <command> [options]
-```
+## Project and change
 
-Both entry points use the same arguments, stdout, stderr, and exit codes. Normal discovery searches upward from the current directory for `.comet/config.yaml` or the repository root; generated launchers may also pass the hidden `--project-root <path>` option.
+Determine the current intent first; do not execute this section from top to bottom. Use read-only commands to establish facts, and run a write command only when its stated condition is met. After any write command, immediately reread `status <change-name>` and use the returned phase and continuation to decide what comes next.
 
-## Project and artifact root
+### Enable Native for the first time
 
 ```text
 comet native init [--root <artifact-root>] [--language en|zh-CN]
+```
+
+Use this only when the project has not enabled Native yet or when Native directories and language configuration need to be completed. It creates the required directories and writes `.comet/config.yaml`. Existing configuration keeps its current artifact root but may update the language. `init` does not migrate an existing artifact root; the command fails when an explicit `--root` conflicts with existing configuration.
+
+Afterward, run `root show` to confirm the effective location. Do not use `init` as a resume command when a change already exists.
+
+### Inspect or migrate the artifact root
+
+```text
 comet native root show
 comet native root move <artifact-root>
 ```
 
-`artifact-root` must be a project-relative path and defaults to `docs`. `.` creates `<project>/comet/`; `docs` creates `<project>/docs/comet/`. `init --language` persists the project's default Native language in `.comet/config.yaml`; later `new` commands inherit it when `--language` is omitted. Running `init --language` again changes the default for future changes without rewriting existing ones. Existing configuration rejects a conflicting `--root`. Change the root only through `root move`, never by editing configuration directly.
+`artifact-root` is project-relative.
 
-## Change management
+- `root show` is read-only. It returns the project root, configured artifact root, effective Native directory, language, and any unfinished migration.
+- `root move` is a transactional write operation. Run it only when the user explicitly wants to migrate the entire Native artifact root; it moves Native data and updates configuration. Do not simulate migration by editing configuration directly.
+
+An unfinished migration blocks other Native writes. Run read-only `doctor` first, then follow its report and use `doctor --repair` to recover.
+
+### Discover and read changes (read-only)
 
 ```text
-comet native new <change-name> [--language en|zh-CN]
-comet native spec remove <change-name> <capability>
-comet native spec rebase <change-name> --summary <text>
-comet native list [--cursor <token>]
-comet native show <change-name>
 comet native status [--cursor <token>]
 comet native status <change-name> [--details [--acceptance-cursor <token>]]
+comet native show <change-name>
+```
+
+`status` without a change name returns paginated candidates. When multiple reasonable candidates remain, show the candidates and their phases to the user and ask them to choose. Do not guess.
+
+- `status <change-name>` returns the phase, revision, check summary, next command, and continuation. Add `--details` when findings, checkpoint details, or acceptance items are needed.
+- `show` returns state, the brief, and proposed specs. Use it only after identifying the target change to read requirements and specifications; it does not replace the phase and continuation check.
+- When `findingsTruncated` is true, handle the returned findings and read details again.
+- When `acceptancePage.nextCursor` is non-null, continue with `--acceptance-cursor`.
+- When a change collection has a non-null `nextCursor`, continue with `--cursor`.
+
+These commands do not modify selection, phase, or change content.
+
+### Resume an existing change
+
+```text
 comet native select <change-name>
 ```
 
-`new` creates default configuration and `<project>/docs/comet/` when configuration is absent. Write complete target specifications at `specs/<capability>/spec.md`; `next` infers create/replace and freezes the canonical hash. Use `spec remove` to remove a capability instead of editing `spec_changes`.
+Run this only after the target change is unique or the user has explicitly selected it. `select` updates only the current Native selection and does not change the phase. A successful result returns that change's continuation.
 
-After a concurrent canonical change causes a conflict, reread and rewrite the complete target specification. Then use `spec rebase` to refresh operation/hash, return to Build, and clear the previous verification conclusion.
+After selecting, reread `status <change-name>`, confirm the phase, and then load the reference for that phase. Do not treat `select` as a phase-transition command.
 
-`show` returns state, the brief, and proposed complete specifications. `status` returns a bounded view of phase, evidence freshness, finding summary, checkpoint, repair state, and continuation. `status <change-name> --details` also returns:
+### Create a new change
 
-- up to 50 detailed findings;
-- the `findingsTruncated` flag;
-- recovery details;
-- the first `acceptancePage`.
+```text
+comet native new <change-name> [--language en|zh-CN] \
+  [--isolation current|branch|worktree] \
+  [--change-branch <branch>] \
+  [--target-branch <branch>]
+```
 
-When findings are truncated, handle the returned findings and then read details again. When `nextCursor` is non-null, pass it to `--acceptance-cursor` until it becomes null. Acceptance cursors are valid only with a specific change and `--details`, and bind to the current acceptance hash.
+Run `new` only after scanning registered working directories and confirming that no matching active change exists. When configuration is absent, it creates the default Native configuration and `docs/comet/`; it then creates a Shape change, makes it current, and returns a continuation plus the workspace binding.
 
-`status` and `show` are always read-only. Run `select` explicitly when resuming a confirmed target change; do not add a `resume` command. Both `new` and `select` write the shared project-level `.comet/current-change.json` with `workflow` fixed to `native`; neither modifies a Classic change.
+`--isolation` defaults to `current`. For `branch` and `worktree`, the Agent first creates and enters the actual branch or worktree and passes the starting `--target-branch`; Runtime checks `--change-branch` against the current branch. `worktree` creation is accepted only in a linked Git worktree. A new change records its workspace mode, change branch, target branch, and physical working-directory identity; subsequent writes must remain aligned.
 
-`list` and `status` without a change name return the same read-only paginated projection, with at most 24 changes per page. Pass a non-null `nextCursor` back unchanged through `--cursor`. The cursor is bound to the complete visible name set; adding or removing changes makes an old cursor fail explicitly instead of shifting the page. At most 4096 visible changes are accepted, and a serialized page is capped at 512 KiB. `show` also bounds the number of specifications, per-file and cumulative reads, and final output size; it rejects oversized input instead of truncating requirement text.
+Exit code `73` with `error.code: workspace-isolation-required` means another active change appeared in the same working directory under the `new` mutation lock. Retry automatically in a new worktree only when the original mode was the system-default `current`. Reconfirm if an explicit user choice became invalid.
 
-## In-phase progress and built-in checks
+Immediately run `show <change-name>` and `status <change-name>`, then enter Shape clarification and shared-understanding confirmation. Do not create a new change to bypass a blocker, conflict, or recovery problem in an existing change.
+
+### Correct the specification history
+
+```text
+comet native spec remove <change-name> <capability>
+comet native spec rebase <change-name> --summary <text>
+```
+
+Neither command is an ordinary file-editing command. `spec remove` records a specification operation that removes a capability; use it only when the target behavior truly requires that capability to be removed. `spec rebase` handles concurrent canonical specification changes only: reread the canonical specification, rewrite the complete target specification, and use the summary to record why the rebase was needed.
+
+Both `spec remove` and `spec rebase` modify the change's specification history and return a new continuation. Immediately reread `status <change-name>` afterward. Do not edit operations, base hashes, or Runtime state manually.
+
+## Checkpoints and checks
 
 ```text
 comet native checkpoint <change-name> \
@@ -58,9 +96,50 @@ comet native checkpoint <change-name> \
   [--expect-revision <n>]
 
 comet native check <change-name>
+comet native evidence format [--entries <path>]
 ```
 
-`checkpoint` stores only an in-phase summary, next action, and content-addressed artifact manifest. It uses revision/CAS to prevent overwrites and does not change the phase. `check` is available only in Verify after an implementation scope exists. It runs Comet's built-in bounded, read-only text scan. It does not invoke Git, a shell, project scripts, external Skills, or any external process; it accepts no arbitrary command, path, environment, or timeout options and does not modify project files, the change, Run, or trajectory. Results, issue counts, and scope freshness are written to an independent content-addressed receipt. A check that finds issues or becomes stale exits with 1, but still writes the receipt.
+A checkpoint stores only recovery context and real artifact references. It does not change phase or replace completion evidence.
+
+`check` is a built-in Native check, not a replacement for project tests. It exits with `1` when it finds issues or stale evidence.
+
+`evidence format` reads acceptance entries from stdin or `--entries` and emits the canonical machine block for `verification.md`.
+
+When submitting `pass`, the Runtime validates the report format, complete acceptance matrix, and acceptance receipts before it runs or reuses the built-in required check for the current scope. Fix `verification.md` from the reported error before retrying; do not repeatedly submit the same `next` command. `next` does not accept `--receipt`, and callers do not provide the required-check receipt.
+
+## Acceptance receipts
+
+Automated validation:
+
+```text
+comet native receipt automated <change-name> \
+  [--acceptance <id>]... \
+  [--timeout-ms <milliseconds>] \
+  -- <executable> [args...]
+```
+
+Manual observation:
+
+```text
+comet native receipt manual <change-name> \
+  --acceptance <id>... \
+  --step <text> \
+  --observation <text>
+```
+
+Create receipts only for commands or manual observations that actually occurred. Failed, skipped, blocked, or timed-out results cannot support pass.
+
+Refresh stale receipts in bulk:
+
+```text
+comet native receipt refresh <change-name> [--apply]
+```
+
+A receipt is bound to the revision, contract, scope, snapshot, and artifacts in effect when it was issued. Any state write (checkpoint, spec refresh, phase advance) bumps the revision, which invalidates receipts issued before that bump. `next --result` then fails with `verification-receipt-binding-mismatch`, listing each stale receipt and the diverging field.
+
+Without `--apply` (default) it is a preview: it reports which manual receipts are stale, which automated receipts must be re-run, and which required-check receipts must be regenerated via `comet native check`, without touching any file.
+
+With `--apply`: it re-issues only stale manual receipts whose binding mismatch is limited to `sourceRevision`, and writes the canonical evidence block back into the `# Acceptance evidence` section of verification.md. Contract, scope, snapshot, or artifact mismatches remain manual verification blockers. Automated receipts are never silently re-issued (they attest to a real command execution); refresh only reports the commands you must re-run via `receipt automated`.
 
 ## Phase progression
 
@@ -72,22 +151,20 @@ comet native next <change-name> --summary <text> \
   [--allow-partial-scope <sha256> --partial-reason <text> --confirmed] \
   [--result pass|fail] \
   [--report <change-relative-path>] \
-  [--receipt <runtime/evidence/check-receipts/...json>] \
-  [--failure-category <token>]... \
-  [--failed-check <token>]... \
   [--override-repair <sha256> --override-summary <text>]
 
-comet native archive <change-name> --dry-run
-comet native archive <change-name> --expect-preflight <sha256>
+comet native archive <change-name> --dry-run [--finish merge|push|pull-request|keep]
+comet native archive <change-name> --expect-preflight <sha256> [--confirmed]
 ```
 
-- Shape: advance after the brief and proposed specifications pass; add `--confirmed` only when this turn contains a decision the user just confirmed. On successful entry to Build, the Runtime binds approval to the current contract hash.
-- Build: recheck the brief and proposed specifications; provide at least one real project artifact or use `--no-code-reason`. If the contract changed after approval, status/next requires the user to reconfirm the current contract; pass `--confirmed` only after obtaining that confirmation. If complete scope cannot be proven, the first call returns a scope hash and bounded unattributed details without advancing; changes beyond the detail budget are represented by a `scope-detail-overflow` count and content hash. Retry only after the user accepts the specific risk, with the exact `--allow-partial-scope`, a reason, and `--confirmed`.
-- Verify: provide both `--result` and a complete `--report`. An optional `--receipt` must be fresh for the current change, revision, contract, and implementation scope. A failure returns to Build and may use failure categories and check IDs to form a no-progress signature; a pass enters Archive.
-- Repair: the third identical failure returns a manual stop. A genuine scope change on an ordinary Build `next` closes the old repair episode and continues. With unchanged scope, only one override is allowed, using the exact signature returned by status plus a non-empty summary. Neither a semantic repair budget nor an exhausted override can be bypassed; the generic Run iteration is only an event sequence number, not a permanent stop condition for a long-lived change.
-- Archive: only `archive` completes this phase; `next` cannot substitute for it. First run `--dry-run`, then pass the returned `preflightHash` unchanged to `--expect-preflight`. The runtime recomputes it under the mutation lock before committing.
+- Shape: pass `--confirmed` only after the user confirms the final shared understanding.
+- Build: provide a real `--artifact`; use `--no-code-reason` only when no project file changed. If changed requirements introduce a new user decision, stay in Build and repeat clarification and confirmation first. After confirmation, update the formal artifacts, then run the transition command returned by the Runtime with `--confirmed`.
+- Partial scope: explain the exact gaps and risks returned by the Runtime. Changes beyond the returned detail budget are summarized by a `scope-detail-overflow` count and content hash; use the matching scope hash, reason, and `--confirmed` only after the user accepts them.
+- Verify: provide `--result` and a complete report. For the standard report path, submit `comet native next <change-name> --summary <summary> --result pass|fail --report verification.md`. The Runtime validates the report format, complete acceptance matrix, and acceptance receipts before it runs or reuses the built-in required check for the current scope on pass; do not pass `--receipt`. Acceptance entries in the report reference automated/manual receipts directly. Executed failures reference their failed receipts, while checks that were not run include a `skipped_reason`. The Runtime derives failed acceptance and check identifiers from the report and receipts.
+- Repair override: use only the signature returned by status and only for one explicit new repair hypothesis.
+- Archive: use a plain dry-run for current isolation. For branch/worktree, after the user makes the joint finishing choice, pass `--finish` to persist it and generate a new preflight. Then use the exact preflight hash returned by that preview. `required` mode also requires explicit user confirmation. Never combine `--finish` with `--expect-preflight`.
 
-## Diagnosis and recovery
+## Diagnostics and recovery
 
 ```text
 comet native doctor [<change-name>]
@@ -95,24 +172,18 @@ comet native doctor [<change-name>] --repair
 comet native doctor [<change-name>] --repair [--strategy continue|rollback]
 ```
 
-Read-only doctor does not modify files. `--repair` is limited to provably safe selection cleanup, stale locks, evidence retention, ordinary phase transitions, workspace identity repair, and deterministic transaction recovery. It never rewrites user-authored YAML, Markdown, or specifications.
-
-`--strategy` is an optional transaction-recovery argument, not a requirement for ordinary repair. Ordinary transitions support only `continue`, not `rollback`.
-
-Doctor also reports evidence-retention candidates without changing them. Explicit `--repair` removes only derived evidence/receipts in active changes that are at least 30 days old, outside the latest 32 items of each evidence kind, and proven unreferenced by the dependency closure. Archived evidence, current-state references, dependencies, newer files, and the latest 32 of every kind are always retained. Removal is ordered dependents before dependencies and first moves files into a same-directory quarantine. After interruption, read-only doctor reports recovery required; explicit repair restores files only when there is no overwrite and identity still matches. Pending journals, damage, source/quarantine conflicts, and unknown or special files fail closed rather than deleting data to reclaim space.
-
-Ordinary write commands such as `new`, `next`, `archive`, and `root move` never take over stale locks automatically. Only explicit `doctor --repair` may do so after proving the local owner is gone, lock identity is unchanged, and no conflicting recovery transaction exists. Active locks and locks that cannot be proven stale are always preserved.
+Run read-only doctor first. Use `--repair` only when its report offers a repair action. Ordinary phase transitions support only `continue`; whether Archive or root move allows rollback is determined by doctor.
 
 ## Output and exit codes
 
-Every command supports `--json`. JSON mode emits exactly one object with `command`, `exitCode`, `data`, and a structured `error` on failure.
+Every command supports `--json`. JSON mode returns one object with `command`, `exitCode`, `data`, and `error` on failure.
 
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Success |
-| `1` | Built-in `check` completed but found issues or became stale |
+| `1` | Built-in check found issues or stale results |
 | `64` | Invalid arguments or usage |
-| `65` | Invalid configuration, state, or artifacts |
-| `73` | Lock, transaction, concurrent hash, or root conflict |
-| `75` | Repair stagnation or a hard stop blocks continuation |
+| `65` | Invalid configuration, state, or artifact |
+| `73` | Lock, transaction, concurrency, or root conflict |
+| `75` | Repair stagnation or failure budget blocks progress |
 | `70` | Unexpected internal failure |

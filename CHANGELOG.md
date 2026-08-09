@@ -2,6 +2,176 @@
 
 All notable changes to @rpamis/comet will be documented in this file.
 
+## What's Changed [0.4.0-beta.18] - 2026-08-07
+
+### Added
+
+- **Trae Hook support**: `comet init`, `comet update`, `comet doctor`, and `comet uninstall` now support managed Hook Router entries for Trae and Trae CN, using Trae's official project and global `hooks.json` locations while preserving user-owned Hook configuration.
+
+## What's Changed [0.4.0-beta.17] - 2026-08-05
+
+### Fixed
+
+- **Doctor Superpowers detection**: `comet doctor` now recognizes Claude Code plugin-managed Superpowers installs, so users with Superpowers under the plugin cache no longer receive a misleading install warning.
+
+## What's Changed [0.4.0-beta.16] - 2026-08-05
+
+### Fixed
+
+- **Classic/OpenSpec coexistence**: Classic now uses only the configured artifact root, so a standalone OpenSpec project can keep the other root at the same time; explicit root migration still refuses to overwrite a non-empty destination.
+- **Codex Native Hook parsing**: Raw `apply_patch` input now attributes Add, Update, Delete, and standard `+++ b/...` file headers so Native phase protection is applied consistently.
+
+### Security
+
+- **Dependency security updates**: Updated PostCSS, Undici, and brace-expansion to patched releases to address reported dependency vulnerabilities.
+
+## What's Changed [0.4.0-beta.15] - 2026-08-05
+
+### Added
+
+- **Global project activation**: Global Native or Classic defaults can now activate an unconfigured project on its first explicit `/comet` invocation. Project artifacts stay local, existing workflow ownership is preserved, and project-scoped initialization remains available for local overrides.
+- **Native parallel changes**: Before Shape, Native detects active changes and can create an isolated Git worktree automatically. `current`, `branch`, and `worktree` choices remain available when safe, and isolated changes remember their starting target branch for finishing.
+
+### Changed
+
+- **Dashboard change explorer**: Dashboard now loads lightweight change rows, paginates active, archived, and all changes, and fetches full details only for the selected change. Native and Classic keep the selected detail surface stable while loading and offer a retry when detail loading fails, keeping large projects responsive.
+- **Hook lifecycle and routing**: Activated projects and isolated Native worktrees now receive one project-rooted Router automatically. Setup, Update, and Doctor migrate historical global and legacy Comet Hooks while preserving user-owned Hook configuration and reporting incomplete cleanup instead of continuing silently.
+
+### Fixed
+
+- **Global Native Skill updates**: Global `comet update` now refreshes the workflows already installed, including Native, without adding workflows the user did not choose.
+- **Native Verify retries**: Invalid verification reports are rejected before the required check runs, and unchanged successful required-check receipts are reused on retry so expensive checks are not repeated unnecessarily.
+- **Native parallel resume**: Ambient Resume now performs full recovery checks only for the explicitly named, selected, or sole Native change, so unrelated active changes do not surface irrelevant Runtime errors.
+- **Subagent workflow dispatch**: Classic Build runs the selected authoring workflow directly, and Comet Any keeps each authoring lane on its designated workflow instead of replacing it based on platform-specific Agent labels.
+- **Native scope consistency**: Native now detects files hidden from Git's modified-file view, preventing false Build-to-Verify scope mismatches from blocking verification and archive.
+- **Hook write handling**: Project Hooks allow ordinary writes when no active Comet change owns the target and remain neutral for unknown or external targets, including paths redirected through symlinks or junctions, while still evaluating in-project writes.
+- **Hook configuration safety**: Hook installation no longer overwrites user-owned Kiro files or leaves invalid Copilot entries, and Doctor now detects stale legacy files and disabled or structurally mismatched handlers before reporting the Router healthy.
+- **Native receipt scope recovery**: Verification receipts now stop before execution when project files changed after Build, report the changed paths, and provide the command for returning to Build and refreshing the implementation scope.
+- **Classic build recovery**: Full Classic workflows return to plan creation after context recovery when no valid implementation plan is recorded, and block project source writes until the plan is restored and linked.
+- **Ambient Resume cleanup**: Disabling Ambient Resume now removes Comet-managed instructions from `AGENTS.md` and `CLAUDE.md` while preserving user-authored content.
+- **Eval workspace Dockerfiles**: Eval image preparation now uses `environment/Dockerfile` when a workspace has no root Dockerfile, so those workspaces can build without moving the file.
+
+## What's Changed [0.4.0-beta.14] - 2026-08-02
+
+### Fixed
+
+- **Incomplete project configuration**: `comet update` and Classic root commands now fill missing Native defaults instead of rejecting otherwise usable project configurations.
+- **Indexed update safety**: `comet update` now keeps a selected current-project refresh within that project and reports when no indexed project is available instead of falling back to global installations. Use `--scope global` only when you explicitly intend to refresh global assets.
+- **Classic layout initialization**: Adding Classic to a Native project now preserves an existing root-level `openspec/` layout when no explicit Classic layout is configured, and initialization works on filesystems such as exFAT that do not support hard links.
+- **Codex OpenSpec Skills**: Project initialization now installs OpenSpec Skills generated for Codex into its canonical `.agents/skills/` directory.
+- **Uninstall scope and selection**: Current-project and all-indexed-project uninstall now use the same detected-platform batch selector as setup, retain unselected platforms, select Native/Classic once for the operation, remove selected Superpowers companion Skills even when the Skills CLI reports platform display names, loses source metadata, or stores them in a shared directory, and remove the managed project configuration when user content keeps a working directory in place.
+- **Safe uninstall completion**: When existing working-directory content is preserved, uninstall now completes normally, explains why it was kept and that it is unaffected, clears the project index, and reports actionable reasons for real cleanup failures in the configured Chinese or English language.
+
+## What's Changed [0.4.0-beta.13] - 2026-08-02
+
+Beta 13 makes everyday workflow operations faster and makes uninstalling and reading Dashboard status easier.
+
+### Added
+
+- **Native receipt refresh**: New `comet native receipt refresh <change> [--apply]` checks stale verification receipts and reissues eligible manual receipts. Automated checks that need a real rerun remain clearly identified instead of being marked as passed.
+
+### Changed
+
+- **Selective workflow removal**: Interactive `comet uninstall` now lets you remove Native, Classic, or both from each installed target. Removing one retains the other workflow and shared configuration; when removing Classic, OpenSpec and Superpowers Skills are optional and remain selected off by default.
+- **Everyday responsiveness**: CLI startup, Classic and Native workflow commands, write checks, and Native snapshot updates are faster. Native reuses results for unchanged files while continuing to inspect real changes.
+- **Fast public workflow commands**: High-frequency Native, Classic, and workflow-resolution commands keep the stable `comet` CLI interface while dispatching internally to package-owned runtime bundles, reducing cold-start overhead without relying on host-specific Skill paths.
+- **Dashboard workspace**: Dashboard offers clearer project switching, search, and change-detail views, discovers projects launched from nested directories, and presents Classic changes from legacy and docs layouts alongside the separate read-only Native workspace.
+
+### Fixed
+
+- **Native baseline scope**: Newly initialized Native projects no longer spend their bounded baseline budget on Comet's replicated platform Skill directories, so `comet native new` remains usable after installing every supported platform while project source and `.github/workflows` stay in scope.
+- **Classic configuration compatibility**: Setup and update retain an existing Classic project’s directory choice and more reliably recognize a usable directory when an older project configuration is incomplete.
+- **Portable workflow execution**: Native and Classic Skills now call the public `comet` CLI instead of searching platform-specific Skill directories or invoking internal bundles. Missing CLI installations stop with a clear error, while workflow routing still immediately loads the selected Skill through the Skill tool.
+- **Classic execution choices**: Classic now presents every workflow-supported isolation and execution choice, then runs the user’s selection and reports any error instead of pre-screening options.
+- **Dashboard status feedback**: Classic change verification uses green, red, amber, and neutral status colors for pass, fail, pending, and unknown states; invalid Dashboard ports now fail with a clear error before startup.
+
+### Security
+
+- **Classic phase protection**: Host configuration directories and worktrees no longer bypass Classic phase restrictions, preventing source writes hidden under paths such as `.claude/` during non-Build phases.
+- **Dashboard build dependency**: Updated the Dashboard CSS build dependency to prevent untrusted source-map references from reading unintended reachable map files.
+
+## What's Changed [0.4.0-beta.12] - 2026-07-30
+
+### Changed
+
+- **Classic root migration**: `comet classic root move docs --dry-run` now reports the current state without exposing a plan ID, prints each conflict or blocker on its own line, and `--apply` migrates the complete `openspec/` tree—including active and incompletely archived changes—without requiring a plan ID. Migration output and errors follow `classic.language`, projects already using `docs/openspec/` receive a clear no-op result, and completed migrations keep the final result at the end of the detailed report.
+- **Native workflow guidance**: Native now identifies the current change and phase before loading a phase-specific reference, always performs Shape classification, silent-assumption checks, and shared-understanding confirmation before implementation, treats `blocked` as a recoverable branch instead of task completion, reconfirms new user decisions discovered during Build with the Runtime-provided `--confirmed` transition, and explains project and change commands as a task-oriented runbook instead of an undifferentiated command list.
+- **Native verification and repair**: Passing Verify now runs and binds the built-in required check automatically. Acceptance evidence can come from manual observations or Runtime-executed project commands, with Windows command-shim support and credential-like output redaction. Runtime derives repair gaps from failed evidence; a repeated gap with one remaining override stays Agent-owned and requires a concrete new hypothesis, while an exhausted override or verification budget returns one explicit user decision.
+
+### Fixed
+
+- **Classic Dashboard discovery**: Dashboard now discovers the repository root when launched from a nested directory, reads Classic changes from the configured legacy or docs layout through the built CLI, and shows collection errors instead of presenting them as an empty workspace.
+- **Explicit Comet Skill routing**: The root Skill now triggers only for an explicit `/comet` invocation or a Comet request that does not choose Native or Classic. Once loaded, it treats the entry as selected, immediately resolves the project-configured workflow, loads exactly the returned Native or Classic entry Skill, and passes the original request through instead of re-evaluating task relevance or selecting a workflow by task size.
+- **Stale current-change routing**: A selection whose target is missing or archived now reuses the same zero, one, or multiple active-change resolution as a missing selection: ordinary work continues with zero candidates, one candidate is inferred read-only, and multiple candidates still require an explicit selection.
+- **Native baseline recovery guidance**: Incomplete baseline diagnostics now include `native.snapshot.max_files` alongside the byte and duration budgets, so file-count truncation points users to the configuration that can resolve it.
+
+### Removed
+
+- **Native cryptographic review**: Removed controller trust, signing identities, implementation attestations, independent-review and waiver receipts, and their CLI and Eval handoff paths. Native verification now depends on complete, current acceptance evidence and the built-in required check, bound to the active revision, contract, scope, snapshot, and artifacts.
+- **Redundant Native CLI inputs**: Removed the `comet native list` alias; manual-receipt `--responsible` and `--confirmed` options; and caller-supplied `next --receipt`, `--evidence-receipt`, `--failure-category`, and `--failed-check` options. Use unnamed `status` for discovery, record acceptance receipt references in `verification.md`, and record fresh schema-v3 evidence for active changes that still hold v2 receipts.
+
+## What's Changed [0.4.0-beta.11] - 2026-07-29
+
+### Changed
+
+- **Project configuration defaults**: New Classic configurations default to `classic.artifact_layout: docs`. `comet update` now fills every missing managed Native and Classic setting, choosing `docs/openspec/` unless an existing root-level `openspec/` project must be preserved.
+- **Risk-based Native review**: Independent review is required by the actual implementation scope and risk instead of a change-creation signing mode, so ordinary changes can start immediately while high-risk verification remains fail-closed.
+
+### Removed
+
+- **Native creation authorization**: `comet native new` no longer requires `--creation-authorization`, and the `signed-v2` creation protocol plus `comet native trust authorize` have been removed.
+
+## What's Changed [0.4.0-beta.10] - 2026-07-28
+
+### Added
+
+- **Targeted platform setup**: `comet init` and `comet update` now accept `--platform <platform>` so you can install or refresh one supported platform, including a project-specific custom platform, without changing the existing automatic fallback.
+- **CodeGraph index lifecycle**: Non-interactive project setup can explicitly choose `comet init --codegraph init|skip`, while JSON output and `comet doctor` report whether the CLI or index is missing, incomplete, stale, or ready. Authorized `comet doctor --repair --yes` runs the matching initialization, rebuild, or sync action without making ordinary doctor checks mutate the project ([#245](https://github.com/rpamis/comet/issues/245)).
+- **Classic configurable catalogue**: Projects can select `classic.artifact_layout: legacy|docs` for `openspec/` or `docs/openspec/`. `comet classic root show` reveals the active layout, while `comet classic root move … --dry-run/--apply` plans and performs a safe move of existing artifacts and configuration ([#173](https://github.com/rpamis/comet/issues/173)).
+- **Native evidence-backed verification**: Every mandatory acceptance item must be supported by current evidence bound to the active snapshot and scope. Native provides receipt commands for automated checks, manual observations, implementation attestations, independent review, and approved waivers; failed, skipped, blocked, stale, or incomplete evidence cannot produce a passing result, and high-risk changes require independent review ([#240](https://github.com/rpamis/comet/issues/240)).
+
+### Changed
+
+- **Classic documentation layout**: New Classic and dual-workflow projects store OpenSpec work in `docs/openspec/` beside `docs/comet/` and `docs/superpowers/`. Existing projects stay on their current root-level `openspec/` layout unless you explicitly migrate, and all Classic commands use the selected location ([#173](https://github.com/rpamis/comet/issues/173)).
+- **Native Loop**: Failed or incomplete acceptance items return the change to Build as explicit repair input. Only fewer gaps, passing checks, or restored evidence count as progress; implementation churn alone does not reset stagnation or the failure budget. Native continues Build ↔ Verify until the contract is satisfied or a stop condition returns control to the user ([#209](https://github.com/rpamis/comet/issues/209), [#242](https://github.com/rpamis/comet/issues/242)).
+- **Native archive confirmation**: Set `native.archive_confirmation: required` to require one explicit decision after a successful Archive preview, or keep the existing automatic archive behavior. Intermediate repair iterations never request archive confirmation, and choosing not to archive preserves the active change ([#238](https://github.com/rpamis/comet/issues/238)).
+- **Native guidance**: Native Skill instructions now keep the active phase and next action prominent, loading detailed clarification, command, artifact, and recovery guidance only when needed.
+
+### Fixed
+
+- **Classic archive references**: Classic archive now updates change-local handoff and related artifact paths to their dated archive location, preserves the recorded handoff hash, and verifies archived references before reporting success, so archived changes pass Guard without manual state edits ([#244](https://github.com/rpamis/comet/issues/244)).
+- **Secondary worktree diagnostics**: `comet doctor` now distinguishes current-worktree project assets, primary-worktree-only assets, and an available global fallback. It reports the effective runtime source without treating intentionally uncopied ignored assets as corruption or executing files from another worktree, while still failing health checks when no usable runtime exists ([#246](https://github.com/rpamis/comet/issues/246)).
+
+### Security
+
+- **Native approval isolation**: Signed Native workflows keep approval credentials outside the project and implementation Agent, preventing a project change from granting itself approval authority ([#240](https://github.com/rpamis/comet/issues/240)).
+
+## What's Changed [0.4.0-beta.9] - 2026-07-25
+
+### Added
+
+- **Sequential clarification evaluation**: Adds a repeatable multi-turn Native evaluation that checks whether Sequential investigates repository facts, resolves dependent user-owned decisions one at a time, records each answer, confirms a complete shared understanding before Build, and finishes verified implementation. Task-defined reply sequences keep decision paths reproducible instead of allowing the simulated user to invent additional choices.
+- **`comet native evidence format`**: New command that serializes acceptance evidence entries into the exact canonical Markdown block `verification.md` requires, so evidence blocks no longer need to be hand-formatted to match byte-for-byte and no longer trigger spurious "canonical serialization" rejections during Verify.
+
+### Changed
+
+- **Native clarification modes**: Sequential mode now recalculates remaining user-visible decisions after each answer and asks exactly one most-upstream decision with a recommendation and impact per round. Batch maintains a prerequisite-aware decision tree, asks the entire ready frontier each round, and keeps environment-fact investigations from delaying other ready questions when parallel work is available. Both modes require every behavior in the final shared-understanding summary to be traceable, and Runtime enforces explicit confirmation before Build; older `implicit` changes must also confirm before leaving Build.
+
+### Fixed
+
+- **Local eval task images**: Installs Claude Code and runs every task image as a non-root agent so quick and full evaluations can collect the benchmark image identity and invoke the Claude runner ([#229](https://github.com/rpamis/comet/issues/229)).
+- **Local eval validators**: Makes the lightweight validator runtime importable from `validation/` scripts and accepts structured workflow artifact declarations in generic rubric scoring.
+- **Creator Bundle portability**: Generates portable authoring briefs instead of requiring a Claude-only runtime agent, so Codex distribution readiness is not blocked by a Claude-specific capability.
+- **Native baselines for large repositories**: Native content snapshots now support baseline-bound include/exclude policies and configurable file-count, total-byte, and duration budgets in `.comet/config.yaml`, with a 256 MiB default total budget and no separate 5 MiB per-file cap. Runtime continues to hash actual working-tree content with streaming SHA-256, records the effective policy and limits for audit, and reports actionable configuration fixes when a complete baseline cannot be captured ([#226](https://github.com/rpamis/comet/issues/226)).
+- **Global workflow selection**: `comet init` now offers Native, Classic, or both for global installs and accepts `--scope global --workflow native|classic|both`, so global Skill installation exposes the same workflow choices as project scope while preserving Classic as the non-interactive default when no workflow is specified ([#234](https://github.com/rpamis/comet/issues/234)).
+- **Explicit Comet Skill invocation**: Ambient Resume project instructions now give host-recognized manual Comet Skill invocations precedence over recovery probing, preventing `none` or `out_of_scope` results from skipping `/comet` when no active change exists ([#235](https://github.com/rpamis/comet/issues/235)).
+- **Classic archive final state**: Classic now confirms immediate remote delivery before irreversible archive, writes `branch_status: handled` before the single archive commit, and pushes that complete commit once. Successful archive no longer leaves an uncommitted `.comet.yaml` or a remote archive stuck at `pending` ([#237](https://github.com/rpamis/comet/issues/237)).
+- **Plugin marketplace superpowers detection**: `comet init` no longer crashes with an `ENOTDIR` error when `~/.claude/plugins/cache/` (or the Codex equivalent) contains a stray file where a marketplace directory was expected.
+
+### Security
+
+- **Race-safe file reads**: Reading `.comet/current-change.json` (used on every Hook Router call, `comet doctor`, and `comet resume-probe`), Native lock files, and `comet native evidence format --entries` input could previously be tricked mid-read: swapping the file for a symlink between the check and the read leaked the link target's content, and a FIFO at the lock path hung the process. These reads now reject non-regular files before opening and verify the file is still the same one after opening and after reading, so a swapped file fails the read instead of being silently accepted. Windows, which lacks `O_NOFOLLOW`, gets the same protection through the identity checks.
+
 ## What's Changed [0.4.0-beta.8] - 2026-07-22
 
 ### Fixed

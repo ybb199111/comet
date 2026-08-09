@@ -1,13 +1,20 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import { fileExists, readDir } from '../../platform/fs/file-system.js';
 import { collectGitSnapshot } from './git.js';
-import { collectNativeDashboardProjection } from './native-collector.js';
+import {
+  collectNativeDashboardOverview,
+  collectNativeDashboardProjection,
+} from './native-collector.js';
 import { recommendNextAction } from './next-action.js';
 import { buildChangeRisks, buildProjectRisks } from './risk.js';
 import { parseTasksMarkdown } from './task-parser.js';
-import { readCometYaml, type CometYaml } from './yaml.js';
+import { parseCometYaml, type CometYaml } from './yaml.js';
 import { resolveVerify } from './verify-parser.js';
+import {
+  inspectProtectedProjectPath,
+  protectedProjectFileExists,
+  readProtectedProjectFile,
+} from '../workflow-contract/protected-project-path.js';
 import type {
   ArchiveInfo,
   ArtifactPreview,
@@ -15,9 +22,14 @@ import type {
   ChangeDashboardItem,
   ChangePhase,
   DashboardRisk,
+  DashboardChangeListItem,
+  DashboardChangePage,
+  DashboardChangeTab,
+  DashboardOverview,
   DashboardSnapshot,
   GroupedArtifact,
   TasksSummary,
+  VerifySummary,
 } from './types.js';
 
 const VALID_PHASES: ReadonlySet<ChangePhase> = new Set([
@@ -29,10 +41,14 @@ const VALID_PHASES: ReadonlySet<ChangePhase> = new Set([
   'unknown',
 ]);
 
-const CHANGES_DIR = path.join('openspec', 'changes');
 const ARCHIVE_SEGMENT = 'archive';
+const CLASSIC_CHANGES_ROOTS = ['openspec/changes', 'docs/openspec/changes'] as const;
 const ARCHIVE_NAME_PATTERN = /^(\d{4}-\d{2}-\d{2})-(.+)$/u;
 const ARTIFACT_PREVIEW_LIMIT_BYTES = 256 * 1024;
+const ARTIFACT_READ_LIMIT_BYTES = 2 * 1024 * 1024;
+const DEFAULT_CHANGE_PAGE_SIZE = 5;
+const MAX_CHANGE_PAGE_SIZE = 50;
+const CHANGE_INDEX_CONCURRENCY = 16;
 
 /**
  * Build a full dashboard snapshot for the project rooted at `projectPath`.
@@ -45,16 +61,15 @@ export async function collectDashboardSnapshot(
   options: { now?: Date; projectName?: string } = {},
 ): Promise<DashboardSnapshot> {
   const resolvedRoot = path.resolve(projectPath);
-  const changesRoot = path.join(resolvedRoot, CHANGES_DIR);
-
-  const [activeChanges, archivedChanges, git, nativeResult] = await Promise.all([
-    collectActiveChanges(changesRoot),
-    collectArchivedChanges(changesRoot),
+  const [classic, git, nativeResult] = await Promise.all([
+    collectClassicChanges(resolvedRoot),
     collectGitSnapshot(resolvedRoot),
     collectNativeDashboardProjection(resolvedRoot, { now: options.now })
       .then((projection) => ({ projection, failed: false as const }))
       .catch(() => ({ projection: null, failed: true as const })),
   ]);
+  const { active: activeChanges, archived: archivedChanges } = classic;
+  const classicError = classic.errors.length > 0 ? classic.errors.join('\n') : null;
 
   const sortedActive = sortActive(activeChanges);
   const sortedArchived = sortArchived(archivedChanges);
@@ -91,42 +106,622 @@ export async function collectDashboardSnapshot(
     ...(nativeResult.failed
       ? { nativeError: { code: 'native-dashboard-unavailable' as const } }
       : {}),
+    ...(classicError
+      ? {
+          classicError: {
+            code: 'classic-dashboard-unavailable' as const,
+            message: classicError,
+          },
+        }
+      : {}),
   };
 }
 
-async function collectActiveChanges(changesRoot: string): Promise<ChangeDashboardItem[]> {
-  if (!(await fileExists(changesRoot))) return [];
+export interface DashboardChangePageOptions {
+  status: DashboardChangeTab;
+  limit?: number;
+  cursor?: string;
+  query?: string;
+}
 
-  const entries = await readDir(changesRoot);
+export interface DashboardOverviewOptions {
+  now?: Date;
+  projectName?: string;
+  query?: string;
+}
+
+export class DashboardChangeQueryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DashboardChangeQueryError';
+  }
+}
+
+interface ClassicChangeCandidate {
+  id: string;
+  name: string;
+  displayName: string;
+  status: 'active' | 'archived';
+  dir: string;
+  changesRelative: string;
+  relativePath: string;
+  workflow: string | null;
+  phase: ChangePhase;
+  updatedAt?: string;
+  archive?: ArchiveInfo;
+  tasks: TasksSummary;
+  verify: VerifySummary;
+  risks: DashboardRisk[];
+}
+
+interface ClassicCandidateCollection {
+  active: ClassicChangeCandidate[];
+  archived: ClassicChangeCandidate[];
+  errors: string[];
+}
+
+/**
+ * Collect only the metadata needed by the paginated change explorer. Full
+ * artifact previews stay behind `collectDashboardChangeDetail` so a large
+ * project does not make the initial Dashboard request proportional to every
+ * Markdown file in the repository.
+ */
+export async function collectDashboardChangePage(
+  projectPath: string,
+  options: DashboardChangePageOptions,
+): Promise<DashboardChangePage> {
+  const collection = await collectClassicChangeCandidates(path.resolve(projectPath));
+  return buildDashboardChangePage(collection, options);
+}
+
+/** Build the lightweight initial page and project summary in one collector pass. */
+export async function collectDashboardOverview(
+  projectPath: string,
+  options: DashboardOverviewOptions = {},
+): Promise<DashboardOverview> {
+  const resolvedRoot = path.resolve(projectPath);
+  const [classic, git, nativeResult] = await Promise.all([
+    collectClassicChangeCandidates(resolvedRoot),
+    collectGitSnapshot(resolvedRoot),
+    collectNativeDashboardOverview(resolvedRoot, { now: options.now })
+      .then((projection) => ({ projection, failed: false as const }))
+      .catch(() => ({ projection: null, failed: true as const })),
+  ]);
+  const active = sortActiveCandidates(classic.active);
+  const archived = sortArchivedCandidates(classic.archived);
+  const summary = {
+    activeChanges: active.length,
+    archivedChanges: archived.length,
+    verifyFailed: active.filter((change) => change.verify.result === 'fail').length,
+    tasksIncomplete: active.reduce(
+      (sum, change) => sum + (change.tasks.total - change.tasks.completed),
+      0,
+    ),
+    dirtyFiles: git.dirtyFiles,
+  };
+  const now = options.now ?? new Date();
+  const overview: DashboardOverview = {
+    project: {
+      name: options.projectName ?? path.basename(resolvedRoot),
+      path: resolvedRoot,
+      generatedAt: now.toISOString(),
+    },
+    summary,
+    initialChanges: buildDashboardChangePage(classic, {
+      status: 'active',
+      limit: DEFAULT_CHANGE_PAGE_SIZE,
+      query: options.query,
+    }),
+    git,
+    risks: buildProjectRisks({ git, changes: [] }),
+    ...(nativeResult.projection ? { native: nativeResult.projection } : {}),
+    ...(nativeResult.failed
+      ? { nativeError: { code: 'native-dashboard-unavailable' as const } }
+      : {}),
+    ...(classic.errors.length > 0
+      ? {
+          classicError: {
+            code: 'classic-dashboard-unavailable' as const,
+            message: classic.errors.join('\n'),
+          },
+        }
+      : {}),
+  };
+  return overview;
+}
+
+/** Load one full Classic change after the user selects it in the explorer. */
+export async function collectDashboardChangeDetail(
+  projectPath: string,
+  id: string,
+): Promise<ChangeDashboardItem | null> {
+  const resolvedRoot = path.resolve(projectPath);
+  const location = parseClassicChangeId(id);
+  if (!location) return null;
+  const dir = path.join(resolvedRoot, ...location.relativePath.split('/'));
+  if (!(await safeProjectDirectoryExists(resolvedRoot, dir, `Classic change ${location.name}`))) {
+    return null;
+  }
+  return tryBuildChangeItem({
+    name: location.name,
+    dir,
+    status: location.status,
+    projectRoot: resolvedRoot,
+    changesRelative: location.changesRelative,
+  });
+}
+
+async function collectClassicChangeCandidates(
+  projectRoot: string,
+): Promise<ClassicCandidateCollection> {
+  const collections = await Promise.all(
+    CLASSIC_CHANGES_ROOTS.map(async (changesRelative) => {
+      const changesRoot = path.join(projectRoot, ...changesRelative.split('/'));
+      const [active, archived] = await Promise.all([
+        collectCandidatesWithError({
+          changesRoot,
+          projectRoot,
+          changesRelative,
+          status: 'active',
+        }),
+        collectCandidatesWithError({
+          changesRoot: path.join(changesRoot, ARCHIVE_SEGMENT),
+          projectRoot,
+          changesRelative,
+          status: 'archived',
+        }),
+      ]);
+      return {
+        active: active.items,
+        archived: archived.items,
+        errors: [...active.errors, ...archived.errors],
+      };
+    }),
+  );
+
+  return {
+    active: collections.flatMap((collection) => collection.active),
+    archived: collections.flatMap((collection) => collection.archived),
+    errors: collections.flatMap((collection) => collection.errors),
+  };
+}
+
+async function collectCandidatesWithError(
+  input: CollectCandidatesInput,
+): Promise<{ items: ClassicChangeCandidate[]; errors: string[] }> {
+  try {
+    return { items: await collectChangeCandidatesFromRoot(input), errors: [] };
+  } catch (error) {
+    return {
+      items: [],
+      errors: [
+        formatClassicCollectionError(
+          input.status === 'archived'
+            ? `${input.changesRelative}/${ARCHIVE_SEGMENT}`
+            : input.changesRelative,
+          error,
+        ),
+      ],
+    };
+  }
+}
+
+interface CollectCandidatesInput {
+  changesRoot: string;
+  projectRoot: string;
+  changesRelative: string;
+  status: 'active' | 'archived';
+}
+
+async function collectChangeCandidatesFromRoot(
+  input: CollectCandidatesInput,
+): Promise<ClassicChangeCandidate[]> {
+  const relativeRoot =
+    input.status === 'archived'
+      ? `${input.changesRelative}/${ARCHIVE_SEGMENT}`
+      : input.changesRelative;
+  let inspection;
+  try {
+    inspection = await inspectProtectedProjectPath(input.projectRoot, relativeRoot, {
+      label: `Classic ${input.status} changes root`,
+      expected: 'directory',
+    });
+  } catch (error) {
+    if (isMissingPathError(error)) return [];
+    throw error;
+  }
+  if (!inspection.exists) return [];
+
+  const entries = await fs.readdir(inspection.target);
+  const candidates = await mapWithConcurrency(
+    entries.filter((entry) => entry !== ARCHIVE_SEGMENT),
+    CHANGE_INDEX_CONCURRENCY,
+    async (entry) => {
+      const dir = path.join(input.changesRoot, entry);
+      if (!(await safeProjectDirectoryExists(input.projectRoot, dir, `Classic change ${entry}`))) {
+        return null;
+      }
+      return tryBuildChangeCandidate({ ...input, name: entry, dir });
+    },
+  );
+  return candidates.filter((candidate): candidate is ClassicChangeCandidate => candidate !== null);
+}
+
+async function tryBuildChangeCandidate(
+  input: CollectCandidatesInput & { name: string; dir: string },
+): Promise<ClassicChangeCandidate | null> {
+  try {
+    return await buildChangeCandidate(input);
+  } catch (error) {
+    console.warn(
+      `[dashboard] skipping change index "${input.name}": ${(error as Error).message ?? error}`,
+    );
+    return null;
+  }
+}
+
+async function buildChangeCandidate(
+  input: CollectCandidatesInput & { name: string; dir: string },
+): Promise<ClassicChangeCandidate> {
+  const yamlPath = path.join(input.dir, '.comet.yaml');
+  const tasksPath = path.join(input.dir, 'tasks.md');
+  const proposalPath = path.join(input.dir, 'proposal.md');
+  const designPath = path.join(input.dir, 'design.md');
+  const localPlanPath = path.join(input.dir, 'plan.md');
+  const yaml: CometYaml = (await readProjectCometYaml(input.projectRoot, yamlPath)) ?? {};
+  const yamlPlanPath = stripNullish(yaml.plan);
+  const resolvedPlanPath =
+    (yamlPlanPath
+      ? await resolveArtifactPointer(input.projectRoot, yamlPlanPath, 'Classic plan artifact')
+      : null) ?? localPlanPath;
+  const [tasks, verify, proposal, design, hasTasks, plan, cometYamlExists, updatedAt] =
+    await Promise.all([
+      readTasks(input.projectRoot, tasksPath),
+      resolveVerify({
+        changeDir: input.dir,
+        yaml,
+        projectRoot: input.projectRoot,
+        includeSummary: false,
+      }),
+      safeProjectFileExists(input.projectRoot, proposalPath, 'Classic proposal artifact'),
+      safeProjectFileExists(input.projectRoot, designPath, 'Classic design artifact'),
+      safeProjectFileExists(input.projectRoot, tasksPath, 'Classic tasks artifact'),
+      safeProjectFileExists(input.projectRoot, resolvedPlanPath, 'Classic plan artifact'),
+      safeProjectFileExists(input.projectRoot, yamlPath, 'Classic state artifact'),
+      readMtime(input.projectRoot, input.dir),
+    ]);
+
+  const phase = parsePhase(yaml.phase);
+  const archive = input.status === 'archived' ? buildArchiveInfo(input) : undefined;
+  const artifacts: ArtifactsSummary = {
+    proposal,
+    design,
+    tasks: hasTasks,
+    plan,
+    verifyReport: verify.reportExists,
+    cometYaml: cometYamlExists,
+    grouped: [],
+  };
+  const risks = buildChangeRisks({
+    status: input.status,
+    phase,
+    hasCometYaml: cometYamlExists,
+    tasks,
+    verify,
+    artifacts,
+    archiveMetadataKnown: input.status === 'archived' ? Boolean(archive?.archivedAt) : undefined,
+  });
+  const id =
+    input.status === 'archived'
+      ? `${input.changesRelative}/${ARCHIVE_SEGMENT}/${input.name}`
+      : `${input.changesRelative}/${input.name}`;
+  return {
+    id,
+    name: input.name,
+    displayName:
+      input.status === 'archived' && archive?.originalName ? archive.originalName : input.name,
+    status: input.status,
+    dir: input.dir,
+    changesRelative: input.changesRelative,
+    relativePath: path.relative(input.projectRoot, input.dir).replaceAll('\\', '/'),
+    workflow: yaml.workflow ?? null,
+    phase,
+    updatedAt,
+    archive,
+    tasks,
+    verify,
+    risks,
+  };
+}
+
+function buildDashboardChangePage(
+  collection: ClassicCandidateCollection,
+  options: DashboardChangePageOptions,
+): DashboardChangePage {
+  const limit = normalizeChangePageLimit(options.limit);
+  const active = filterAndSortCandidates(collection.active, options.query, 'active');
+  const archived = filterAndSortCandidates(collection.archived, options.query, 'archived');
+  const candidates =
+    options.status === 'active'
+      ? active
+      : options.status === 'archived'
+        ? archived
+        : [...active, ...archived];
+  const offset = decodeChangeCursor(options.cursor, options.status);
+  const items = candidates.slice(offset, offset + limit).map(toDashboardChangeListItem);
+  const nextOffset = offset + items.length;
+  return {
+    status: options.status,
+    items,
+    total: candidates.length,
+    nextCursor:
+      nextOffset < candidates.length ? encodeChangeCursor(options.status, nextOffset) : null,
+  };
+}
+
+function filterAndSortCandidates(
+  candidates: ClassicChangeCandidate[],
+  query: string | undefined,
+  status: 'active' | 'archived',
+): ClassicChangeCandidate[] {
+  const normalized = query?.trim().toLowerCase() ?? '';
+  const filtered = normalized
+    ? candidates.filter((candidate) =>
+        [candidate.name, candidate.displayName, candidate.workflow, candidate.phase]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(normalized),
+      )
+    : candidates;
+  return status === 'active' ? sortActiveCandidates(filtered) : sortArchivedCandidates(filtered);
+}
+
+function toDashboardChangeListItem(candidate: ClassicChangeCandidate): DashboardChangeListItem {
+  return {
+    id: candidate.id,
+    name: candidate.name,
+    displayName: candidate.displayName,
+    status: candidate.status,
+    relativePath: candidate.relativePath,
+    workflow: candidate.workflow,
+    phase: candidate.phase,
+    updatedAt: candidate.updatedAt,
+    tasks: { completed: candidate.tasks.completed, total: candidate.tasks.total },
+    verify: { result: candidate.verify.result },
+  };
+}
+
+function sortActiveCandidates(items: ClassicChangeCandidate[]): ClassicChangeCandidate[] {
+  return [...items].sort(compareActiveCandidates);
+}
+
+function sortArchivedCandidates(items: ClassicChangeCandidate[]): ClassicChangeCandidate[] {
+  return [...items].sort((left, right) => {
+    const byArchivedAt = (right.archive?.archivedAt ?? '').localeCompare(
+      left.archive?.archivedAt ?? '',
+    );
+    if (byArchivedAt !== 0) return byArchivedAt;
+    const byName = left.name.localeCompare(right.name);
+    return byName !== 0 ? byName : left.relativePath.localeCompare(right.relativePath);
+  });
+}
+
+function compareActiveCandidates(
+  left: ClassicChangeCandidate,
+  right: ClassicChangeCandidate,
+): number {
+  const byRisk = riskScore(left) - riskScore(right);
+  if (byRisk !== 0) return byRisk;
+  const byUpdated = (right.updatedAt ?? '').localeCompare(left.updatedAt ?? '');
+  if (byUpdated !== 0) return byUpdated;
+  const byName = left.name.localeCompare(right.name);
+  return byName !== 0 ? byName : left.relativePath.localeCompare(right.relativePath);
+}
+
+function normalizeChangePageLimit(limit: number | undefined): number {
+  const value = limit ?? DEFAULT_CHANGE_PAGE_SIZE;
+  if (!Number.isInteger(value) || value < 1 || value > MAX_CHANGE_PAGE_SIZE) {
+    throw new DashboardChangeQueryError(
+      `Change page limit must be an integer between 1 and ${MAX_CHANGE_PAGE_SIZE}`,
+    );
+  }
+  return value;
+}
+
+function encodeChangeCursor(status: DashboardChangeTab, offset: number): string {
+  return Buffer.from(JSON.stringify({ status, offset }), 'utf8').toString('base64url');
+}
+
+function decodeChangeCursor(cursor: string | undefined, status: DashboardChangeTab): number {
+  if (!cursor) return 0;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as {
+      status?: unknown;
+      offset?: unknown;
+    };
+    if (
+      parsed.status !== status ||
+      !Number.isSafeInteger(parsed.offset) ||
+      (parsed.offset as number) < 0
+    ) {
+      throw new Error('invalid cursor');
+    }
+    return parsed.offset as number;
+  } catch {
+    throw new DashboardChangeQueryError('Invalid dashboard change cursor');
+  }
+}
+
+function parseClassicChangeId(id: string): {
+  name: string;
+  status: 'active' | 'archived';
+  changesRelative: string;
+  relativePath: string;
+} | null {
+  for (const changesRelative of CLASSIC_CHANGES_ROOTS) {
+    const archivePrefix = `${changesRelative}/${ARCHIVE_SEGMENT}/`;
+    if (id.startsWith(archivePrefix)) {
+      const name = id.slice(archivePrefix.length);
+      if (name && !hasPathSeparator(name) && name !== '.' && name !== '..') {
+        return {
+          name,
+          status: 'archived',
+          changesRelative,
+          relativePath: `${archivePrefix}${name}`,
+        };
+      }
+    }
+    const activePrefix = `${changesRelative}/`;
+    if (id.startsWith(activePrefix)) {
+      const name = id.slice(activePrefix.length);
+      if (
+        name &&
+        !hasPathSeparator(name) &&
+        name !== ARCHIVE_SEGMENT &&
+        name !== '.' &&
+        name !== '..'
+      ) {
+        return {
+          name,
+          status: 'active',
+          changesRelative,
+          relativePath: `${activePrefix}${name}`,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function hasPathSeparator(value: string): boolean {
+  return value.includes('/') || value.includes('\\');
+}
+
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+async function mapWithConcurrency<T, R>(
+  values: T[],
+  concurrency: number,
+  worker: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), values.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= values.length) return;
+        results[index] = await worker(values[index]);
+      }
+    }),
+  );
+  return results;
+}
+
+interface ClassicCollection {
+  active: ChangeDashboardItem[];
+  archived: ChangeDashboardItem[];
+  errors: string[];
+}
+
+async function collectClassicChanges(projectRoot: string): Promise<ClassicCollection> {
+  const active: ChangeDashboardItem[] = [];
+  const archived: ChangeDashboardItem[] = [];
+  const errors: string[] = [];
+
+  for (const changesRelative of CLASSIC_CHANGES_ROOTS) {
+    const changesRoot = path.join(projectRoot, ...changesRelative.split('/'));
+    try {
+      active.push(...(await collectActiveChanges(changesRoot, projectRoot, changesRelative)));
+    } catch (error) {
+      errors.push(formatClassicCollectionError(changesRelative, error));
+    }
+    try {
+      archived.push(...(await collectArchivedChanges(changesRoot, projectRoot, changesRelative)));
+    } catch (error) {
+      errors.push(formatClassicCollectionError(`${changesRelative}/archive`, error));
+    }
+  }
+
+  return { active, archived, errors };
+}
+
+function formatClassicCollectionError(relativePath: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return `Classic ${relativePath}: ${message}`;
+}
+
+async function collectActiveChanges(
+  changesRoot: string,
+  projectRoot: string,
+  changesRelative: string,
+): Promise<ChangeDashboardItem[]> {
+  const inspection = await inspectProtectedProjectPath(
+    projectRoot,
+    projectRelative(projectRoot, changesRoot),
+    {
+      label: 'Classic changes root',
+      expected: 'directory',
+    },
+  );
+  if (!inspection.exists) return [];
+  const entries = await fs.readdir(inspection.target);
   const items: ChangeDashboardItem[] = [];
 
   for (const entry of entries) {
     if (entry === ARCHIVE_SEGMENT) continue;
 
     const dir = path.join(changesRoot, entry);
-    const stat = await safeStat(dir);
-    if (!stat?.isDirectory()) continue;
+    if (!(await safeProjectDirectoryExists(projectRoot, dir, `Classic change ${entry}`))) continue;
 
-    const item = await tryBuildChangeItem({ name: entry, dir, status: 'active' });
+    const item = await tryBuildChangeItem({
+      name: entry,
+      dir,
+      status: 'active',
+      projectRoot,
+      changesRelative,
+    });
     if (item) items.push(item);
   }
 
   return items;
 }
 
-async function collectArchivedChanges(changesRoot: string): Promise<ChangeDashboardItem[]> {
+async function collectArchivedChanges(
+  changesRoot: string,
+  projectRoot: string,
+  changesRelative: string,
+): Promise<ChangeDashboardItem[]> {
   const archiveRoot = path.join(changesRoot, ARCHIVE_SEGMENT);
-  if (!(await fileExists(archiveRoot))) return [];
-
-  const entries = await readDir(archiveRoot);
+  const inspection = await inspectProtectedProjectPath(
+    projectRoot,
+    projectRelative(projectRoot, archiveRoot),
+    {
+      label: 'Classic archive root',
+      expected: 'directory',
+    },
+  );
+  if (!inspection.exists) return [];
+  const entries = await fs.readdir(inspection.target);
   const items: ChangeDashboardItem[] = [];
 
   for (const entry of entries) {
     const dir = path.join(archiveRoot, entry);
-    const stat = await safeStat(dir);
-    if (!stat?.isDirectory()) continue;
+    if (!(await safeProjectDirectoryExists(projectRoot, dir, `Classic archive ${entry}`))) continue;
 
-    const item = await tryBuildChangeItem({ name: entry, dir, status: 'archived' });
+    const item = await tryBuildChangeItem({
+      name: entry,
+      dir,
+      status: 'archived',
+      projectRoot,
+      changesRelative,
+    });
     if (item) items.push(item);
   }
 
@@ -153,18 +748,31 @@ interface BuildChangeInput {
   name: string;
   dir: string;
   status: 'active' | 'archived';
+  projectRoot: string;
+  changesRelative: string;
 }
 
 async function buildChangeItem(input: BuildChangeInput): Promise<ChangeDashboardItem> {
+  const changeInspection = await inspectProtectedProjectPath(
+    input.projectRoot,
+    projectRelative(input.projectRoot, input.dir),
+    {
+      label: `Classic change ${input.name}`,
+      expected: 'directory',
+    },
+  );
+  if (!changeInspection.exists) {
+    throw new Error(`Classic change ${input.name} disappeared during collection`);
+  }
   const yamlPath = path.join(input.dir, '.comet.yaml');
   const tasksPath = path.join(input.dir, 'tasks.md');
   const designPath = path.join(input.dir, 'design.md');
   const proposalPath = path.join(input.dir, 'proposal.md');
   const localPlanPath = path.join(input.dir, 'plan.md');
 
-  const yaml: CometYaml = (await readCometYaml(yamlPath)) ?? {};
+  const yaml: CometYaml = (await readProjectCometYaml(input.projectRoot, yamlPath)) ?? {};
 
-  const projectRoot = resolveProjectRoot(input.dir);
+  const projectRoot = input.projectRoot;
 
   // Read yaml path-pointers for Superpowers artifacts
   const yamlPlanPath = stripNullish(yaml.plan);
@@ -172,19 +780,24 @@ async function buildChangeItem(input: BuildChangeInput): Promise<ChangeDashboard
   const yamlDesignDocPath = stripNullish(yaml.design_doc ?? yaml.designDoc);
 
   // Resolve Superpowers artifact paths (yaml paths are relative to project root)
-  const resolvedPlanPath = yamlPlanPath ? path.resolve(projectRoot, yamlPlanPath) : localPlanPath;
-  const resolvedVerifyPath = yamlVerifyPath
-    ? path.resolve(projectRoot, yamlVerifyPath)
-    : path.join(input.dir, '.comet', 'verify-result.md');
+  const resolvedPlanPath =
+    (yamlPlanPath
+      ? await resolveArtifactPointer(projectRoot, yamlPlanPath, 'Classic plan artifact')
+      : null) ?? localPlanPath;
+  const resolvedVerifyPath =
+    (yamlVerifyPath
+      ? await resolveArtifactPointer(projectRoot, yamlVerifyPath, 'Classic verification artifact')
+      : null) ?? path.join(input.dir, '.comet', 'verify-result.md');
   const resolvedDesignDocPath = yamlDesignDocPath
-    ? path.resolve(projectRoot, yamlDesignDocPath)
+    ? ((await resolveArtifactPointer(projectRoot, yamlDesignDocPath, 'Classic design artifact')) ??
+      '')
     : '';
 
-  const tasks = await readTasks(tasksPath);
+  const tasks = await readTasks(projectRoot, tasksPath);
   const verify = await resolveVerify({ changeDir: input.dir, yaml, projectRoot });
 
   // Detect delta specs in change directory
-  const deltaSpecPath = await findDeltaSpec(input.dir);
+  const deltaSpecPath = await findDeltaSpec(projectRoot, input.dir);
 
   // Comet intermediate artifacts
   const handoffPath = path.join(input.dir, '.comet', 'handoff', 'design-context.json');
@@ -205,17 +818,19 @@ async function buildChangeItem(input: BuildChangeInput): Promise<ChangeDashboard
     brainstormExists,
     subagentProgressExists,
   ] = await Promise.all([
-    fileExists(proposalPath),
-    fileExists(designPath),
-    fileExists(tasksPath),
-    fileExists(localPlanPath),
-    fileExists(resolvedPlanPath),
-    resolvedDesignDocPath ? fileExists(resolvedDesignDocPath) : Promise.resolve(false),
-    fileExists(yamlPath),
-    fileExists(handoffPath),
-    fileExists(checkpointPath),
-    fileExists(brainstormPath),
-    fileExists(subagentProgressPath),
+    safeProjectFileExists(projectRoot, proposalPath, 'Classic proposal artifact'),
+    safeProjectFileExists(projectRoot, designPath, 'Classic design artifact'),
+    safeProjectFileExists(projectRoot, tasksPath, 'Classic tasks artifact'),
+    safeProjectFileExists(projectRoot, localPlanPath, 'Classic local plan artifact'),
+    safeProjectFileExists(projectRoot, resolvedPlanPath, 'Classic plan artifact'),
+    resolvedDesignDocPath
+      ? safeProjectFileExists(projectRoot, resolvedDesignDocPath, 'Classic design artifact')
+      : Promise.resolve(false),
+    safeProjectFileExists(projectRoot, yamlPath, 'Classic state artifact'),
+    safeProjectFileExists(projectRoot, handoffPath, 'Classic handoff artifact'),
+    safeProjectFileExists(projectRoot, checkpointPath, 'Classic checkpoint artifact'),
+    safeProjectFileExists(projectRoot, brainstormPath, 'Classic brainstorm artifact'),
+    safeProjectFileExists(projectRoot, subagentProgressPath, 'Classic progress artifact'),
   ]);
 
   const artifacts: ArtifactsSummary = {
@@ -254,7 +869,7 @@ async function buildChangeItem(input: BuildChangeInput): Promise<ChangeDashboard
     }),
   };
 
-  const artifactPreviews = await readArtifactPreviews([
+  const artifactPreviews = await readArtifactPreviews(projectRoot, [
     ['proposal', '提案', proposalPath],
     ['design', '设计文档', designPath],
     ['tasks', '任务清单', tasksPath],
@@ -285,7 +900,7 @@ async function buildChangeItem(input: BuildChangeInput): Promise<ChangeDashboard
   const displayName =
     input.status === 'archived' && archive?.originalName ? archive.originalName : input.name;
 
-  const updatedAt = await readMtime(input.dir);
+  const updatedAt = await readMtime(projectRoot, input.dir);
 
   const risks: DashboardRisk[] = buildChangeRisks({
     status: input.status,
@@ -298,11 +913,15 @@ async function buildChangeItem(input: BuildChangeInput): Promise<ChangeDashboard
   });
 
   const item: ChangeDashboardItem = {
-    id: input.status === 'archived' ? `archive/${input.name}` : input.name,
+    id:
+      input.status === 'archived'
+        ? `${input.changesRelative}/archive/${input.name}`
+        : `${input.changesRelative}/${input.name}`,
     name: input.name,
     displayName,
     status: input.status,
     path: input.dir,
+    relativePath: path.relative(projectRoot, input.dir).replaceAll('\\', '/'),
     workflow: yaml.workflow ?? null,
     phase,
     updatedAt,
@@ -322,6 +941,7 @@ async function buildChangeItem(input: BuildChangeInput): Promise<ChangeDashboard
 }
 
 async function readArtifactPreviews(
+  projectRoot: string,
   files: Array<[string, string, string]>,
 ): Promise<ArtifactPreview[]> {
   return Promise.all(
@@ -334,21 +954,19 @@ async function readArtifactPreviews(
       };
 
       try {
-        const stat = await fs.stat(filePath);
-        if (!stat.isFile()) return preview;
+        const relative = path.relative(projectRoot, filePath).replaceAll('\\', '/');
+        const result = await readProtectedProjectFile(
+          projectRoot,
+          relative,
+          ARTIFACT_READ_LIMIT_BYTES,
+          { label: `${label} preview` },
+        );
+        const stat = result.stat;
         preview.exists = true;
-        preview.size = stat.size;
+        preview.size = Number(stat.size);
         preview.updatedAt = stat.mtime.toISOString();
-        const bytesToRead = Math.min(stat.size, ARTIFACT_PREVIEW_LIMIT_BYTES);
-        const handle = await fs.open(filePath, 'r');
-        try {
-          const buffer = Buffer.alloc(bytesToRead);
-          const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0);
-          preview.content = buffer.subarray(0, bytesRead).toString('utf-8');
-          preview.truncated = stat.size > ARTIFACT_PREVIEW_LIMIT_BYTES;
-        } finally {
-          await handle.close();
-        }
+        preview.content = result.bytes.subarray(0, ARTIFACT_PREVIEW_LIMIT_BYTES).toString('utf-8');
+        preview.truncated = Number(stat.size) > ARTIFACT_PREVIEW_LIMIT_BYTES;
       } catch {
         // Missing or unreadable artifacts are represented as absent previews.
       }
@@ -358,10 +976,84 @@ async function readArtifactPreviews(
   );
 }
 
-async function readTasks(tasksPath: string): Promise<TasksSummary> {
+async function resolveArtifactPointer(
+  projectRoot: string,
+  candidate: string,
+  label: string,
+): Promise<string | null> {
   try {
-    const content = await fs.readFile(tasksPath, 'utf-8');
-    return parseTasksMarkdown(content);
+    return (
+      await inspectProtectedProjectPath(projectRoot, candidate, {
+        label,
+        expected: 'file',
+      })
+    ).target;
+  } catch {
+    return null;
+  }
+}
+
+async function safeProjectFileExists(
+  projectRoot: string,
+  file: string,
+  label: string,
+): Promise<boolean> {
+  try {
+    return await protectedProjectFileExists(
+      projectRoot,
+      path.relative(projectRoot, file).replaceAll('\\', '/'),
+      { label },
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function safeProjectDirectoryExists(
+  projectRoot: string,
+  directory: string,
+  label: string,
+): Promise<boolean> {
+  try {
+    return (
+      await inspectProtectedProjectPath(projectRoot, projectRelative(projectRoot, directory), {
+        label,
+        expected: 'directory',
+      })
+    ).exists;
+  } catch {
+    return false;
+  }
+}
+
+async function readProjectCometYaml(
+  projectRoot: string,
+  yamlPath: string,
+): Promise<CometYaml | null> {
+  try {
+    const result = await readProtectedProjectFile(
+      projectRoot,
+      projectRelative(projectRoot, yamlPath),
+      ARTIFACT_READ_LIMIT_BYTES,
+      { label: 'Classic state artifact' },
+    );
+    return parseCometYaml(result.bytes.toString('utf8'));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    throw error;
+  }
+}
+
+async function readTasks(projectRoot: string, tasksPath: string): Promise<TasksSummary> {
+  try {
+    const result = await readProtectedProjectFile(
+      projectRoot,
+      projectRelative(projectRoot, tasksPath),
+      ARTIFACT_READ_LIMIT_BYTES,
+      { label: 'Classic tasks artifact' },
+    );
+    return parseTasksMarkdown(result.bytes.toString('utf8'));
   } catch {
     return { completed: 0, total: 0, incomplete: [], sections: [] };
   }
@@ -386,17 +1078,18 @@ function buildArchiveInfo(input: BuildChangeInput): ArchiveInfo {
   return info;
 }
 
-async function safeStat(target: string): Promise<{ isDirectory(): boolean } | null> {
+async function readMtime(projectRoot: string, target: string): Promise<string | undefined> {
   try {
-    return await fs.stat(target);
-  } catch {
-    return null;
-  }
-}
-
-async function readMtime(target: string): Promise<string | undefined> {
-  try {
-    const stat = await fs.stat(target);
+    const inspection = await inspectProtectedProjectPath(
+      projectRoot,
+      projectRelative(projectRoot, target),
+      {
+        label: 'Classic change directory',
+        expected: 'directory',
+      },
+    );
+    if (!inspection.exists) return undefined;
+    const stat = await fs.lstat(inspection.target);
     return stat.mtime.toISOString();
   } catch {
     return undefined;
@@ -410,28 +1103,38 @@ function stripNullish(raw: string | undefined): string | undefined {
   return value;
 }
 
-function resolveProjectRoot(changeDir: string): string {
-  let cursor = path.resolve(changeDir);
-  while (path.dirname(cursor) !== cursor) {
-    if (path.basename(cursor) === 'openspec') return path.dirname(cursor);
-    cursor = path.dirname(cursor);
-  }
-  throw new Error(`Dashboard change is not inside an openspec directory: ${changeDir}`);
-}
-
-async function findDeltaSpec(changeDir: string): Promise<string | undefined> {
+async function findDeltaSpec(projectRoot: string, changeDir: string): Promise<string | undefined> {
   const specsDir = path.join(changeDir, 'specs');
   try {
-    const entries = await fs.readdir(specsDir, { withFileTypes: true });
+    const specsInspection = await inspectProtectedProjectPath(
+      projectRoot,
+      projectRelative(projectRoot, specsDir),
+      {
+        label: 'Classic delta spec root',
+        expected: 'directory',
+      },
+    );
+    if (!specsInspection.exists) return undefined;
+    const entries = await fs.readdir(specsInspection.target, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const specFile = path.join(specsDir, entry.name, 'spec.md');
-      if (await fileExists(specFile)) return specFile;
+      if (
+        await protectedProjectFileExists(projectRoot, projectRelative(projectRoot, specFile), {
+          label: `Classic delta spec ${entry.name}`,
+        })
+      ) {
+        return specFile;
+      }
     }
   } catch {
     // specs/ directory doesn't exist
   }
   return undefined;
+}
+
+function projectRelative(projectRoot: string, target: string): string {
+  return path.relative(projectRoot, target).replaceAll('\\', '/');
 }
 
 interface GroupedInput {
@@ -563,7 +1266,7 @@ function buildGroupedArtifacts(input: GroupedInput): GroupedArtifact[] {
   ];
 }
 
-function riskScore(item: ChangeDashboardItem): number {
+function riskScore(item: Pick<ChangeDashboardItem, 'verify' | 'risks'>): number {
   if (item.verify.result === 'fail' || item.risks.some((r) => r.level === 'error')) return 0;
   if (item.risks.some((r) => r.level === 'warning')) return 1;
   return 2;
@@ -575,7 +1278,8 @@ function sortActive(items: ChangeDashboardItem[]): ChangeDashboardItem[] {
     if (byRisk !== 0) return byRisk;
     const byUpdated = (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '');
     if (byUpdated !== 0) return byUpdated;
-    return a.name.localeCompare(b.name);
+    const byName = a.name.localeCompare(b.name);
+    return byName !== 0 ? byName : a.relativePath.localeCompare(b.relativePath);
   });
 }
 
@@ -583,6 +1287,7 @@ function sortArchived(items: ChangeDashboardItem[]): ChangeDashboardItem[] {
   return [...items].sort((a, b) => {
     const byArchivedAt = (b.archive?.archivedAt ?? '').localeCompare(a.archive?.archivedAt ?? '');
     if (byArchivedAt !== 0) return byArchivedAt;
-    return a.name.localeCompare(b.name);
+    const byName = a.name.localeCompare(b.name);
+    return byName !== 0 ? byName : a.relativePath.localeCompare(b.relativePath);
   });
 }

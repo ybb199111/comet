@@ -14,11 +14,13 @@ import {
   nativeChangeDir,
   readNativeChange,
 } from './native-change.js';
+import { readProjectConfig } from './native-config.js';
 import { canonicalSpecPath } from './native-artifacts.js';
 import { isInsidePath } from './native-paths.js';
 import { nativeTransitionJournalFile } from './native-transition-journal.js';
 import type { NativeProjectPaths, NativeSpecChange } from './native-types.js';
 import { inspectNativeVerificationFreshness } from './native-verification-runtime.js';
+import { readNativeWorkspaceIdentity } from './native-workspace.js';
 
 function archiveTargetRef(name: string, now: Date): string {
   return `archive/${now.toISOString().slice(0, 10)}-${name}`;
@@ -85,6 +87,8 @@ export async function inspectNativeArchivePreflight(options: {
 }): Promise<NativeArchivePreflight> {
   const now = options.now ?? new Date();
   const state = await readNativeChange(options.paths, options.name);
+  const workspace = await readNativeWorkspaceIdentity(options.paths, options.name);
+  const config = await readProjectConfig(options.paths.projectRoot);
   const targetRef = archiveTargetRef(state.name, now);
   const target = path.resolve(options.paths.nativeRoot, ...targetRef.split('/'));
   if (!isInsidePath(options.paths.nativeRoot, target)) {
@@ -109,6 +113,7 @@ export async function inspectNativeArchivePreflight(options: {
   ]);
   return buildNativeArchivePreflight({
     change: state.name,
+    archiveConfirmation: config?.native.archive_confirmation ?? 'automatic',
     stateSchema: state.schema,
     revision: state.revision,
     phase: state.phase,
@@ -118,6 +123,16 @@ export async function inspectNativeArchivePreflight(options: {
     targetExists,
     specs,
     evidence: evidence.evidence,
+    workspace:
+      workspace?.schema === 'comet.native.workspace.v3'
+        ? {
+            schema: workspace.schema,
+            isolation: workspace.isolation,
+            changeBranch: workspace.changeBranch,
+            targetBranch: workspace.targetBranch,
+            finish: workspace.finish,
+          }
+        : null,
     findingCodes: [...evidence.findingCodes, ...conflicts.findingCodes],
   });
 }

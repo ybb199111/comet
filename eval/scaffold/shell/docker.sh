@@ -109,6 +109,11 @@ get_dockerfile_hash() {
     local dockerfile="$dir/Dockerfile"
 
     if [[ ! -f "$dockerfile" ]]; then
+        # Fall back to environment/Dockerfile (same layout as docker_build).
+        dockerfile="$dir/environment/Dockerfile"
+    fi
+
+    if [[ ! -f "$dockerfile" ]]; then
         echo ""
         return 1
     fi
@@ -456,7 +461,7 @@ docker_run_claude_loop() {
                 expected_image_id="$2"
                 shift 2
                 ;;
-            --max-turns|--model|--simulator-prompt-file|--decision-reply|--continue-prompt|--decision-pattern|--fresh-resume-marker)
+            --max-turns|--model|--simulator-prompt-file|--decision-reply|--decision-reply-step|--continue-prompt|--decision-pattern|--fresh-resume-marker)
                 loop_args+=("$1" "$2")
                 shift 2
                 ;;

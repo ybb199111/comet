@@ -20,8 +20,10 @@ import type {
   NativeSpecChange,
 } from '../../domains/comet-native/native-types.js';
 import { prepareNativeVerificationEvidence } from '../../domains/comet-native/native-verification-runtime.js';
+import { issueNativeManualEvidenceReceipt } from '../../domains/comet-native/native-verification-receipt-runtime.js';
 import { NATIVE_RUN_STORAGE } from '../../domains/engine/storage-layout.js';
 import { startRunWithStorage, writeRunStateAt } from '../../domains/engine/storage-run.js';
+import { nativeVerificationFixtureReceipt } from './native-verification.js';
 
 const brief = `# Outcome
 Ship the capability.
@@ -57,6 +59,7 @@ export async function prepareNativeArchiveFixture(options: {
   }
   const created = await createNativeChange({
     paths: options.paths,
+    verificationProtocol: 'legacy-v1',
     name: options.name,
     language: 'en',
   });
@@ -95,10 +98,19 @@ export async function prepareNativeArchiveFixture(options: {
     briefRef: verifyState.brief,
     specChanges: verifyState.spec_changes,
   });
+  const acceptanceReceipt = await issueNativeManualEvidenceReceipt({
+    paths: options.paths,
+    name: options.name,
+    acceptanceIds: contract.contract.acceptance.map((criterion) => criterion.id),
+    steps: ['Inspect the archived capability against every acceptance criterion.'],
+    observations: ['The focused Native Archive fixture evidence passed.'],
+    confirmed: true,
+  });
   const machineBlock = serializeNativeVerificationMachineBlock(
     contract.contract.acceptance.map((criterion) => ({
       acceptance_id: criterion.id,
-      evidence_refs: ['native-archive-proof.txt'],
+      status: 'passed' as const,
+      evidence_refs: [acceptanceReceipt.ref],
     })),
   );
   await fs.writeFile(
@@ -122,6 +134,10 @@ Pass.
     state: verifyState,
     result: 'pass',
     reportRef: 'verification.md',
+    receiptRef: await nativeVerificationFixtureReceipt({
+      paths: options.paths,
+      name: options.name,
+    }),
   });
   if (!evidence.ready || !evidence.evidenceRef) {
     throw new Error(`Native Archive fixture evidence is not ready: ${evidence.findingCodes}`);

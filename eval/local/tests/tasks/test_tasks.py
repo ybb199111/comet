@@ -29,6 +29,7 @@ from scaffold.python.native_eval import (
     adapt_prompt_for_native,
     filter_control_workflow_checks as _filter_control_workflow_checks,
     is_control_business_only_run as _is_control_business_only_run,
+    is_observational_baseline_run as _is_observational_baseline_run,
     split_comet_completion_checks as _split_comet_completion_checks,
 )
 from scaffold.python.profiles import resolve_profile_name, run_profile_rubric
@@ -388,6 +389,7 @@ def test_task_treatment(task_name, treatment_name):
 
     events = extract_events(parse_output(result.stdout))
     loop_interaction = conftest._extract_loop_interaction(result.stderr)
+    subject_turns = conftest._extract_subject_turn_evidence(result.stdout)
     outputs = {
         "run_id": run_id,
         "treatment_name": treatment_name,
@@ -418,6 +420,7 @@ def test_task_treatment(task_name, treatment_name):
             "mode": interaction.mode,
             "max_turns": interaction.max_turns,
             **loop_interaction,
+            "subject_turns": subject_turns,
         },
         "case_manifest": case_manifest,
     }
@@ -467,5 +470,5 @@ def test_task_treatment(task_name, treatment_name):
         stderr=result.stderr,
     )
 
-    if failed:
+    if failed and not _is_observational_baseline_run(treatment_name):
         pytest.fail(f"Validation failed: {failed}")

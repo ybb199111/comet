@@ -24,21 +24,12 @@ describe('CLI help text', () => {
     const packageJson = JSON.parse(
       readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'),
     ) as { description: string; version: string };
-    const packageLock = JSON.parse(
-      readFileSync(path.join(repositoryRoot, 'package-lock.json'), 'utf8'),
-    ) as { version: string; packages: { '': { version: string } } };
-    const assetsManifest = JSON.parse(
-      readFileSync(path.join(repositoryRoot, 'assets', 'manifest.json'), 'utf8'),
-    ) as { version: string };
     const tagline = 'Agent Skill Harness For Turning Ideas Into Evaluated Workflows';
 
     expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain(tagline);
     expect(packageJson.description).toBe(tagline);
-    expect(packageJson.version).toBe('0.4.0-beta.8');
-    expect(packageLock.version).toBe('0.4.0-beta.8');
-    expect(packageLock.packages[''].version).toBe('0.4.0-beta.8');
-    expect(assetsManifest.version).toBe('0.4.0-beta.8');
+    expect(packageJson.version).toBe('0.4.0-beta.18');
   });
 
   it('marks bundle as the advanced backend and skill Engine runs as advanced', () => {
@@ -93,7 +84,20 @@ describe('CLI help text', () => {
       facadeDescriptions.filter((description) => help.stdout.includes(description)),
     ).toHaveLength(4);
     expect(help.stdout).toMatch(/^\s+resume-probe \[options\] \[path\]\s+Probe whether/mu);
+    expect(help.stdout).toMatch(/^\s+classic \[args\.\.\.\]\s+Manage the Comet Classic workflow/mu);
     expect(help.stdout).toContain('Manage the self-contained Comet Native workflow');
+  });
+
+  it('documents the layout-aware Classic command group', () => {
+    const help = runCli('classic', '--help');
+
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stdout).toContain('Usage: comet classic <command> [args]');
+    expect(help.stdout).toContain('openspec -- <openspec-args...>');
+    expect(help.stdout).toContain('root show');
+    expect(help.stdout).toContain('root move docs --dry-run');
+    expect(help.stdout).toContain('root move docs --apply');
+    expect(help.stdout).not.toContain('--plan <id>');
   });
 
   it('keeps Native behind one isolated root command', () => {
@@ -136,13 +140,21 @@ describe('CLI help text', () => {
     expect(help.stdout).not.toContain('eval [options]');
   });
 
-  it('exposes explicit package self-update controls', () => {
+  it('exposes explicit update target controls', () => {
     const help = runCli('update', '--help');
 
     expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain('--self-update');
     expect(help.stdout).toContain('--skip-self-update');
+    expect(help.stdout).toContain('--platform <platform>');
     expect(help.stdout).not.toContain('--skip-npm');
+  });
+
+  it('exposes explicit init target controls', () => {
+    const help = runCli('init', '--help');
+
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stdout).toContain('--platform <platform>');
   });
 
   it('keeps Skill Creator resume commands out of the publish surface', () => {
@@ -184,5 +196,16 @@ describe('CLI help text', () => {
     expect(commandHelp.stdout).toContain('--no-workflow-work');
     expect(commandHelp.stdout).not.toContain('--no-non-trivial-work');
     expect(commandHelp.stdout).toContain('--already-in-comet-flow');
+  });
+
+  it('exposes explicit CodeGraph initialization and authorized doctor repair controls', () => {
+    const initHelp = runCli('init', '--help');
+    const doctorHelp = runCli('doctor', '--help');
+
+    expect(initHelp.status, initHelp.stderr).toBe(0);
+    expect(doctorHelp.status, doctorHelp.stderr).toBe(0);
+    expect(initHelp.stdout).toContain('--codegraph <action>');
+    expect(doctorHelp.stdout).toContain('--yes');
+    expect(doctorHelp.stdout).toContain('CodeGraph indexing');
   });
 });

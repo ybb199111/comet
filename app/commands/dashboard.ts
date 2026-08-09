@@ -3,6 +3,7 @@ import { collectDashboardSnapshot } from '../../domains/dashboard/collector.js';
 import { openInBrowser } from '../../domains/dashboard/open-browser.js';
 import { startDashboardServer } from '../../domains/dashboard/server.js';
 
+import { discoverDashboardProjectRoot } from '../../domains/dashboard/project-root.js';
 export interface DashboardOptions {
   port?: number;
   open?: boolean;
@@ -22,7 +23,7 @@ export async function dashboardCommand(
   targetPath: string,
   options: DashboardOptions = {},
 ): Promise<void> {
-  const projectPath = path.resolve(targetPath);
+  const projectPath = await discoverDashboardProjectRoot(path.resolve(targetPath));
 
   if (options.json) {
     const snapshot = await collectDashboardSnapshot(projectPath);

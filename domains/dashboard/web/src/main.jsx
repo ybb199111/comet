@@ -1,4 +1,34 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { App as AntApp, Button, ConfigProvider, Input, Select, Spin, Tooltip } from 'antd';
+import {
+  Alert,
+  Badge,
+  Card as AntCard,
+  Drawer,
+  Empty,
+  Layout,
+  Menu,
+  Progress,
+  Steps,
+  Tabs,
+} from 'antd';
+import {
+  AppstoreOutlined,
+  BranchesOutlined,
+  BulbOutlined,
+  CheckCircleOutlined,
+  CheckOutlined,
+  CopyOutlined,
+  FileTextOutlined,
+  FlagOutlined,
+  MenuOutlined,
+  MoonOutlined,
+  ReloadOutlined,
+  SafetyCertificateOutlined,
+  SearchOutlined,
+  SunOutlined,
+} from '@ant-design/icons';
+import 'antd/dist/reset.css';
 import { createRoot } from 'react-dom/client';
 import {
   extractToc,
@@ -8,9 +38,21 @@ import {
   runMermaid,
 } from './markdown-preview.js';
 import { NativeWorkflowPanel } from './native-workflow-panel.jsx';
+import { useAnimatedNumber } from './use-animated-number.js';
+import { DashboardWorkspaceRegion } from './workspace-layout.jsx';
+import {
+  dashboardResponseError,
+  isStaleNativeDashboardCursorError,
+  refreshDashboardPage,
+  shouldAutoLoadDashboardDetail,
+  shouldShowDashboardDetailLoading,
+} from './dashboard-web-state.js';
 import './styles.css';
 
 const AUTO_REFRESH_MS = 30_000;
+const DASHBOARD_FONT_FAMILY =
+  "'Segoe UI Variable', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif";
+const DASHBOARD_MONO_FONT_FAMILY = "Bahnschrift, 'Cascadia Mono', Consolas, monospace";
 
 function useTheme() {
   const [theme, setTheme] = useState(() => {
@@ -26,9 +68,16 @@ function useTheme() {
     return initial;
   });
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    root.classList.add('theme-switching');
+    root.setAttribute('data-theme', theme);
     localStorage.setItem('comet-theme', theme);
+
+    const frame = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => root.classList.remove('theme-switching'));
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [theme]);
 
   const toggle = useCallback(() => setTheme((t) => (t === 'dark' ? 'light' : 'dark')), []);
@@ -74,41 +123,157 @@ const VERIFY_TONE = {
 };
 
 function App() {
+  const { theme, toggle: toggleTheme } = useTheme();
+
+  return (
+    <ConfigProvider
+      theme={{
+        token: {
+          colorPrimary: theme === 'dark' ? '#7fa8ff' : '#255ed8',
+          colorBgContainer: theme === 'dark' ? '#151923' : '#ffffff',
+          colorBgElevated: theme === 'dark' ? '#1a202b' : '#ffffff',
+          colorBgLayout: theme === 'dark' ? '#0e1420' : '#eef1f5',
+          colorText: theme === 'dark' ? '#edf2fb' : '#101827',
+          colorTextSecondary: theme === 'dark' ? '#aab5c8' : '#5f6979',
+          colorBorder: theme === 'dark' ? '#293345' : '#e3e8ef',
+          colorSplit: theme === 'dark' ? '#293345' : '#edf0f4',
+          colorFillAlter: theme === 'dark' ? '#182131' : '#f6f8fb',
+          colorInfoBg: theme === 'dark' ? '#1a202b' : '#e6f4ff',
+          colorInfoBorder: theme === 'dark' ? '#34597f' : '#91caff',
+          borderRadius: 12,
+          fontFamily: DASHBOARD_FONT_FAMILY,
+          fontFamilyCode: DASHBOARD_MONO_FONT_FAMILY,
+          fontSize: 14,
+          fontSizeHeading2: 26,
+          fontSizeHeading3: 18,
+          fontSizeHeading4: 15,
+        },
+      }}
+    >
+      <AntApp>
+        <DashboardApp theme={theme} onToggleTheme={toggleTheme} />
+      </AntApp>
+    </ConfigProvider>
+  );
+}
+
+function DashboardApp({ theme, onToggleTheme }) {
   const [snapshot, setSnapshot] = useState(null);
+  const [activeProjectId, setActiveProjectId] = useState(null);
   const [workflow, setWorkflow] = useState('classic');
+  const [projects, setProjects] = useState([]);
+  const [projectsReady, setProjectsReady] = useState(false);
+  const [pages, setPages] = useState({ active: null, archived: null, all: null });
+  const [nativePages, setNativePages] = useState({ active: null, archived: null, all: null });
+  const [pageLoading, setPageLoading] = useState(null);
+  const [nativePageLoading, setNativePageLoading] = useState(null);
+  const [nativeSelectedDetail, setNativeSelectedDetail] = useState(null);
+  const [nativeDetailLoading, setNativeDetailLoading] = useState(false);
+  const [nativeDetailError, setNativeDetailError] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
+  const [selectedDetail, setSelectedDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState(null);
   const [tab, setTab] = useState('active');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
   const [artifact, setArtifact] = useState(null);
-  const refreshingRef = useRef(false);
-  const { theme, toggle: toggleTheme } = useTheme();
+  const snapshotRequestRef = useRef(null);
+  const pageRequestRef = useRef(null);
+  const nativePageRequestRef = useRef(null);
+  const nativeDetailRequestRef = useRef(null);
+  const detailRequestRef = useRef(null);
+  const selectedIdRef = useRef(null);
+  const pagesRef = useRef({ active: null, archived: null, all: null });
+  const nativePagesRef = useRef({ active: null, archived: null, all: null });
+  const lastLoadedQueryRef = useRef('');
+  const { message: messageApi } = AntApp.useApp();
+  const toast = useCallback((content, type = 'success') => messageApi[type](content), [messageApi]);
 
   const useDemo = new URLSearchParams(window.location.search).has('demo');
+  const queryRef = useRef(query);
+  const tabRef = useRef(tab);
+  queryRef.current = query;
+  tabRef.current = tab;
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    pagesRef.current = pages;
+  }, [pages]);
 
   const refresh = useCallback(
     async (manual = false) => {
-      if (refreshingRef.current) return;
-
-      refreshingRef.current = true;
+      if (!useDemo && !activeProjectId) return;
+      snapshotRequestRef.current?.abort();
+      const controller = new AbortController();
+      snapshotRequestRef.current = controller;
       if (manual) setLoading(true);
       try {
-        const next = useDemo ? await loadDemoSnapshot() : await fetchSnapshot();
-        setSnapshot(next);
-        setSelectedId((previous) => pickSelected(next, previous));
+        const next = useDemo
+          ? await loadDemoSnapshot()
+          : await fetchDashboardOverview(activeProjectId, controller.signal, queryRef.current);
+        if (snapshotRequestRef.current !== controller || controller.signal.aborted) return;
+
+        if (useDemo) {
+          setSnapshot(next);
+          const nextId = pickSelected(next, selectedIdRef.current);
+          setSelectedId(nextId);
+          setSelectedDetail(findChange(next, nextId));
+          lastLoadedQueryRef.current = query;
+        } else {
+          const initialPage = next.initialChanges;
+          const currentTab = tabRef.current;
+          const currentQuery = queryRef.current;
+          const queryChanged = currentQuery !== lastLoadedQueryRef.current;
+          const nextPages = queryChanged
+            ? { active: initialPage, archived: null, all: null }
+            : {
+                ...pagesRef.current,
+                active: refreshDashboardPage(pagesRef.current.active, initialPage),
+              };
+          const currentPage = currentTab === 'active' ? nextPages.active : nextPages[currentTab];
+          setSnapshot(materializeOverview(next, initialPage));
+          pagesRef.current = nextPages;
+          setPages(nextPages);
+          const nextNativePages = queryChanged
+            ? { active: null, archived: null, all: null }
+            : nativePagesRef.current;
+          nativePagesRef.current = nextNativePages;
+          setNativePages(nextNativePages);
+          const nextId = pickSelectedFromPage(
+            queryChanged && currentTab !== 'active' ? nextPages[currentTab] : currentPage,
+            selectedIdRef.current,
+          );
+          const previousSelectedId = selectedIdRef.current;
+          setSelectedId(nextId);
+          selectedIdRef.current = nextId;
+          if (nextId !== previousSelectedId) {
+            setSelectedDetail(null);
+            setDetailError(null);
+            setDetailLoading(false);
+          }
+          lastLoadedQueryRef.current = currentQuery;
+        }
         if (manual) toast('状态已刷新');
       } catch (error) {
-        toast(`刷新失败：${error.message}`);
+        if (controller.signal.aborted) return;
+        toast(`刷新失败：${error.message}`, 'error');
       } finally {
-        refreshingRef.current = false;
-        if (manual) setLoading(false);
+        if (snapshotRequestRef.current === controller) {
+          snapshotRequestRef.current = null;
+          if (manual) setLoading(false);
+        }
       }
     },
-    [useDemo],
+    [activeProjectId, toast, useDemo],
   );
 
   useEffect(() => {
+    if (!useDemo && (!projectsReady || !activeProjectId)) return undefined;
     void refresh(false);
 
     const timer = window.setInterval(() => {
@@ -116,14 +281,283 @@ function App() {
     }, AUTO_REFRESH_MS);
 
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [activeProjectId, projectsReady, refresh, useDemo]);
 
-  const selected = useMemo(() => findChange(snapshot, selectedId), [snapshot, selectedId]);
-  const visible = useMemo(() => filterChanges(snapshot, tab, query), [snapshot, tab, query]);
+  useEffect(
+    () => () => {
+      snapshotRequestRef.current?.abort();
+      pageRequestRef.current?.abort();
+      nativePageRequestRef.current?.abort();
+      nativeDetailRequestRef.current?.abort();
+      detailRequestRef.current?.abort();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (useDemo) return undefined;
+    let cancelled = false;
+    void fetchDashboardProjects()
+      .then((directory) => {
+        if (cancelled) return;
+        setProjects(directory.projects ?? []);
+        const available = (directory.projects ?? []).filter(
+          (project) => project.availability === 'available',
+        );
+        const remembered = localStorage.getItem('comet-dashboard-project');
+        const next =
+          available.find((project) => project.id === remembered)?.id ?? directory.currentProjectId;
+        setActiveProjectId((previous) => previous ?? next);
+        setProjectsReady(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setProjectsReady(true);
+        toast(`项目列表加载失败：${error.message}`, 'error');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [useDemo]);
+
+  const loadPage = useCallback(
+    async (nextTab, append = false) => {
+      if (useDemo || !activeProjectId) return;
+      if (append && pageRequestRef.current) return;
+      const existing = pagesRef.current[nextTab];
+      if (append && !existing?.nextCursor) return;
+      pageRequestRef.current?.abort();
+      const controller = new AbortController();
+      pageRequestRef.current = controller;
+      setPageLoading(nextTab);
+      try {
+        const page = await fetchDashboardChangePage(activeProjectId, nextTab, {
+          cursor: append ? existing?.nextCursor : undefined,
+          query,
+          signal: controller.signal,
+        });
+        if (pageRequestRef.current !== controller || controller.signal.aborted) return;
+        const merged =
+          append && existing ? { ...page, items: [...existing.items, ...page.items] } : page;
+        setPages((previous) => ({ ...previous, [nextTab]: merged }));
+        setSnapshot((previous) =>
+          previous ? updateSnapshotChangeRows(previous, nextTab, merged.items) : previous,
+        );
+        lastLoadedQueryRef.current = query;
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        toast(`变更列表加载失败：${error.message}`, 'error');
+      } finally {
+        if (pageRequestRef.current === controller) {
+          pageRequestRef.current = null;
+          setPageLoading(null);
+        }
+      }
+    },
+    [activeProjectId, query, toast, useDemo],
+  );
+
+  useEffect(() => {
+    if (useDemo || !snapshot || !activeProjectId || query === lastLoadedQueryRef.current) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      snapshotRequestRef.current?.abort();
+      pageRequestRef.current?.abort();
+      nativePageRequestRef.current?.abort();
+      setPages({ active: null, archived: null, all: null });
+      pagesRef.current = { active: null, archived: null, all: null };
+      setNativePages({ active: null, archived: null, all: null });
+      nativePagesRef.current = { active: null, archived: null, all: null };
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [activeProjectId, query, snapshot, useDemo]);
+
+  useEffect(() => {
+    if (useDemo || !snapshot || !activeProjectId || pages[tab]) return;
+    void loadPage(tab);
+  }, [activeProjectId, loadPage, pages, snapshot, tab, useDemo]);
+
+  const loadNativePage = useCallback(
+    async (nextTab, append = false) => {
+      if (useDemo || workflow !== 'native' || !activeProjectId || !snapshot?.native) return;
+      if (append && nativePageRequestRef.current) return;
+      const existing = nativePagesRef.current[nextTab];
+      if (append && !existing?.nextCursor) return;
+      nativePageRequestRef.current?.abort();
+      const controller = new AbortController();
+      nativePageRequestRef.current = controller;
+      setNativePageLoading(nextTab);
+      try {
+        const page = await fetchDashboardNativeChangePage(activeProjectId, nextTab, {
+          cursor: append ? existing?.nextCursor : undefined,
+          query,
+          signal: controller.signal,
+        });
+        if (nativePageRequestRef.current !== controller || controller.signal.aborted) return;
+        const merged =
+          append && existing ? { ...page, items: [...existing.items, ...page.items] } : page;
+        const nextPages = { ...nativePagesRef.current, [nextTab]: merged };
+        nativePagesRef.current = nextPages;
+        setNativePages(nextPages);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        if (append && isStaleNativeDashboardCursorError(error)) {
+          const resetPages = { ...nativePagesRef.current, [nextTab]: null };
+          nativePagesRef.current = resetPages;
+          setNativePages(resetPages);
+          toast('Native 变更列表已更新，正在重新加载第一页。', 'info');
+          return;
+        }
+        toast(`Native 变更列表加载失败：${error.message}`, 'error');
+      } finally {
+        if (nativePageRequestRef.current === controller) {
+          nativePageRequestRef.current = null;
+          setNativePageLoading(null);
+        }
+      }
+    },
+    [activeProjectId, query, snapshot, toast, useDemo, workflow],
+  );
+
+  const selectNativeChange = useCallback(
+    async (change) => {
+      if (!change) return;
+      setNativeDetailError(null);
+      if (useDemo) {
+        setNativeSelectedDetail(change);
+        return;
+      }
+      if (!activeProjectId) return;
+      nativeDetailRequestRef.current?.abort();
+      const controller = new AbortController();
+      nativeDetailRequestRef.current = controller;
+      setNativeDetailLoading(true);
+      try {
+        const detail = await fetchDashboardNativeChangeDetail(
+          activeProjectId,
+          change,
+          controller.signal,
+        );
+        if (nativeDetailRequestRef.current !== controller || controller.signal.aborted) return;
+        setNativeSelectedDetail(detail);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setNativeDetailError({
+          change,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        toast(`Native 变更详情加载失败：${error.message}`, 'error');
+      } finally {
+        if (nativeDetailRequestRef.current === controller) {
+          nativeDetailRequestRef.current = null;
+          setNativeDetailLoading(false);
+        }
+      }
+    },
+    [activeProjectId, toast, useDemo],
+  );
+
+  useEffect(() => {
+    if (useDemo || workflow !== 'native' || !snapshot?.native || nativePages[tab]) return;
+    void loadNativePage(tab);
+  }, [loadNativePage, nativePages, snapshot, tab, useDemo, workflow]);
+
+  const selected = selectedDetail;
+  const visible = useMemo(
+    () => (useDemo ? filterChanges(snapshot, tab, query) : (pages[tab]?.items ?? [])),
+    [pages, query, snapshot, tab, useDemo],
+  );
+  const activePage = pages[tab];
+  const visibleTotal = useDemo ? visible.length : (activePage?.total ?? visible.length);
+  const nativePage = nativePages[tab];
+  const nativeOverviewTotal =
+    tab === 'active'
+      ? (snapshot?.native?.activeChangeCount ?? 0)
+      : tab === 'archived'
+        ? (snapshot?.native?.archivedChangeCount ?? 0)
+        : (snapshot?.native?.totalChangeCount ?? 0);
+  const nativeVisibleTotal = useDemo
+    ? (snapshot?.native?.changes?.length ?? 0)
+    : (nativePage?.total ?? nativeOverviewTotal);
+
+  const selectChange = useCallback(
+    async (id) => {
+      selectedIdRef.current = id;
+      setSelectedId(id);
+      setDetailError(null);
+      if (useDemo) {
+        setSelectedDetail(findChange(snapshot, id));
+        return;
+      }
+      if (!activeProjectId) return;
+      detailRequestRef.current?.abort();
+      const controller = new AbortController();
+      detailRequestRef.current = controller;
+      setDetailLoading(true);
+      try {
+        const detail = await fetchDashboardChangeDetail(activeProjectId, id, controller.signal);
+        if (detailRequestRef.current !== controller || controller.signal.aborted) return;
+        setSelectedDetail(detail);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setDetailError({ id, message: error instanceof Error ? error.message : String(error) });
+        toast(`变更详情加载失败：${error.message}`, 'error');
+      } finally {
+        if (detailRequestRef.current === controller) {
+          detailRequestRef.current = null;
+          setDetailLoading(false);
+        }
+      }
+    },
+    [activeProjectId, snapshot, toast, useDemo],
+  );
+
+  useEffect(() => {
+    if (useDemo || !snapshot || !activeProjectId) return;
+    if (
+      !shouldAutoLoadDashboardDetail({
+        detailLoading,
+        selectedId,
+        selectedDetailId: selectedDetail?.id ?? null,
+        visibleIds: visible.map((change) => change.id),
+        failedDetailId: detailError?.id ?? null,
+      })
+    )
+      return;
+
+    const nextId = visible[0]?.id ?? null;
+    detailRequestRef.current?.abort();
+    if (!nextId) {
+      selectedIdRef.current = null;
+      setSelectedId(null);
+      setSelectedDetail(null);
+      setDetailLoading(false);
+      return;
+    }
+    void selectChange(nextId);
+  }, [
+    activeProjectId,
+    detailLoading,
+    detailError,
+    selectChange,
+    selectedDetail,
+    selectedId,
+    snapshot,
+    useDemo,
+    visible,
+  ]);
+
+  const selectTab = useCallback((nextTab) => setTab(nextTab), []);
 
   return (
-    <main className="min-h-screen bg-surface text-fg antialiased lg:grid lg:grid-cols-[var(--rail-w)_1fr]">
-      <Sidebar open={railOpen} onClose={() => setRailOpen(false)} />
+    <main className="dashboard-workbench min-h-screen bg-surface text-fg antialiased lg:grid lg:grid-cols-[var(--rail-w)_1fr]">
+      <AntSidebar
+        open={railOpen}
+        workflow={workflow}
+        onWorkflow={setWorkflow}
+        onClose={() => setRailOpen(false)}
+      />
       {railOpen && (
         <button
           className="fixed inset-0 z-40 bg-black/30 lg:hidden"
@@ -134,42 +568,88 @@ function App() {
       <section className="min-w-0">
         <Topbar
           project={snapshot?.project}
-          workflow={workflow}
-          onWorkflow={(nextWorkflow) => {
-            setWorkflow(nextWorkflow);
+          projects={projects}
+          activeProjectId={activeProjectId}
+          onProjectSelect={(nextProjectId) => {
+            localStorage.setItem('comet-dashboard-project', nextProjectId);
+            snapshotRequestRef.current?.abort();
+            pageRequestRef.current?.abort();
+            nativePageRequestRef.current?.abort();
+            nativeDetailRequestRef.current?.abort();
+            detailRequestRef.current?.abort();
+            setActiveProjectId(nextProjectId);
+            setSnapshot(null);
+            setPages({ active: null, archived: null, all: null });
+            pagesRef.current = { active: null, archived: null, all: null };
+            setNativePages({ active: null, archived: null, all: null });
+            nativePagesRef.current = { active: null, archived: null, all: null };
+            setNativeSelectedDetail(null);
+            setNativeDetailError(null);
+            setSelectedId(null);
+            selectedIdRef.current = null;
+            setSelectedDetail(null);
+            setDetailError(null);
             setQuery('');
+            setRailOpen(false);
           }}
           loading={loading}
           query={query}
           onQuery={setQuery}
           onMenu={() => setRailOpen(true)}
           onRefresh={() => refresh(true)}
-          autoRefreshMs={AUTO_REFRESH_MS}
           theme={theme}
-          onToggleTheme={toggleTheme}
+          onToggleTheme={onToggleTheme}
         />
-        <div className="px-4 pb-12 pt-5 sm:px-6 lg:px-8">
-          {!snapshot ? (
-            <LoadingState />
-          ) : workflow === 'native' ? (
-            <NativeWorkflowPanel
-              native={snapshot.native}
-              git={snapshot.git}
-              query={query}
-              onPreview={setArtifact}
-            />
-          ) : (
-            <Dashboard
-              snapshot={snapshot}
-              visible={visible}
-              selected={selected}
-              selectedId={selectedId}
-              tab={tab}
-              onTab={setTab}
-              onSelect={setSelectedId}
-              onPreview={setArtifact}
-            />
-          )}
+        <div className="dashboard-content-shell">
+          <div className="dashboard-content-inner">
+            {!snapshot ? (
+              <LoadingState />
+            ) : workflow === 'native' ? (
+              <NativeWorkflowPanel
+                native={snapshot.native}
+                git={snapshot.git}
+                query={query}
+                tab={tab}
+                onTab={selectTab}
+                pagedChanges={useDemo ? null : (nativePage?.items ?? [])}
+                total={nativeVisibleTotal}
+                hasMore={Boolean(nativePage?.nextCursor)}
+                pageLoading={nativePageLoading === tab || (!useDemo && !nativePage)}
+                onLoadMore={() => loadNativePage(tab, true)}
+                selectedDetail={nativeSelectedDetail}
+                detailLoading={nativeDetailLoading}
+                detailError={nativeDetailError}
+                onSelect={selectNativeChange}
+                onRetryDetail={() =>
+                  nativeDetailError?.change && selectNativeChange(nativeDetailError.change)
+                }
+                onPreview={setArtifact}
+                onCopyChangeName={(name) =>
+                  copyText(name)
+                    .then(() => toast('Change 名称已复制'))
+                    .catch(() => toast('复制 Change 名称失败', 'error'))
+                }
+              />
+            ) : (
+              <Dashboard
+                snapshot={snapshot}
+                visible={visible}
+                visibleTotal={visibleTotal}
+                selected={selected}
+                selectedId={selectedId}
+                tab={tab}
+                onTab={selectTab}
+                onSelect={selectChange}
+                hasMore={Boolean(activePage?.nextCursor)}
+                pageLoading={pageLoading === tab}
+                onLoadMore={() => loadPage(tab, true)}
+                detailLoading={detailLoading}
+                detailError={detailError}
+                onRetryDetail={() => selectedId && selectChange(selectedId)}
+                onPreview={setArtifact}
+              />
+            )}
+          </div>
         </div>
       </section>
       <ArtifactDrawer artifact={artifact} onClose={() => setArtifact(null)} />
@@ -177,407 +657,202 @@ function App() {
   );
 }
 
-function Sidebar({ open, onClose }) {
-  return (
-    <aside
-      className={[
-        'fixed inset-y-0 left-0 z-50 flex w-[var(--rail-w)] flex-col gap-5 border-r border-border bg-bg px-4 py-5 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0',
-        open ? 'translate-x-0' : '-translate-x-full',
-      ].join(' ')}
-    >
-      <div className="flex items-start gap-2 px-2 py-1">
-        <img src="/favicon.png" alt="Comet" className="size-7 rounded-[7px]" />
-        <div className="min-w-0">
-          <div className="truncate text-base font-bold leading-tight">Comet Dashboard</div>
-          <div className="mt-0.5 text-[11px] leading-none text-meta">v0.0.1</div>
-        </div>
-      </div>
-      <nav>
-        <div className="mb-2 mt-4 px-2 text-[11px] font-semibold uppercase text-meta">工作区</div>
-        <button
-          className="flex w-full items-center gap-3 rounded-xl bg-accent-soft px-3 py-2 text-left text-sm font-medium text-accent-active"
-          onClick={onClose}
-        >
-          <span className="text-lg leading-none">≡</span>
-          变更
-        </button>
-      </nav>
-      <div className="mt-auto px-2 text-[11px] leading-relaxed text-meta">
-        只读监控视图
-        <br />
-        基于 comet 流程产物
-      </div>
-    </aside>
-  );
-}
-
 function Topbar({
   project,
-  workflow,
-  onWorkflow,
   loading,
   query,
   onQuery,
+  projects,
+  activeProjectId,
+  onProjectSelect,
   onMenu,
   onRefresh,
-  autoRefreshMs,
   theme,
   onToggleTheme,
 }) {
-  const refreshSeconds = Math.round(autoRefreshMs / 1000);
-
   return (
-    <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-border-soft bg-surface/80 px-4 py-3 backdrop-blur-xl sm:px-6 lg:px-8">
-      <button
-        className="grid size-10 place-items-center rounded-xl text-fg-2 hover:bg-bg lg:hidden"
+    <header className="comet-workbench-header sticky top-0 z-30 border-b border-border-soft bg-surface/90 backdrop-blur-xl">
+      <Button
+        className="comet-header-menu lg:hidden"
+        type="text"
+        icon={<MenuOutlined />}
         onClick={onMenu}
         aria-label="打开导航"
-      >
-        ☰
-      </button>
-      <div className="flex min-w-0 items-center gap-3">
-        <div className="min-w-0 leading-tight">
-          <div className="truncate text-base font-semibold">项目仪表盘</div>
-          <div className="truncate text-xs text-meta">{project?.path ?? '—'}</div>
-        </div>
-        <WorkflowSwitch workflow={workflow} onWorkflow={onWorkflow} />
+      />
+      <div className="comet-header-context">
+        <Select
+          className="comet-project-select"
+          value={activeProjectId ?? undefined}
+          placeholder={project?.name ?? '选择项目'}
+          showSearch
+          optionFilterProp="searchText"
+          optionLabelProp="selectedLabel"
+          classNames={{ popup: { root: 'comet-project-select-dropdown' } }}
+          onChange={onProjectSelect}
+          options={projects.map((entry) => ({
+            value: entry.id,
+            disabled: entry.availability !== 'available',
+            searchText: `${entry.name} ${entry.path}`,
+            selectedLabel: entry.name,
+            label: (
+              <span className="comet-project-option">
+                <strong className="comet-project-option-name">{entry.name}</strong>
+                <small className="comet-project-option-path">{entry.path}</small>
+              </span>
+            ),
+          }))}
+        />
       </div>
-      <label className="relative ml-auto w-[clamp(180px,24vw,300px)] max-sm:hidden">
-        <SearchIcon className="absolute left-3 top-1/2 size-5 -translate-y-1/2 text-meta" />
-        <input
+      <div className="comet-header-search">
+        <Input
           value={query}
           onChange={(event) => onQuery(event.target.value)}
-          className="h-10 w-full rounded-full border border-border bg-bg pl-10 pr-4 text-sm outline-none focus:border-accent focus:ring-4 focus:ring-accent/20"
-          placeholder="搜索变更..."
-          type="search"
+          prefix={<SearchOutlined className="text-meta" />}
+          placeholder="搜索变更、产物或文件…"
+          allowClear
         />
-      </label>
-      <span className="hidden rounded-full bg-bg px-3 py-2 text-xs font-medium text-meta md:inline-flex">
-        自动刷新 · {refreshSeconds} 秒
-      </span>
-      <button
-        className="rounded-full border border-border bg-bg px-4 py-2 text-sm font-medium text-fg-2 hover:bg-surface"
-        disabled={loading}
-        onClick={onRefresh}
-      >
-        {loading ? '刷新中' : '立即刷新'}
-      </button>
-      <button
-        className="grid size-10 place-items-center rounded-xl text-fg-2 transition-colors hover:bg-bg hover:text-fg"
-        onClick={onToggleTheme}
-        aria-label={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'}
-        title={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'}
-      >
-        {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
-      </button>
+      </div>
+      <div className="comet-header-actions">
+        <Tooltip title="立即刷新">
+          <Button
+            className="comet-refresh-button"
+            icon={<ReloadOutlined />}
+            loading={loading}
+            onClick={onRefresh}
+            aria-label="立即刷新"
+          />
+        </Tooltip>
+        <Tooltip title={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'}>
+          <Button
+            className="hidden sm:inline-flex"
+            type="text"
+            icon={theme === 'dark' ? <SunOutlined /> : <MoonOutlined />}
+            onClick={onToggleTheme}
+            aria-label={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'}
+          />
+        </Tooltip>
+      </div>
     </header>
   );
 }
 
-function WorkflowSwitch({ workflow, onWorkflow }) {
-  return (
-    <div
-      className="relative grid w-[140px] shrink-0 grid-cols-2 rounded-xl border border-border-soft bg-bg/70 p-0.5 shadow-sm backdrop-blur"
-      role="group"
-      aria-label="工作流模式"
-    >
-      <span
-        className={[
-          'pointer-events-none absolute bottom-0.5 left-0.5 top-0.5 w-[calc(50%-2px)] rounded-[9px] border border-accent/15 bg-accent-soft shadow-[0_1px_3px_rgba(15,23,42,0.08)] transition-transform duration-200 ease-out',
-          workflow === 'native' ? 'translate-x-full' : 'translate-x-0',
-        ].join(' ')}
-        aria-hidden="true"
-      />
-      {['classic', 'native'].map((item) => {
-        const selected = workflow === item;
-        const label = item === 'classic' ? 'Classic' : 'Native';
-        return (
-          <button
-            key={item}
-            type="button"
-            aria-pressed={selected}
-            className={[
-              'relative z-10 rounded-[9px] px-2 py-1.5 text-[11px] font-semibold leading-none tracking-[0.01em] transition-colors duration-200',
-              selected ? 'text-accent-active' : 'text-muted hover:text-fg',
-            ].join(' ')}
-            onClick={() => onWorkflow(item)}
-          >
-            {label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function SunIcon() {
-  return (
-    <svg
-      className="size-5"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="12" cy="12" r="5" />
-      <line x1="12" y1="1" x2="12" y2="3" />
-      <line x1="12" y1="21" x2="12" y2="23" />
-      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-      <line x1="1" y1="12" x2="3" y2="12" />
-      <line x1="21" y1="12" x2="23" y2="12" />
-      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-    </svg>
-  );
-}
-
-function MoonIcon() {
-  return (
-    <svg
-      className="size-5"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-    </svg>
-  );
-}
-
-function SearchIcon({ className }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.25"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="11" cy="11" r="7" />
-      <path d="m16.5 16.5 4 4" />
-    </svg>
-  );
-}
-
-function Dashboard({ snapshot, visible, selected, selectedId, tab, onTab, onSelect, onPreview }) {
-  const isEmpty = snapshot.changes.active.length + snapshot.changes.archived.length === 0;
+function Dashboard({
+  snapshot,
+  visible,
+  visibleTotal,
+  selected,
+  selectedId,
+  tab,
+  onTab,
+  onSelect,
+  hasMore,
+  pageLoading,
+  onLoadMore,
+  detailLoading,
+  detailError,
+  onRetryDetail,
+  onPreview,
+}) {
+  const hasClassicChanges = snapshot.summary.activeChanges + snapshot.summary.archivedChanges > 0;
+  const classicWarning = snapshot.classicError && hasClassicChanges;
+  const detailPending = shouldShowDashboardDetailLoading({
+    detailLoading,
+    selectedId,
+    selectedDetailId: selected?.id ?? null,
+    failedDetailId: detailError?.id ?? null,
+  });
   return (
     <div className="mx-auto min-w-0 max-w-dashboard">
       <SectionHead
         title="项目概览"
         hint={`生成于 ${formatTimestamp(snapshot.project.generatedAt)}`}
       />
-      <SummaryCards snapshot={snapshot} />
+      <WorkflowSuggestion
+        command={selected?.next?.command}
+        description={selected?.next?.description}
+      />
+      <AntSummaryCards snapshot={snapshot} />
       <SectionHead title="变更工作区" hint="查看文件产物与项目进度" />
-      {isEmpty ? (
+      {snapshot.classicError && !hasClassicChanges ? (
+        <ClassicErrorState error={snapshot.classicError} />
+      ) : !hasClassicChanges ? (
         <EmptyState />
       ) : (
-        <div className="grid min-w-0 items-start gap-5 xl:grid-cols-[minmax(260px,320px)_minmax(0,1fr)] 2xl:grid-cols-[minmax(260px,320px)_minmax(0,1fr)_minmax(260px,320px)]">
-          <ChangesExplorer
-            visible={visible}
-            selectedId={selectedId}
-            tab={tab}
-            onTab={onTab}
-            onSelect={onSelect}
+        <>
+          {classicWarning ? <ClassicWarning error={snapshot.classicError} /> : null}
+          <DashboardWorkspaceRegion
+            leftClassName="dashboard-workspace-left-inner-scroll"
+            stableFrame
+            left={
+              <AntChangesExplorer
+                visible={visible}
+                total={visibleTotal}
+                selectedId={selectedId}
+                tab={tab}
+                onTab={onTab}
+                onSelect={onSelect}
+                hasMore={hasMore}
+                pageLoading={pageLoading}
+                onLoadMore={onLoadMore}
+              />
+            }
+            center={
+              selected ? (
+                <AntChangeDetail change={selected} onPreview={onPreview} />
+              ) : detailPending ? (
+                <div className="change-detail dashboard-change-detail-loading min-w-0 rounded-lg bg-bg p-10 text-center text-sm text-muted shadow-raised">
+                  正在加载变更详情…
+                </div>
+              ) : detailError ? (
+                <div className="change-detail min-w-0 rounded-lg bg-bg p-10 text-center text-sm text-danger shadow-raised">
+                  <p role="alert">变更详情加载失败：{detailError.message}</p>
+                  <Button className="mt-4" onClick={onRetryDetail}>
+                    重试
+                  </Button>
+                </div>
+              ) : null
+            }
+            right={
+              selected ? (
+                <SidePanel change={selected} git={snapshot.git} onPreview={onPreview} />
+              ) : null
+            }
           />
-          {selected && <ChangeDetail change={selected} onPreview={onPreview} />}
-          {selected && <SidePanel change={selected} git={snapshot.git} onPreview={onPreview} />}
-        </div>
+        </>
       )}
     </div>
+  );
+}
+
+function WorkflowSuggestion({ command, description }) {
+  return (
+    <section className="dashboard-priority-banner" role="status" aria-label="工作流建议">
+      <div className="dashboard-priority-title">
+        <BulbOutlined aria-hidden="true" />
+        <span>下一步建议</span>
+      </div>
+      <p>
+        {command ? (
+          <>
+            优先执行 <code>{command}</code>
+            {description ? `，${description}` : '，完成当前工作流阶段。'}
+          </>
+        ) : (
+          '当前变更没有待执行动作，可以继续检查产物与验证结果。'
+        )}
+      </p>
+    </section>
   );
 }
 
 function SectionHead({ title, hint }) {
   return (
     <div className="mb-4 mt-6 flex flex-wrap items-baseline gap-3 first:mt-2">
-      <h2 className="text-[28px] font-bold leading-tight">{title}</h2>
-      <span className="text-sm text-muted">{hint}</span>
+      <h2 className="dashboard-section-heading text-[20px] font-semibold leading-[1.3] tracking-[-0.018em]">
+        {title}
+      </h2>
+      <span className="dashboard-section-hint text-[13px] leading-5 text-muted">{hint}</span>
     </div>
-  );
-}
-
-function SummaryCards({ snapshot }) {
-  const cards = [
-    ['活跃变更', snapshot.summary.activeChanges, '当前 repo 中', '进行中'],
-    ['已归档变更', snapshot.summary.archivedChanges, '历史迭代', '已完成'],
-    [
-      'Verify 失败',
-      snapshot.summary.verifyFailed,
-      snapshot.summary.verifyFailed ? '需要处理' : '全部通过',
-      snapshot.summary.verifyFailed ? '阻塞' : '健康',
-    ],
-    [
-      '未完成任务',
-      snapshot.summary.tasksIncomplete,
-      '跨变更统计',
-      snapshot.summary.tasksIncomplete ? '待办' : '清零',
-    ],
-    [
-      'Git 未提交',
-      snapshot.summary.dirtyFiles,
-      'verify 前需复核',
-      snapshot.summary.dirtyFiles ? '未提交' : '干净',
-    ],
-  ];
-  return (
-    <section className="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
-      {cards.map(([label, value, note, tag]) => (
-        <SummaryCard
-          key={label}
-          label={label}
-          value={value}
-          note={note}
-          tag={tag}
-          animationKey={`${snapshot.project.generatedAt}-${label}`}
-        />
-      ))}
-    </section>
-  );
-}
-
-function SummaryCard({ label, value, note, tag, animationKey }) {
-  const animatedValue = useAnimatedNumber(value, 850, animationKey);
-
-  return (
-    <article className="summary-card-glow relative overflow-hidden rounded-lg bg-bg p-5 shadow-raised transition-shadow duration-200 hover:shadow-lg">
-      <div className="text-sm font-medium text-muted">{label}</div>
-      <div className="mt-1 text-[40px] font-bold leading-none tabular-nums">
-        {Math.round(animatedValue)}
-      </div>
-      <div className="mt-2 truncate text-xs text-meta">{note}</div>
-      <span className="absolute right-5 top-5 rounded-full bg-surface px-2.5 py-1 text-[11px] font-semibold text-fg-2">
-        {tag}
-      </span>
-    </article>
-  );
-}
-
-function ChangesExplorer({ visible, selectedId, tab, onTab, onSelect }) {
-  return (
-    <aside className="rounded-lg bg-bg shadow-raised">
-      <div className="flex items-center border-b border-border-soft px-5 py-4">
-        <h3 className="font-semibold">Changes Explorer</h3>
-        <span className="ml-auto rounded-full bg-surface px-3 py-1 text-xs text-fg-2">
-          {visible.length} 个
-        </span>
-      </div>
-      <div className="p-4">
-        <div className="mb-4 inline-flex rounded-xl bg-surface p-1">
-          {[
-            ['active', '活跃'],
-            ['archived', '已归档'],
-            ['all', '全部'],
-          ].map(([value, label]) => (
-            <button
-              key={value}
-              className={`rounded-lg px-3 py-1.5 text-sm ${tab === value ? 'bg-bg text-fg shadow-sm' : 'text-muted'}`}
-              onClick={() => onTab(value)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <div className="space-y-2">
-          {visible.length === 0 ? (
-            <div className="py-8 text-center text-sm text-muted">
-              {tab === 'active'
-                ? '暂无活跃变更'
-                : tab === 'archived'
-                  ? '暂无已归档变更'
-                  : '暂无变更'}
-            </div>
-          ) : (
-            visible.map((change) => (
-              <ChangeCard
-                key={change.id}
-                change={change}
-                active={change.id === selectedId}
-                onClick={() => onSelect(change.id)}
-              />
-            ))
-          )}
-        </div>
-      </div>
-    </aside>
-  );
-}
-
-function ChangeCard({ change, active, onClick }) {
-  const percent = change.tasks.total
-    ? Math.round((change.tasks.completed / change.tasks.total) * 100)
-    : 0;
-  return (
-    <button
-      className={`w-full rounded-xl border p-3 text-left transition-all duration-200 ${active ? 'border-accent/30 bg-accent-softer shadow-sm' : 'border-transparent hover:bg-surface hover:border-border-soft'}`}
-      onClick={onClick}
-    >
-      <div className="flex items-start gap-2">
-        <span className="mt-1 text-xs text-meta">◇</span>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] font-semibold">{change.displayName}</div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-meta">
-            <span>{phaseLabel(change.phase)}</span>
-            <span className="h-1.5 w-16 overflow-hidden rounded-full bg-surface">
-              <span
-                className={`block h-full rounded-full ${percent === 100 ? 'bg-success' : 'bg-accent'}`}
-                style={{ width: `${percent}%` }}
-              />
-            </span>
-            <span>
-              {change.tasks.completed}/{change.tasks.total}
-            </span>
-          </div>
-        </div>
-        <Pill tone={VERIFY_TONE[change.verify.result]}>
-          {VERIFY_LABEL[change.verify.result] ?? '未知'}
-        </Pill>
-      </div>
-    </button>
-  );
-}
-
-function ChangeDetail({ change, onPreview }) {
-  return (
-    <section className="min-w-0 rounded-lg bg-bg shadow-raised">
-      <div className="flex items-start gap-4 border-b border-border-soft px-5 py-4">
-        <div className="min-w-0 flex-1">
-          <h3 className="truncate text-base font-semibold">{change.displayName}</h3>
-          <div className="mt-1 flex flex-wrap gap-3 text-xs text-meta">
-            <span>{change.workflow ?? '—'}</span>
-            <span>更新于 {formatTimestamp(change.updatedAt)}</span>
-            <span className="min-w-0 truncate font-mono">{relativeChangePath(change)}</span>
-          </div>
-        </div>
-        <Pill tone={change.status === 'archived' ? 'ok' : VERIFY_TONE[change.verify.result]}>
-          {change.status === 'archived' ? '已归档' : VERIFY_LABEL[change.verify.result]}
-        </Pill>
-      </div>
-      <div className="space-y-5 p-5">
-        <PhaseStepper
-          phase={change.phase}
-          archived={change.status === 'archived'}
-          next={change.next}
-        />
-        <div className="grid gap-4 md:grid-cols-[1fr_340px]">
-          <ArtifactList change={change} onPreview={onPreview} />
-          <div className="flex flex-col gap-4">
-            <TaskProgress change={change} />
-          </div>
-        </div>
-      </div>
-    </section>
   );
 }
 
@@ -645,7 +920,7 @@ function ArtifactList({ change, onPreview }) {
   const cometArtifacts = grouped.filter((a) => a.source === 'comet');
 
   return (
-    <article className="rounded-xl border border-border-soft bg-bg px-5 py-4">
+    <article className="min-w-0 rounded-xl border border-border-soft bg-bg px-5 py-4">
       <div className="mb-4 flex items-baseline justify-between">
         <h4 className="text-sm font-semibold tracking-tight">关键产物</h4>
         <span className="font-mono text-[12px] text-meta">
@@ -732,41 +1007,6 @@ function ArtifactRow({ artifact, preview, onPreview }) {
   );
 }
 
-function useAnimatedNumber(target, duration = 800, resetKey = target) {
-  const [value, setValue] = useState(0);
-
-  useEffect(() => {
-    const reduceMotion = window.matchMedia?.('(pref-reduced-motion: reduce)').matches;
-    if (reduceMotion) {
-      setValue(target);
-      return undefined;
-    }
-
-    const from = 0;
-    const diff = target;
-    const startedAt = performance.now();
-    let frame = 0;
-
-    setValue(0);
-
-    const tick = (now) => {
-      const t = Math.min(1, (now - startedAt) / duration);
-      const eased = 1 - Math.pow(1 - t, 3);
-      setValue(from + diff * eased);
-      if (t < 1) {
-        frame = requestAnimationFrame(tick);
-      }
-    };
-
-    frame = requestAnimationFrame(tick);
-    return () => {
-      cancelAnimationFrame(frame);
-    };
-  }, [duration, resetKey, target]);
-
-  return value;
-}
-
 function TaskProgress({ change }) {
   const total = change.tasks.total;
   const completed = change.tasks.completed;
@@ -796,7 +1036,7 @@ function TaskProgress({ change }) {
         }`;
 
   return (
-    <article className="rounded-xl border border-border-soft bg-bg px-5 py-4">
+    <article className="min-w-0 rounded-xl border border-border-soft bg-bg px-5 py-4">
       <div className="mb-4 flex items-baseline justify-between">
         <h4 className="text-sm font-semibold tracking-tight">任务进度</h4>
         <span
@@ -905,7 +1145,7 @@ function TaskProgress({ change }) {
 
 function SidePanel({ change, git, onPreview }) {
   return (
-    <aside className="min-h-[480px] space-y-4 xl:col-start-2 2xl:col-start-auto">
+    <aside className="min-h-[480px] space-y-4">
       {change.status === 'archived' ? (
         <ArchiveSummary change={change} />
       ) : (
@@ -1203,7 +1443,7 @@ function ArtifactDrawer({ artifact, onClose }) {
                       await navigator.clipboard.writeText(preview.path);
                       toast('路径已复制');
                     } catch {
-                      toast('复制失败');
+                      toast('复制失败', 'error');
                     }
                   }}
                 >
@@ -1383,11 +1623,38 @@ function Pill({ tone = 'neutral', children }) {
   );
 }
 
+function ClassicWarning({ error }) {
+  return (
+    <div
+      role="status"
+      className="mb-4 rounded-lg border border-warn/30 bg-warn-soft p-4 shadow-card"
+    >
+      <h3 className="font-semibold text-warn">Classic 数据部分读取失败</h3>
+      <p className="mt-1 break-words text-sm text-fg-2">
+        已展示可读取的变更；请检查其余 Classic 产物目录后刷新。{error.message}
+      </p>
+    </div>
+  );
+}
+
+function ClassicErrorState({ error }) {
+  return (
+    <div role="alert" className="rounded-lg border border-danger/30 bg-danger-soft p-6 shadow-card">
+      <h3 className="font-semibold text-danger">Classic 数据读取失败</h3>
+      <p className="mt-2 break-words text-sm text-fg-2">{error.message}</p>
+      <p className="mt-3 text-sm text-muted">
+        请检查 .comet/config.yaml 与 Classic 产物目录，然后刷新 Dashboard。
+      </p>
+    </div>
+  );
+}
+
 function EmptyState() {
   return (
-    <div className="rounded-lg bg-bg p-10 text-center text-sm text-muted shadow-raised">
-      当前无 Comet 迭代。
-    </div>
+    <section className="rounded-lg bg-bg p-12 text-center shadow-raised">
+      <h3 className="text-lg font-semibold tracking-tight">当前没有 Classic change</h3>
+      <p className="mt-2 text-sm text-muted">Classic 变更出现后会在这里展示。</p>
+    </section>
   );
 }
 
@@ -1399,8 +1666,65 @@ function LoadingState() {
   );
 }
 
-async function fetchSnapshot() {
-  const res = await fetch('/api/dashboard', { cache: 'no-store' });
+async function fetchDashboardProjects() {
+  const res = await fetch('/api/dashboard/projects', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function fetchDashboardOverview(projectId, signal, query = '') {
+  const params = new URLSearchParams();
+  if (query.trim()) params.set('q', query.trim());
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  const res = await fetch(
+    `/api/dashboard/projects/${encodeURIComponent(projectId)}/overview${suffix}`,
+    { cache: 'no-store', signal },
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function fetchDashboardChangePage(projectId, status, options = {}) {
+  const params = new URLSearchParams({ status, limit: '5' });
+  if (options.cursor) params.set('cursor', options.cursor);
+  if (options.query?.trim()) params.set('q', options.query.trim());
+  const res = await fetch(
+    `/api/dashboard/projects/${encodeURIComponent(projectId)}/changes?${params.toString()}`,
+    { cache: 'no-store', signal: options.signal },
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function fetchDashboardNativeChangePage(projectId, status, options = {}) {
+  const params = new URLSearchParams({ status, limit: '5' });
+  if (options.cursor) params.set('cursor', options.cursor);
+  if (options.query?.trim()) params.set('q', options.query.trim());
+  const res = await fetch(
+    `/api/dashboard/projects/${encodeURIComponent(projectId)}/native-changes?${params.toString()}`,
+    { cache: 'no-store', signal: options.signal },
+  );
+  if (!res.ok) throw await dashboardResponseError(res);
+  return res.json();
+}
+
+async function fetchDashboardNativeChangeDetail(projectId, change, signal) {
+  const params = new URLSearchParams({ status: change.status, changeName: change.name });
+  if (change.archiveName) params.set('archiveName', change.archiveName);
+  const res = await fetch(
+    `/api/dashboard/projects/${encodeURIComponent(projectId)}/native-change?${params.toString()}`,
+    { cache: 'no-store', signal },
+  );
+  if (!res.ok) throw await dashboardResponseError(res);
+  return res.json();
+}
+
+async function fetchDashboardChangeDetail(projectId, changeId, signal) {
+  const params = new URLSearchParams({ changeId });
+  const res = await fetch(
+    `/api/dashboard/projects/${encodeURIComponent(projectId)}/change?${params.toString()}`,
+    { cache: 'no-store', signal },
+  );
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -1471,9 +1795,7 @@ function filterChanges(snapshot, tab, query) {
 }
 
 function relativeChangePath(change) {
-  return change.status === 'archived'
-    ? `openspec/changes/archive/${change.name}`
-    : `openspec/changes/${change.name}`;
+  return change.relativePath || change.name;
 }
 
 function phaseLabel(phase) {
@@ -1495,13 +1817,370 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function toast(message) {
-  const el = document.getElementById('toast');
-  if (!el) return;
-  el.textContent = message;
-  el.classList.add('show');
-  window.clearTimeout(toast.timer);
-  toast.timer = window.setTimeout(() => el.classList.remove('show'), 2200);
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // 非安全上下文（例如本地预览）没有 Clipboard API 时，保留可用的复制能力。
+    }
+  }
+
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.setAttribute('readonly', '');
+  input.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+  document.body.append(input);
+  input.select();
+  const copied = document.execCommand('copy');
+  input.remove();
+  if (!copied) throw new Error('当前浏览器不支持复制');
 }
 
 createRoot(document.getElementById('root')).render(<App />);
+function AntSidebar({ open, workflow, onWorkflow, onClose }) {
+  const navigation = (
+    <Menu
+      mode="inline"
+      selectedKeys={[workflow]}
+      items={[
+        { key: 'classic', icon: <BranchesOutlined />, label: 'Classic 工作流' },
+        { key: 'native', icon: <FileTextOutlined />, label: 'Native 工作流' },
+      ]}
+      onClick={({ key }) => {
+        onWorkflow(key);
+        onClose();
+      }}
+    />
+  );
+  return (
+    <>
+      <Layout.Sider
+        className="dashboard-sidebar !hidden !bg-bg lg:!block"
+        width={228}
+        theme="light"
+      >
+        <div className="flex h-full flex-col">
+          <div className="dashboard-sidebar-brand flex items-center gap-2">
+            <img src="/favicon.png" alt="Comet" className="size-7 rounded-[7px]" />
+            <div>
+              <strong>Comet Dashboard</strong>
+              <div className="text-xs text-meta">只读工作台</div>
+            </div>
+          </div>
+          <div className="dashboard-sidebar-navigation">
+            <div className="dashboard-sidebar-feature">
+              <AppstoreOutlined aria-hidden="true" />
+              <span>变更工作区</span>
+            </div>
+            <div className="dashboard-sidebar-label">工作流</div>
+            {navigation}
+          </div>
+          <div className="dashboard-sidebar-status">
+            <div className="flex items-center gap-2 font-medium text-fg">
+              <BulbOutlined aria-hidden="true" />
+              工作台状态
+            </div>
+            <div className="mt-2 text-xs text-meta">只读连接 · 自动同步</div>
+          </div>
+        </div>
+      </Layout.Sider>
+      <Drawer title="Comet 工作台" placement="left" open={open} onClose={onClose} size={280}>
+        {navigation}
+      </Drawer>
+    </>
+  );
+}
+
+function AntSummaryCards({ snapshot }) {
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const cards = [
+    ['活跃变更', snapshot.summary.activeChanges, '当前 Classic workflow', '进行中', FlagOutlined],
+    [
+      '已归档变更',
+      snapshot.summary.archivedChanges,
+      '历史变更已归档',
+      '已完成',
+      CheckCircleOutlined,
+    ],
+    [
+      'Verify 失败',
+      snapshot.summary.verifyFailed,
+      '验证结果',
+      snapshot.summary.verifyFailed ? '阻塞' : '健康',
+      SafetyCertificateOutlined,
+    ],
+    [
+      '未完成任务',
+      snapshot.summary.tasksIncomplete,
+      '任务推进情况',
+      snapshot.summary.tasksIncomplete ? '待办' : '清零',
+      CheckOutlined,
+    ],
+    [
+      'Git 未提交',
+      snapshot.summary.dirtyFiles,
+      '工作区状态',
+      snapshot.summary.dirtyFiles ? '未提交' : '干净',
+      BranchesOutlined,
+    ],
+  ];
+  return (
+    <section className="dashboard-summary-strip dashboard-overview-summary-strip">
+      {cards.map(([title, value, note, status, Icon], index) => (
+        <AntSummaryCard
+          key={title}
+          title={title}
+          value={value}
+          note={note}
+          status={status}
+          icon={Icon}
+          tone={`dashboard-summary-tone-${index + 1}`}
+          selected={selectedIndex === index}
+          onClick={() => setSelectedIndex(index)}
+        />
+      ))}
+    </section>
+  );
+}
+
+function AntSummaryCard({ title, value, note, status, icon: Icon, tone, selected, onClick }) {
+  // 进入页面或数值变化时，从 0 滚动到目标值；数值不变则保持，避免每次自动刷新都重滚。
+  const animatedValue = useAnimatedNumber(value, 850, value);
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      className={`dashboard-overview-summary-card dashboard-summary-card dashboard-summary-metric-cell ${tone} ${selected ? 'dashboard-summary-primary' : ''}`}
+      onClick={onClick}
+    >
+      <div className="dashboard-summary-card-top">
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium text-muted">{title}</div>
+          <div className="dashboard-summary-metric mt-1 text-[28px] font-semibold leading-none tabular-nums">
+            {Math.round(animatedValue)}
+          </div>
+        </div>
+        <span className="dashboard-summary-icon" aria-hidden="true">
+          <Icon />
+        </span>
+      </div>
+      <span className="dashboard-summary-status">{status}</span>
+      <div className="mt-2 truncate text-[11px] text-meta">{note}</div>
+    </button>
+  );
+}
+
+function AntChangesExplorer({
+  visible,
+  total,
+  selectedId,
+  tab,
+  onTab,
+  onSelect,
+  hasMore,
+  pageLoading,
+  onLoadMore,
+}) {
+  const items = [
+    ['active', '活跃'],
+    ['archived', '已归档'],
+    ['all', '全部'],
+  ].map(([key, label]) => ({ key, label }));
+  return (
+    <AntCard
+      className="classic-changes-explorer min-w-0"
+      title={
+        <span>
+          Changes Explorer <Badge count={total} showZero className="ml-2" />
+        </span>
+      }
+    >
+      <Tabs
+        activeKey={tab}
+        onChange={onTab}
+        items={items.map((item) => ({
+          ...item,
+          children: (
+            <DashboardChangeList
+              visible={visible}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              hasMore={hasMore}
+              pageLoading={pageLoading}
+              onLoadMore={onLoadMore}
+            />
+          ),
+        }))}
+      />
+    </AntCard>
+  );
+}
+
+function pickSelectedFromPage(page, previous) {
+  const items = page?.items ?? [];
+  if (previous && items.some((change) => change.id === previous)) return previous;
+  return items[0]?.id ?? null;
+}
+
+function materializeOverview(overview, initialPage) {
+  return {
+    ...overview,
+    changes: {
+      active: initialPage?.items ?? [],
+      archived: [],
+    },
+  };
+}
+
+function updateSnapshotChangeRows(snapshot, status, items) {
+  if (status === 'active') {
+    return { ...snapshot, changes: { ...snapshot.changes, active: items } };
+  }
+  if (status === 'archived') {
+    return { ...snapshot, changes: { ...snapshot.changes, archived: items } };
+  }
+  return {
+    ...snapshot,
+    changes: {
+      active: items.filter((change) => change.status === 'active'),
+      archived: items.filter((change) => change.status === 'archived'),
+    },
+  };
+}
+
+function DashboardChangeList({ visible, selectedId, onSelect, hasMore, pageLoading, onLoadMore }) {
+  const listRef = useRef(null);
+  const sentinelRef = useRef(null);
+
+  useEffect(() => {
+    const root = listRef.current;
+    const target = sentinelRef.current;
+    if (!root || !target || !hasMore || !onLoadMore) return undefined;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && !pageLoading) onLoadMore();
+      },
+      { root },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasMore, onLoadMore, pageLoading]);
+
+  const handleScroll = useCallback(
+    (event) => {
+      if (!hasMore || pageLoading || !onLoadMore) return;
+      const { scrollTop, clientHeight, scrollHeight } = event.currentTarget;
+      if (scrollTop > 0 && scrollTop + clientHeight >= scrollHeight - 24) onLoadMore();
+    },
+    [hasMore, onLoadMore, pageLoading],
+  );
+
+  return (
+    <div ref={listRef} className="dashboard-change-list" onScroll={handleScroll}>
+      {visible.length === 0 && !pageLoading ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无变更" />
+      ) : (
+        visible.map((change) => (
+          <div
+            key={change.id}
+            className={`dashboard-change-list-item ${change.id === selectedId ? 'selected' : ''} px-2`}
+          >
+            <Button
+              className={`dashboard-change-row ${change.id === selectedId ? 'dashboard-change-row-selected' : ''}`}
+              type="text"
+              block
+              onClick={() => onSelect(change.id)}
+            >
+              <div className="flex w-full items-center gap-2.5 text-left">
+                <div className="min-w-0 flex-1">
+                  <strong className="block truncate">{change.displayName}</strong>
+                  <span className="mt-0.5 block text-xs text-meta">
+                    {phaseLabel(change.phase)} · {change.tasks.completed}/{change.tasks.total}
+                  </span>
+                  <Progress
+                    percent={
+                      change.tasks.total
+                        ? Math.round((change.tasks.completed / change.tasks.total) * 100)
+                        : 0
+                    }
+                    className="mt-1"
+                    size="small"
+                    showInfo={false}
+                  />
+                </div>
+                <Pill tone={VERIFY_TONE[change.verify.result] ?? 'neutral'}>
+                  {VERIFY_LABEL[change.verify.result] ?? '未知'}
+                </Pill>
+              </div>
+            </Button>
+          </div>
+        ))
+      )}
+      <div ref={sentinelRef} className="py-2 text-center text-xs text-meta" aria-live="polite">
+        {pageLoading ? <Spin size="small" /> : hasMore ? '继续下滑加载更多' : null}
+      </div>
+    </div>
+  );
+}
+
+function AntChangeDetail({ change, onPreview }) {
+  const [copied, setCopied] = useState(false);
+  const current = change.status === 'archived' ? 'archive' : change.phase;
+  const currentIndex = Math.max(
+    0,
+    PHASES.findIndex(([key]) => key === current),
+  );
+  return (
+    <AntCard
+      className="change-detail min-w-0"
+      title={
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate">{change.displayName}</span>
+          <Tooltip title="复制 Change 名称">
+            <Button
+              type="text"
+              size="small"
+              icon={copied ? <CheckOutlined /> : <CopyOutlined />}
+              aria-label={copied ? '已复制 Change 名称' : '复制 Change 名称'}
+              onClick={() =>
+                copyText(change.name)
+                  .then(() => {
+                    setCopied(true);
+                    toast('Change 名称已复制');
+                    window.setTimeout(() => setCopied(false), 1600);
+                  })
+                  .catch(() => toast('复制 Change 名称失败', 'error'))
+              }
+            />
+          </Tooltip>
+        </div>
+      }
+      extra={
+        <Pill tone={change.status === 'archived' ? 'neutral' : VERIFY_TONE[change.verify.result]}>
+          {change.status === 'archived' ? '已归档' : VERIFY_LABEL[change.verify.result]}
+        </Pill>
+      }
+    >
+      <div className="mb-4 text-xs text-meta">
+        {change.workflow ?? '—'} · 更新于 {formatTimestamp(change.updatedAt)} ·{' '}
+        {relativeChangePath(change)}
+      </div>
+      <Steps size="small" current={currentIndex} items={PHASES.map(([, title]) => ({ title }))} />
+      <Alert
+        className="dashboard-next-step-alert"
+        type="info"
+        showIcon
+        title={change.next?.command ? `下一步：${change.next.command}` : '该变更没有待执行的下一步'}
+        description={change.next?.description}
+      />
+      <div className="change-detail-panels grid min-w-0 gap-4">
+        <AntCard size="small" title="关键产物">
+          <ArtifactList change={change} onPreview={onPreview} />
+        </AntCard>
+        <TaskProgress change={change} />
+      </div>
+    </AntCard>
+  );
+}

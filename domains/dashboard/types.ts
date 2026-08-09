@@ -7,7 +7,7 @@
  * reference the JSON payload.
  */
 
-import type { NativeDashboardProjection } from './native-adapter.js';
+import type { NativeDashboardChangeListItem, NativeDashboardProjection } from './native-adapter.js';
 
 export type ChangeStatus = 'active' | 'archived';
 
@@ -97,6 +97,7 @@ export interface ChangeDashboardItem {
   displayName: string;
   status: ChangeStatus;
   path: string;
+  relativePath: string;
   workflow: string | null;
   phase: ChangePhase;
   updatedAt?: string;
@@ -131,6 +132,46 @@ export interface DashboardSummary {
   dirtyFiles: number;
 }
 
+export type DashboardChangeTab = 'active' | 'archived' | 'all';
+
+export interface DashboardChangeListItem {
+  id: string;
+  name: string;
+  displayName: string;
+  status: ChangeStatus;
+  relativePath: string;
+  workflow: string | null;
+  phase: ChangePhase;
+  updatedAt?: string;
+  tasks: Pick<TasksSummary, 'completed' | 'total'>;
+  verify: Pick<VerifySummary, 'result'>;
+}
+
+export interface DashboardChangePage {
+  status: DashboardChangeTab;
+  items: DashboardChangeListItem[];
+  total: number;
+  nextCursor: string | null;
+}
+
+export interface NativeDashboardChangePage {
+  status: DashboardChangeTab;
+  items: NativeDashboardChangeListItem[];
+  total: number;
+  nextCursor: string | null;
+}
+
+export interface DashboardOverview {
+  project: DashboardProject;
+  summary: DashboardSummary;
+  initialChanges: DashboardChangePage;
+  git: GitSnapshot;
+  risks: DashboardRisk[];
+  native?: NativeDashboardProjection;
+  nativeError?: { code: 'native-dashboard-unavailable' };
+  classicError?: { code: 'classic-dashboard-unavailable'; message: string };
+}
+
 export interface DashboardSnapshot {
   project: DashboardProject;
   summary: DashboardSummary;
@@ -142,4 +183,5 @@ export interface DashboardSnapshot {
   risks: DashboardRisk[];
   native?: NativeDashboardProjection;
   nativeError?: { code: 'native-dashboard-unavailable' };
+  classicError?: { code: 'classic-dashboard-unavailable'; message: string };
 }

@@ -37,7 +37,6 @@ import {
 } from '../../../domains/comet-native/native-transition-journal.js';
 import { appendNativeTrajectoryEvent } from '../../../domains/comet-native/native-trajectory.js';
 import { repairNativeTrajectoryTail } from '../../../domains/comet-native/native-trajectory-recovery.js';
-import { advanceNativeChange } from '../../../domains/comet-native/native-transitions.js';
 import type {
   NativeChangeState,
   NativeProjectPaths,
@@ -45,6 +44,7 @@ import type {
   NativeTransitionHooks,
   NativeTransitionJournal,
 } from '../../../domains/comet-native/native-types.js';
+import { advanceNativeChange } from '../../helpers/native-confirmed-transition.js';
 import { nativeVerificationFixtureReport } from '../../helpers/native-verification.js';
 import { readyNativeArchivePreflight } from '../../helpers/native-archive.js';
 import {
@@ -79,6 +79,7 @@ function legacyState(state: NativeChangeState): Record<string, unknown> {
   const legacy: Record<string, unknown> = { ...state };
   delete legacy.minimum_runtime_version;
   delete legacy.revision;
+  delete legacy.verification_protocol;
   delete legacy.operation;
   delete legacy.approved_contract_hash;
   delete legacy.implementation_scope;
@@ -102,6 +103,7 @@ function legacyTransition(journal: NativeTransitionJournal): Record<string, unkn
 
 function v2State(state: NativeChangeState): Record<string, unknown> {
   const previous: Record<string, unknown> = { ...state };
+  delete previous.verification_protocol;
   delete previous.approved_contract_hash;
   delete previous.implementation_scope;
   delete previous.verification_evidence;
@@ -146,7 +148,12 @@ describe('Native transition recovery', () => {
   beforeEach(async () => {
     projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-native-transition-recovery-'));
     paths = await nativeProjectPaths(projectRoot, '.');
-    const state = await createNativeChange({ paths, name: 'recover-transition', language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name: 'recover-transition',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     changeDir = nativeChangeDir(paths, state.name);
     await fs.writeFile(path.join(changeDir, 'brief.md'), brief);
   });
@@ -941,7 +948,7 @@ describe('Native transition recovery', () => {
           name: 'recover-transition',
           evidence: { summary: 'must fail closed before doctor migration' },
         }),
-      ).rejects.toThrow('requires doctor migration');
+      ).rejects.toThrow('run comet native doctor recover-transition --repair before mutating it');
       const inspected = await doctorNativeProject({ paths, name: 'recover-transition' });
       expect(inspected.findings).toContainEqual(
         expect.objectContaining({ code: 'schema-migration-required', repair: 'migrate' }),

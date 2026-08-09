@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
-import { collectDashboardSnapshot } from '../../../domains/dashboard/collector.js';
+import {
+  collectDashboardChangeDetail,
+  collectDashboardChangePage,
+  collectDashboardOverview,
+  collectDashboardSnapshot,
+} from '../../../domains/dashboard/collector.js';
 
 interface ChangeFixture {
   name: string;
@@ -13,14 +18,16 @@ interface ChangeFixture {
   plan?: boolean;
   verifyReport?: string | null; // body or null to skip the file
   status?: 'active' | 'archived';
+  changesPath?: 'openspec/changes' | 'docs/openspec/changes';
 }
 
 async function writeChange(root: string, fixture: ChangeFixture): Promise<void> {
   const status = fixture.status ?? 'active';
+  const changesPath = fixture.changesPath ?? 'openspec/changes';
   const baseDir =
     status === 'archived'
-      ? path.join(root, 'openspec', 'changes', 'archive', fixture.name)
-      : path.join(root, 'openspec', 'changes', fixture.name);
+      ? path.join(root, ...changesPath.split('/'), 'archive', fixture.name)
+      : path.join(root, ...changesPath.split('/'), fixture.name);
   await fs.mkdir(baseDir, { recursive: true });
 
   if (fixture.yaml) {
@@ -57,13 +64,157 @@ describe('collectDashboardSnapshot', () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('returns an empty snapshot when openspec/changes is missing', async () => {
+  it('treats missing Classic roots as an empty state without configuration', async () => {
     const snap = await collectDashboardSnapshot(root);
 
     expect(snap.changes.active).toEqual([]);
     expect(snap.changes.archived).toEqual([]);
     expect(snap.summary.activeChanges).toBe(0);
     expect(snap.summary.archivedChanges).toBe(0);
+    expect(snap.classicError).toBeUndefined();
+  });
+
+  it('collects Classic changes for a Native-only project', async () => {
+    await fs.mkdir(path.join(root, '.comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(root, '.comet', 'config.yaml'),
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows: [native]',
+        'native:',
+        '  artifact_root: docs',
+        '  language: en',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await writeChange(root, {
+      name: 'classic-discovered-alongside-native',
+      yaml: { phase: 'build', workflow: 'classic' },
+    });
+
+    const snap = await collectDashboardSnapshot(root);
+
+    expect(snap.changes.active.map((change) => change.name)).toEqual([
+      'classic-discovered-alongside-native',
+    ]);
+    expect(snap.changes.archived).toEqual([]);
+    expect(snap.classicError).toBeUndefined();
+  });
+
+  it('collects Classic changes from the configured docs layout', async () => {
+    await fs.mkdir(path.join(root, '.comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(root, '.comet', 'config.yaml'),
+      [
+        'schema: comet.project.v1',
+        'default_workflow: classic',
+        'workflows: [classic]',
+        'classic:',
+        '  artifact_layout: docs',
+        '',
+      ].join('\n'),
+    );
+    const changeDir = path.join(root, 'docs', 'openspec', 'changes', 'docs-layout');
+    await fs.mkdir(changeDir, { recursive: true });
+    await fs.writeFile(
+      path.join(changeDir, '.comet.yaml'),
+      ['phase: build', 'workflow: hotfix', 'archived: false', ''].join('\n'),
+    );
+    await fs.writeFile(path.join(changeDir, 'tasks.md'), '- [ ] todo\n');
+
+    const snap = await collectDashboardSnapshot(root);
+
+    expect(snap.changes.active.map((change) => change.name)).toEqual(['docs-layout']);
+    expect(snap.changes.active[0].path).toBe(changeDir);
+    expect(snap.changes.active[0].relativePath).toBe('docs/openspec/changes/docs-layout');
+    expect(snap.classicError).toBeUndefined();
+  });
+
+  it('scans Classic roots despite invalid project config', async () => {
+    await fs.mkdir(path.join(root, '.comet'), { recursive: true });
+    await fs.writeFile(path.join(root, '.comet', 'config.yaml'), 'classic: invalid\n');
+    await writeChange(root, {
+      name: 'must-not-be-guessed',
+      yaml: { phase: 'build', workflow: 'hotfix' },
+      tasks: '- [ ] todo\n',
+    });
+
+    const snap = await collectDashboardSnapshot(root);
+
+    expect(snap.changes.active.map((change) => change.name)).toEqual(['must-not-be-guessed']);
+    expect(snap.classicError).toBeUndefined();
+  });
+
+  it('scans Classic roots despite malformed project config', async () => {
+    await fs.mkdir(path.join(root, '.comet'), { recursive: true });
+    await fs.writeFile(path.join(root, '.comet', 'config.yaml'), 'schema: [broken\n');
+    await writeChange(root, {
+      name: 'must-not-be-scanned',
+      yaml: { phase: 'build', workflow: 'hotfix' },
+      tasks: '- [ ] todo\n',
+    });
+
+    const snap = await collectDashboardSnapshot(root);
+
+    expect(snap.changes.active.map((change) => change.name)).toEqual(['must-not-be-scanned']);
+    expect(snap.classicError).toBeUndefined();
+  });
+
+  it('merges both Classic roots and keeps duplicate names distinct by relative path', async () => {
+    await fs.mkdir(path.join(root, '.comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(root, '.comet', 'config.yaml'),
+      [
+        'schema: comet.project.v1',
+        'default_workflow: classic',
+        'workflows: [classic]',
+        'classic:',
+        '  artifact_layout: docs',
+        '',
+      ].join('\n'),
+    );
+    await writeChange(root, {
+      name: 'shared-change',
+      changesPath: 'openspec/changes',
+      yaml: { phase: 'build', workflow: 'legacy' },
+    });
+    await writeChange(root, {
+      name: 'shared-change',
+      changesPath: 'docs/openspec/changes',
+      yaml: { phase: 'build', workflow: 'docs' },
+    });
+    await writeChange(root, {
+      name: '2026-07-01-shared-archive',
+      changesPath: 'openspec/changes',
+      status: 'archived',
+      yaml: { phase: 'archive', archived: 'true' },
+    });
+    await writeChange(root, {
+      name: '2026-07-01-shared-archive',
+      changesPath: 'docs/openspec/changes',
+      status: 'archived',
+      yaml: { phase: 'archive', archived: 'true' },
+    });
+
+    const snap = await collectDashboardSnapshot(root);
+
+    expect(snap.changes.active).toHaveLength(2);
+    expect(snap.changes.active.map((change) => change.id)).toEqual(
+      expect.arrayContaining([
+        'openspec/changes/shared-change',
+        'docs/openspec/changes/shared-change',
+      ]),
+    );
+    expect(snap.changes.archived).toHaveLength(2);
+    expect(snap.changes.archived.map((change) => change.id)).toEqual(
+      expect.arrayContaining([
+        'openspec/changes/archive/2026-07-01-shared-archive',
+        'docs/openspec/changes/archive/2026-07-01-shared-archive',
+      ]),
+    );
+    expect(snap.classicError).toBeUndefined();
   });
 
   it('collects active changes and ignores the archive directory entry', async () => {
@@ -133,7 +284,7 @@ describe('collectDashboardSnapshot', () => {
 
     expect(snap.changes.archived).toHaveLength(1);
     const archived = snap.changes.archived[0];
-    expect(archived.id).toBe('archive/2026-06-20-context-graph-notes');
+    expect(archived.id).toBe('openspec/changes/archive/2026-06-20-context-graph-notes');
     expect(archived.status).toBe('archived');
     expect(archived.displayName).toBe('context-graph-notes');
     expect(archived.archive).toMatchObject({
@@ -212,6 +363,191 @@ describe('collectDashboardSnapshot', () => {
         }),
       ]),
     );
+  });
+
+  it('does not expose artifacts through project traversal pointers', async () => {
+    const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-dashboard-outside-'));
+    try {
+      const outsidePlan = path.join(outsideRoot, 'plan.md');
+      await fs.writeFile(outsidePlan, '# Outside plan\n');
+      await writeChange(root, {
+        name: 'unsafe-pointer',
+        yaml: {
+          phase: 'build',
+          workflow: 'full',
+          plan: path.relative(root, outsidePlan).replaceAll('\\', '/'),
+        },
+      });
+
+      const snap = await collectDashboardSnapshot(root);
+      const change = snap.changes.active[0];
+
+      expect(change.artifacts.plan).toBe(false);
+      expect(change.artifacts.grouped).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            key: 'plan',
+            exists: false,
+          }),
+        ]),
+      );
+      expect(change.artifactPreviews).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            key: 'plan',
+            content: '# Outside plan\n',
+          }),
+        ]),
+      );
+    } finally {
+      await fs.rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not expose artifacts through a junction outside the project', async () => {
+    const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-dashboard-outside-'));
+    const linkedDirectory = path.join(root, 'docs', 'linked-plans');
+    try {
+      await fs.writeFile(path.join(outsideRoot, 'plan.md'), '# Outside plan\n');
+      await fs.mkdir(path.dirname(linkedDirectory), { recursive: true });
+      try {
+        await fs.symlink(outsideRoot, linkedDirectory, 'junction');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+        throw error;
+      }
+      await writeChange(root, {
+        name: 'unsafe-junction',
+        yaml: {
+          phase: 'build',
+          workflow: 'full',
+          plan: 'docs/linked-plans/plan.md',
+        },
+      });
+
+      const snap = await collectDashboardSnapshot(root);
+      const change = snap.changes.active[0];
+
+      expect(change.artifacts.plan).toBe(false);
+      expect(change.artifactPreviews).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            key: 'plan',
+            content: '# Outside plan\n',
+          }),
+        ]),
+      );
+    } finally {
+      await fs.rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('skips a change directory junction instead of reading project-external state', async () => {
+    const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-dashboard-change-outside-'));
+    const changesRoot = path.join(root, 'openspec', 'changes');
+    const linkedChange = path.join(changesRoot, 'external-change');
+    try {
+      await fs.writeFile(
+        path.join(outsideRoot, '.comet.yaml'),
+        'phase: build\nworkflow: TOP_SECRET\n',
+      );
+      await fs.writeFile(path.join(outsideRoot, 'tasks.md'), '- [ ] external secret task\n');
+      await fs.mkdir(path.join(outsideRoot, 'specs', 'secret'), { recursive: true });
+      await fs.writeFile(
+        path.join(outsideRoot, 'specs', 'secret', 'spec.md'),
+        '# External secret\n',
+      );
+      await fs.mkdir(changesRoot, { recursive: true });
+      try {
+        await fs.symlink(
+          outsideRoot,
+          linkedChange,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+        throw error;
+      }
+
+      const snap = await collectDashboardSnapshot(root);
+
+      expect(snap.changes.active).toEqual([]);
+      expect(JSON.stringify(snap)).not.toContain('TOP_SECRET');
+      expect(JSON.stringify(snap)).not.toContain('external secret');
+    } finally {
+      await fs.rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['changes', 'archive'] as const)(
+    'reports Classic unavailable when the %s root is a junction',
+    async (kind) => {
+      const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-dashboard-root-outside-'));
+      const openSpecRoot = path.join(root, 'openspec');
+      try {
+        await fs.mkdir(openSpecRoot, { recursive: true });
+        const target =
+          kind === 'changes'
+            ? path.join(openSpecRoot, 'changes')
+            : path.join(openSpecRoot, 'changes', 'archive');
+        if (kind === 'archive') {
+          await fs.mkdir(path.dirname(target), { recursive: true });
+        }
+        try {
+          await fs.symlink(outsideRoot, target, process.platform === 'win32' ? 'junction' : 'dir');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+          throw error;
+        }
+
+        const snap = await collectDashboardSnapshot(root);
+
+        expect(snap.changes.active).toEqual([]);
+        expect(snap.changes.archived).toEqual([]);
+        expect(snap.classicError).toMatchObject({
+          code: 'classic-dashboard-unavailable',
+          message: expect.stringMatching(/symbolic link or junction/iu),
+        });
+      } finally {
+        await fs.rm(outsideRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps the readable docs root when the legacy changes root is a junction', async () => {
+    const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-dashboard-root-outside-'));
+    const openSpecRoot = path.join(root, 'openspec');
+    const linkedChanges = path.join(openSpecRoot, 'changes');
+    try {
+      await fs.mkdir(openSpecRoot, { recursive: true });
+      await writeChange(root, {
+        name: 'docs-survivor',
+        changesPath: 'docs/openspec/changes',
+        yaml: { phase: 'build', workflow: 'docs' },
+      });
+      try {
+        await fs.symlink(
+          outsideRoot,
+          linkedChanges,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+        throw error;
+      }
+
+      const snap = await collectDashboardSnapshot(root);
+
+      expect(snap.changes.active.map((change) => change.id)).toEqual([
+        'docs/openspec/changes/docs-survivor',
+      ]);
+      expect(snap.classicError).toMatchObject({
+        code: 'classic-dashboard-unavailable',
+        message: expect.stringMatching(/symbolic link or junction/iu),
+      });
+    } finally {
+      await fs.rm(outsideRoot, { recursive: true, force: true });
+    }
   });
 
   it('sorts active changes by risk, then updatedAt, then name', async () => {
@@ -423,5 +759,111 @@ describe('collectDashboardSnapshot', () => {
     expect(openspecKeys).toContain('design');
     expect(openspecKeys).toContain('tasks');
     expect(superpowersKeys).toContain('plan');
+  });
+
+  it('returns paginated lightweight change rows without hidden artifact previews', async () => {
+    for (let index = 0; index < 6; index += 1) {
+      await writeChange(root, {
+        name: `active-${index}`,
+        yaml: { phase: 'build', workflow: 'classic' },
+        tasks: '- [ ] pending\n',
+        proposal: true,
+        design: true,
+        plan: true,
+      });
+    }
+
+    const first = await collectDashboardChangePage(root, {
+      status: 'active',
+      limit: 5,
+    });
+
+    expect(first.total).toBe(6);
+    expect(first.items).toHaveLength(5);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    expect(first.items[0]).toMatchObject({
+      status: 'active',
+      phase: 'build',
+      tasks: { completed: 0, total: 1 },
+      verify: { result: 'unknown' },
+    });
+    expect(first.items[0]).not.toHaveProperty('artifactPreviews');
+
+    const second = await collectDashboardChangePage(root, {
+      status: 'active',
+      limit: 5,
+      cursor: first.nextCursor ?? undefined,
+    });
+    expect(second.items).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it('combines active and archived rows for the all tab with a stable page size', async () => {
+    await writeChange(root, {
+      name: 'active-one',
+      yaml: { phase: 'build' },
+      tasks: '- [ ] todo\n',
+    });
+    await writeChange(root, {
+      name: '2026-06-20-archived-one',
+      status: 'archived',
+      yaml: { phase: 'archive', archived: 'true' },
+      tasks: '- [x] done\n',
+    });
+
+    const page = await collectDashboardChangePage(root, {
+      status: 'all',
+      limit: 1,
+    });
+
+    expect(page.total).toBe(2);
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0].status).toBe('active');
+    expect(page.nextCursor).toEqual(expect.any(String));
+  });
+
+  it('loads full change details only through the detail lookup', async () => {
+    await writeChange(root, {
+      name: 'detail-only',
+      yaml: { phase: 'build' },
+      tasks: '- [ ] todo\n',
+      proposal: true,
+    });
+
+    const detail = await collectDashboardChangeDetail(root, 'openspec/changes/detail-only');
+
+    expect(detail).toMatchObject({
+      id: 'openspec/changes/detail-only',
+      name: 'detail-only',
+      artifacts: { proposal: true },
+    });
+    expect(detail?.artifactPreviews.length).toBeGreaterThan(0);
+    await expect(
+      collectDashboardChangeDetail(root, 'openspec/changes/not-registered'),
+    ).resolves.toBeNull();
+    await expect(
+      collectDashboardChangeDetail(root, 'openspec/changes/..\\outside'),
+    ).resolves.toBeNull();
+  });
+
+  it('builds the dashboard overview without embedding Classic change details', async () => {
+    await writeChange(root, {
+      name: 'overview-active',
+      yaml: { phase: 'build' },
+      tasks: '- [ ] todo\n',
+    });
+    await writeChange(root, {
+      name: '2026-06-20-overview-archived',
+      status: 'archived',
+      yaml: { phase: 'archive', archived: 'true' },
+    });
+
+    const overview = await collectDashboardOverview(root);
+
+    expect(overview).toMatchObject({
+      summary: { activeChanges: 1, archivedChanges: 1, tasksIncomplete: 1 },
+      project: { path: root },
+    });
+    expect(overview).not.toHaveProperty('changes');
   });
 });

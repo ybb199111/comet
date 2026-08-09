@@ -24,10 +24,12 @@ async function bundledRuntime(entry) {
     format: 'esm',
     target: ['node20'],
     packages: 'bundle',
+    preserveSymlinks: true,
     sourcemap: false,
     legalComments: 'none',
     charset: 'utf8',
     treeShaking: true,
+    minify: true,
     banner: {
       js: [
         '#!/usr/bin/env node',

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -485,6 +486,11 @@ def test_current_cli_snapshot_helper_source_builds_checkout(monkeypatch, tmp_pat
     (checkout / "bin").mkdir(parents=True)
     (checkout / "bin/comet.js").write_text("import '../dist/index.js';\n", encoding="utf-8")
     (checkout / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
+    (checkout / "assets/skills/comet").mkdir(parents=True)
+    (checkout / "assets/manifest.json").write_text(
+        '{"skills":["comet/SKILL.md"]}\n', encoding="utf-8"
+    )
+    (checkout / "assets/skills/comet/SKILL.md").write_text("# Comet\n", encoding="utf-8")
     environment = tmp_path / "environment"
     environment.mkdir()
     (environment / ".include-current-comet-cli").write_text("include\n", encoding="utf-8")
@@ -509,11 +515,16 @@ def test_current_cli_snapshot_helper_source_builds_checkout(monkeypatch, tmp_pat
     assert (snapshot / "bin/comet.js").is_file()
     assert (snapshot / "dist/app/cli/index.js").is_file()
     assert (snapshot / "dist/domains/dashboard/native-adapter.js").is_file()
+    assert (snapshot / "assets/manifest.json").is_file()
+    assert (snapshot / "assets/skills/comet/SKILL.md").is_file()
     assert (snapshot / "package.json").is_file()
     identity = json.loads((snapshot / "build-identity.json").read_text(encoding="utf-8"))
     assert identity["schema"] == "comet.eval.current-comet-build.v1"
-    assert identity["sourceFileCount"] >= 2
-    assert identity["snapshotFileCount"] >= 4
+    assert identity["sourceFileCount"] >= 4
+    assert identity["snapshotFileCount"] >= 6
+    assert identity["assetsFileCount"] == 2
+    assert identity["assetsHash"]
+    assert identity["manifestHash"]
 
 
 def test_controller_snapshots_native_runtime_for_readonly_oracle(tmp_path: Path):
@@ -548,6 +559,198 @@ def test_controller_snapshots_native_runtime_for_readonly_oracle(tmp_path: Path)
     }
     docker_harness = (EVAL_ROOT / "scaffold/shell/docker.sh").read_text(encoding="utf-8")
     assert "_eval_trusted_oracles:ro" in docker_harness
+
+
+def test_native_workflow_validator_recomputes_typed_receipt_hash(tmp_path: Path):
+    validator = load_validator("comet-native-workflow", "test_native_workflow.py")
+    archived = tmp_path / "archive"
+    content = {
+        "schema": "comet.native.verification-receipt.v3",
+        "kind": "manual-evidence",
+        "role": "acceptance-evidence",
+        "status": "passed",
+        "bindings": {
+            "change": "sentence-counting",
+            "sourceRevision": 3,
+            "contractHash": "1" * 64,
+            "scopeHash": "2" * 64,
+            "snapshotHash": "3" * 64,
+            "artifactHash": "4" * 64,
+        },
+        "acceptanceIds": ["acceptance-" + "a" * 64],
+        "actor": "eval-manual",
+        "issuedAt": "2026-07-28T00:00:00.000Z",
+        "evidence": {
+            "steps": ["Run the sentence check."],
+            "observations": ["The check passed."],
+            "responsible": "eval-manual",
+        },
+    }
+    digest = validator._canonical_hash(
+        "comet.native.verification-receipt.v3", content
+    )
+    reference = f"runtime/evidence/receipts/{digest}.json"
+    receipt_file = archived / reference
+    write_json(receipt_file, {**content, "receiptHash": digest})
+
+    assert validator._read_typed_receipt(archived, reference)["receiptHash"] == digest
+
+    forged = json.loads(receipt_file.read_text(encoding="utf-8"))
+    forged["evidence"]["observations"] = ["A forged result."]
+    write_json(receipt_file, forged)
+    with pytest.raises(ValueError, match="schema/hash"):
+        validator._read_typed_receipt(archived, reference)
+
+
+def test_native_workflow_validator_accepts_current_acceptance_trace_entries():
+    validator = load_validator("comet-native-workflow", "test_native_workflow.py")
+    reference = f"runtime/evidence/receipts/{'b' * 64}.json"
+    entry = {
+        "acceptanceId": f"acceptance-{'a' * 64}",
+        "status": "passed",
+        "kind": "spec-must",
+        "source": "specs/sentence-counting/spec.md",
+        "evidenceRefs": [reference],
+        "skippedReason": None,
+    }
+
+    assert validator._direct_acceptance_receipt_refs(entry) == [reference]
+
+    legacy_entry = {key: value for key, value in entry.items() if key not in {"kind", "source"}}
+    with pytest.raises(ValueError, match="not a direct pass"):
+        validator._direct_acceptance_receipt_refs(legacy_entry)
+
+
+def test_native_workflow_oracle_rejects_forged_runtime_identity(tmp_path: Path):
+    validator = load_validator("comet-native-workflow", "test_native_workflow.py")
+    validator.WORKSPACE = tmp_path
+    oracle = tmp_path / "_eval_trusted_oracles/comet-native-runtime.mjs"
+    oracle.parent.mkdir(parents=True)
+    oracle.write_text("console.log('{}');\n", encoding="utf-8")
+    write_json(
+        oracle.parent / "native-runtime-identity.json",
+        {
+            "schema": "comet.eval.trusted-native-runtime.v1",
+            "runtimeFile": oracle.name,
+            "runtimeHash": hashlib.sha256(oracle.read_bytes()).hexdigest(),
+        },
+    )
+    assert validator._trusted_native_runtime() == oracle
+
+    oracle.write_text("console.log('{\"forged\":true}');\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match"):
+        validator._trusted_native_runtime()
+
+
+def test_native_workflow_validator_rejects_contract_not_recomputed_by_oracle(
+    monkeypatch, tmp_path: Path
+):
+    validator = load_validator("comet-native-workflow", "test_native_workflow.py")
+    validator.WORKSPACE = tmp_path
+    oracle = tmp_path / "_eval_trusted_oracles/comet-native-runtime.mjs"
+    oracle.parent.mkdir(parents=True)
+    oracle.write_text("console.log('{}');\n", encoding="utf-8")
+    write_json(
+        oracle.parent / "native-runtime-identity.json",
+        {
+            "schema": "comet.eval.trusted-native-runtime.v1",
+            "runtimeFile": oracle.name,
+            "runtimeHash": hashlib.sha256(oracle.read_bytes()).hexdigest(),
+        },
+    )
+    archived = tmp_path / "archive"
+    (archived / "specs" / "sentence-counting").mkdir(parents=True)
+    (archived / "brief.md").write_text(
+        "# Acceptance examples\n- The feature works.\n", encoding="utf-8"
+    )
+    (archived / "specs" / "sentence-counting" / "spec.md").write_text(
+        "# Sentence counting\n- Counts sentences.\n", encoding="utf-8"
+    )
+    (archived / "comet-state.yaml").write_text(
+        "schema: comet.native.v1\nname: sentence-counting\n", encoding="utf-8"
+    )
+    state = {
+        "name": "sentence-counting",
+        "brief": "brief.md",
+        "spec_changes": [
+            {
+                "capability": "sentence-counting",
+                "operation": "create",
+                "source": "specs/sentence-counting/spec.md",
+                "base_hash": None,
+            }
+        ],
+    }
+
+    def forged_runtime(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "command": "status",
+                    "exitCode": 0,
+                    "data": {
+                        "phase": "build",
+                        "findingSummary": {
+                            "errors": 1,
+                            "codes": ["contract-changed-after-approval"],
+                        },
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(validator.subprocess, "run", forged_runtime)
+    with pytest.raises(ValueError, match="contract"):
+        validator._validate_native_contract_with_trusted_runtime(
+            archived, state, "a" * 64
+        )
+
+
+def test_native_workflow_validator_rejects_scope_snapshot_not_matching_workspace(tmp_path: Path):
+    validator = load_validator("comet-native-workflow", "test_native_workflow.py")
+    validator.WORKSPACE = tmp_path
+    implementation = tmp_path / "wordcount.py"
+    implementation.write_text("print('actual')\n", encoding="utf-8")
+    archived = tmp_path / "archive"
+    archived.mkdir()
+    projection = {
+        "schema": "comet.native.content-snapshot-projection.v1",
+        "entries": [{"path": "wordcount.py", "hash": "0" * 64, "size": 1}],
+    }
+    projection_hash = validator._canonical_hash(
+        "comet.native.content-snapshot-projection.v1", projection
+    )
+    projection_ref = f"runtime/evidence/snapshots/{projection_hash}.json"
+    write_json(archived / projection_ref, projection)
+    declared = [{"path": "wordcount.py", "kind": "file"}]
+    scope_content = {
+        "schema": "comet.native.implementation-scope.v2",
+        "contractHash": "1" * 64,
+        "currentProjectionRef": projection_ref,
+        "currentProjectionHash": projection_hash,
+        "declaredArtifacts": declared,
+    }
+    scope_hash = validator._canonical_hash(
+        "comet.native.implementation-scope.v2", scope_content
+    )
+    write_json(
+        archived / f"runtime/evidence/scopes/{scope_hash}.json",
+        {**scope_content, "scopeHash": scope_hash},
+    )
+    bindings = {
+        "contractHash": "1" * 64,
+        "scopeHash": scope_hash,
+        "snapshotHash": projection_hash,
+        "artifactHash": validator._canonical_hash(
+            "comet.native.declared-artifacts.v1", declared
+        ),
+    }
+
+    with pytest.raises(ValueError, match="snapshot entry"):
+        validator._validate_native_scope_bindings(archived, bindings)
 
 
 def test_controller_source_build_contains_current_native_dashboard_adapter(tmp_path: Path):
@@ -1772,6 +1975,8 @@ def test_wave_f_rejects_tampered_controller_source_build(monkeypatch, tmp_path: 
     (checkout / "bin").mkdir(parents=True)
     (checkout / "bin/comet.js").write_text("import '../dist/app/cli/index.js';\n", encoding="utf-8")
     (checkout / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
+    (checkout / "assets").mkdir()
+    (checkout / "assets/manifest.json").write_text('{"skills": []}\n', encoding="utf-8")
     environment = tmp_path / "environment"
     environment.mkdir()
     (environment / ".include-current-comet-cli").write_text("include\n", encoding="utf-8")
@@ -1795,7 +2000,8 @@ def test_wave_f_rejects_tampered_controller_source_build(monkeypatch, tmp_path: 
     )
     validator.WORKSPACE = workspace
 
-    assert validator.check_current_cli_build_identity()["status"] == "passed"
+    identity_check = validator.check_current_cli_build_identity()
+    assert identity_check["status"] == "passed", identity_check
     adapter = workspace / "_eval_current_comet/dist/domains/dashboard/native-adapter.js"
     adapter.write_text("export const schema = 'forged';\n", encoding="utf-8")
     assert validator.check_current_cli_build_identity()["status"] == "failed"

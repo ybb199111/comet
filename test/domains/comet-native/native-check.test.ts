@@ -4,10 +4,19 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { runNativeCli } from '../../../domains/comet-native/native-cli.js';
-import { readNativeCheckReceipt } from '../../../domains/comet-native/native-check-receipt-storage.js';
-import { nativeChangeDir, readNativeChange } from '../../../domains/comet-native/native-change.js';
+import {
+  createNativeChange,
+  nativeChangeDir,
+  readNativeChange,
+} from '../../../domains/comet-native/native-change.js';
+import {
+  defaultProjectConfig,
+  writeProjectConfig,
+} from '../../../domains/comet-native/native-config.js';
 import { readNativeVerificationEvidence } from '../../../domains/comet-native/native-evidence-storage.js';
+import { readNativeVerificationReceipt } from '../../../domains/comet-native/native-evidence-storage.js';
 import { nativeProjectPaths } from '../../../domains/comet-native/native-paths.js';
+import { nativeVerificationFixtureReport } from '../../helpers/native-verification.js';
 
 const brief = `# Outcome
 Keep the focused source valid.
@@ -46,6 +55,7 @@ describe('Native check public seam', () => {
 
   beforeEach(async () => {
     projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-native-check-cli-'));
+    await writeProjectConfig(projectRoot, defaultProjectConfig('docs', 'en'));
     await fs.writeFile(path.join(projectRoot, 'feature.ts'), 'export const value = 1;\n');
   });
 
@@ -60,9 +70,13 @@ describe('Native check public seam', () => {
     paths: Awaited<ReturnType<typeof nativeProjectPaths>>;
     changeDir: string;
   }> {
-    const created = await runNativeCli(['new', changeName, '--json', ...projectArgs()]);
-    expect(created.exitCode, created.stderr).toBe(0);
     const paths = await nativeProjectPaths(projectRoot, 'docs');
+    await createNativeChange({
+      paths,
+      name: changeName,
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     const changeDir = nativeChangeDir(paths, changeName);
     await fs.writeFile(path.join(changeDir, 'brief.md'), brief);
     await fs.mkdir(path.join(changeDir, 'specs', changeName), { recursive: true });
@@ -75,6 +89,7 @@ describe('Native check public seam', () => {
       changeName,
       '--summary',
       'Requirements are ready',
+      '--confirmed',
       '--json',
       ...projectArgs(),
     ]);
@@ -144,8 +159,31 @@ describe('Native check public seam', () => {
       ].sort(),
     );
     const firstRef = checked.data!.ref as string;
-    const firstReceipt = await readNativeCheckReceipt(paths, name, firstRef);
-    expect(firstReceipt.schema).toBe('comet.native.check-receipt.v1');
+    const firstReceipt = await readNativeVerificationReceipt(paths, name, firstRef);
+    expect(firstReceipt).toMatchObject({
+      schema: 'comet.native.verification-receipt.v3',
+      kind: 'static-inspection',
+      status: 'passed',
+    });
+
+    const checkReceiptDirectory = path.join(changeDir, 'runtime', 'evidence', 'check-receipts');
+    const typedReceiptDirectory = path.join(changeDir, 'runtime', 'evidence', 'receipts');
+    const countFiles = async (directory: string): Promise<number> =>
+      (await fs.readdir(directory)).length;
+    const checkReceiptCount = await countFiles(checkReceiptDirectory);
+    const typedReceiptCount = await countFiles(typedReceiptDirectory);
+    const repeated = json(await runNativeCli(['check', name, '--json', ...projectArgs()]));
+    expect(repeated).toMatchObject({ exitCode: 0, data: { status: 'passed', ref: firstRef } });
+    expect(await countFiles(checkReceiptDirectory)).toBe(checkReceiptCount);
+    expect(await countFiles(typedReceiptDirectory)).toBe(typedReceiptCount);
+
+    await fs.writeFile(path.join(projectRoot, 'feature.ts'), 'export const value = 3;\n');
+    const changed = json(await runNativeCli(['check', name, '--json', ...projectArgs()]));
+    expect(changed).toMatchObject({
+      exitCode: 1,
+      data: { status: 'failed', stale: true },
+    });
+    expect(changed.data!.ref).not.toBe(firstRef);
 
     const serializedProjection = JSON.stringify(checked.data);
     expect(serializedProjection).not.toContain(projectRoot);
@@ -163,37 +201,11 @@ describe('Native check public seam', () => {
     );
   });
 
-  it('binds a fresh public check receipt into the Verify envelope', async () => {
+  it('runs and binds a fresh required check when Verify passes', async () => {
     const { paths, changeDir } = await prepareVerifyChange();
-    const checked = json(await runNativeCli(['check', name, '--json', ...projectArgs()]));
-    expect(checked.exitCode).toBe(0);
-    const receiptRef = checked.data!.ref as string;
-    const status = json(
-      await runNativeCli(['status', name, '--details', '--json', ...projectArgs()]),
-    );
-    const criteria = (
-      status.data as { acceptancePage: { items: Array<{ id: string }> } }
-    ).acceptancePage.items.map((criterion) => ({
-      acceptance_id: criterion.id,
-      evidence_refs: ['feature.ts'],
-    }));
     await fs.writeFile(
       path.join(changeDir, 'verification.md'),
-      `# Acceptance evidence
-<!-- comet-native:acceptance-evidence:start -->
-${JSON.stringify(criteria, null, 2)}
-<!-- comet-native:acceptance-evidence:end -->
-# Commands and results
-The built-in check passed.
-# Skipped checks
-None.
-# Spec consistency
-Consistent.
-# Known limitations and risks
-None.
-# Conclusion
-Pass.
-`,
+      await nativeVerificationFixtureReport({ paths, name }),
     );
 
     const verified = json(
@@ -206,8 +218,6 @@ Pass.
         'pass',
         '--report',
         'verification.md',
-        '--receipt',
-        receiptRef,
         '--json',
         ...projectArgs(),
       ]),
@@ -219,7 +229,49 @@ Pass.
       name,
       state.verification_evidence!,
     );
-    expect(envelope.receiptRef).toBe(receiptRef);
+    expect(envelope.requiredReceiptRefs).toEqual([
+      expect.stringMatching(/^runtime\/evidence\/receipts\/[a-f0-9]{64}\.json$/u),
+    ]);
+  });
+
+  it('validates the Verify report before running the automatic required check', async () => {
+    const { paths, changeDir } = await prepareVerifyChange();
+    await fs.writeFile(path.join(changeDir, 'verification.md'), '# Conclusion\nPass.\n');
+    const checkReceiptDirectory = path.join(changeDir, 'runtime', 'evidence', 'check-receipts');
+    const countReceipts = async (): Promise<number> => {
+      try {
+        return (await fs.readdir(checkReceiptDirectory)).length;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+        throw error;
+      }
+    };
+    const before = await countReceipts();
+
+    const rejected = json(
+      await runNativeCli([
+        'next',
+        name,
+        '--summary',
+        'Reject malformed verification before checking.',
+        '--result',
+        'pass',
+        '--report',
+        'verification.md',
+        '--json',
+        ...projectArgs(),
+      ]),
+    );
+    expect(rejected).toMatchObject({
+      exitCode: 65,
+      error: { code: 'invalid-data' },
+    });
+    expect(rejected.error?.message).toContain('Missing verification section: Acceptance evidence');
+    expect(await countReceipts()).toBe(before);
+    await expect(readNativeChange(paths, name)).resolves.toMatchObject({
+      phase: 'verify',
+      verification_evidence: null,
+    });
   });
 
   it('returns CLI exit 1 and persists bounded text issues without changing workflow state', async () => {
@@ -251,8 +303,11 @@ Pass.
       },
     });
     expect(result.error).toBeUndefined();
-    const receipt = await readNativeCheckReceipt(paths, name, result.data!.ref as string);
-    expect(receipt).toMatchObject({ status: 'failed', stale: false });
+    const receipt = await readNativeVerificationReceipt(paths, name, result.data!.ref as string);
+    expect(receipt).toMatchObject({
+      kind: 'static-inspection',
+      status: 'failed',
+    });
     await expect(readNativeChange(paths, name)).resolves.toEqual(before);
     expect(await fs.readFile(path.join(changeDir, 'runtime', 'trajectory.jsonl'), 'utf8')).toBe(
       trajectoryBefore,
@@ -261,7 +316,13 @@ Pass.
 
   it('rejects non-Verify use and any attempt to supply a command or path', async () => {
     const shapeName = 'shape-check';
-    await runNativeCli(['new', shapeName, '--json', ...projectArgs()]);
+    const paths = await nativeProjectPaths(projectRoot, 'docs');
+    await createNativeChange({
+      paths,
+      name: shapeName,
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     const shape = json(await runNativeCli(['check', shapeName, '--json', ...projectArgs()]));
     expect(shape).toMatchObject({ exitCode: 65, error: { code: 'invalid-data' } });
 

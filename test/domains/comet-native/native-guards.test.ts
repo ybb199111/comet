@@ -42,7 +42,12 @@ describe('Native phase guards', () => {
   beforeEach(async () => {
     projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-native-guards-'));
     paths = await nativeProjectPaths(projectRoot, '.');
-    state = await createNativeChange({ paths, name: 'guarded-change', language: 'en' });
+    state = await createNativeChange({
+      paths,
+      name: 'guarded-change',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     changeDir = nativeChangeDir(paths, state.name);
   });
 
@@ -51,10 +56,18 @@ describe('Native phase guards', () => {
   });
 
   it('blocks incomplete Shape without mutating state', async () => {
-    const result = await inspectNativeGuard({ paths, state, evidence: { summary: 'ready' } });
+    const result = await inspectNativeGuard({
+      paths,
+      state,
+      evidence: { summary: 'ready' },
+      clarificationMode: 'sequential',
+    });
     expect(result.valid).toBe(false);
     expect(result.findings).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: 'brief-section-empty' })]),
+    );
+    expect(result.findings).not.toContainEqual(
+      expect.objectContaining({ code: 'shape-confirmation-required' }),
     );
   });
 
@@ -72,6 +85,7 @@ describe('Native phase guards', () => {
           paths,
           state,
           evidence: { summary: 'ready', confirmed: true },
+          clarificationMode: 'sequential',
         })
       ).findings,
     ).toEqual(
@@ -84,10 +98,32 @@ describe('Native phase guards', () => {
         paths,
         state,
         evidence: { summary: 'ready', confirmed: true },
+        clarificationMode: 'sequential',
       }),
     ).toEqual({
       valid: true,
       findings: [],
+    });
+  });
+
+  it('requires explicit shared-understanding confirmation in Batch mode', async () => {
+    await fs.writeFile(path.join(changeDir, 'brief.md'), completeBrief);
+    const result = await inspectNativeGuard({
+      paths,
+      state,
+      evidence: { summary: 'batch frontier is complete' },
+      clarificationMode: 'batch',
+    });
+
+    expect(result).toMatchObject({
+      valid: false,
+      findings: [
+        expect.objectContaining({
+          code: 'shape-confirmation-required',
+          message:
+            'Native clarification requires explicit user confirmation of the shared understanding before Build',
+        }),
+      ],
     });
   });
 
@@ -97,17 +133,26 @@ describe('Native phase guards', () => {
       await advanceNativeChange({
         paths,
         name: state.name,
-        evidence: { summary: 'shape is ready' },
+        evidence: { summary: 'shape is ready', confirmed: true },
+        clarificationMode: 'batch',
       })
     ).change;
     expect(
-      (await inspectNativeGuard({ paths, state, evidence: { summary: 'built' } })).findings,
+      (
+        await inspectNativeGuard({
+          paths,
+          state,
+          evidence: { summary: 'built' },
+          clarificationMode: 'batch',
+        })
+      ).findings,
     ).toContainEqual(expect.objectContaining({ code: 'build-evidence-missing' }));
     expect(
       await inspectNativeGuard({
         paths,
         state,
         evidence: { summary: 'docs only', noCodeReason: 'The change only updates documentation.' },
+        clarificationMode: 'batch',
       }),
     ).toEqual({ valid: true, findings: [] });
   });
@@ -118,7 +163,8 @@ describe('Native phase guards', () => {
       await advanceNativeChange({
         paths,
         name: state.name,
-        evidence: { summary: 'shape is ready' },
+        evidence: { summary: 'shape is ready', confirmed: true },
+        clarificationMode: 'batch',
       })
     ).change;
     await fs.writeFile(
@@ -132,6 +178,7 @@ describe('Native phase guards', () => {
     const result = await inspectNativeGuard({
       paths,
       state,
+      clarificationMode: 'batch',
       evidence: {
         summary: 'implementation paused for the decision',
         noCodeReason: 'The decision is still unresolved.',

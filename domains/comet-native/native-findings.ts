@@ -28,6 +28,18 @@ const EXACT_METADATA: Record<string, FindingMetadata> = {
     retry: 'next',
     repair: 'none',
   },
+  'shape-confirmation-required': {
+    severity: 'error',
+    requiredAction: 'confirm-shared-understanding',
+    retry: 'next',
+    repair: 'none',
+  },
+  'approval-confirmation-required': {
+    severity: 'error',
+    requiredAction: 'confirm-shared-understanding',
+    retry: 'next',
+    repair: 'none',
+  },
   'transition-incomplete': {
     severity: 'error',
     requiredAction: 'recover-transition',
@@ -61,6 +73,30 @@ const EXACT_METADATA: Record<string, FindingMetadata> = {
   'verification-scope-partial': {
     severity: 'error',
     requiredAction: 'confirm-partial-verification-scope',
+    retry: 'next',
+    repair: 'none',
+  },
+  'verification-implementation-stale': {
+    severity: 'error',
+    requiredAction: 'return-to-build-and-refresh-implementation-scope',
+    retry: 'next',
+    repair: 'none',
+  },
+  'verification-receipt-binding-mismatch': {
+    severity: 'error',
+    requiredAction: 'refresh-verification-receipts',
+    retry: 'next',
+    repair: 'none',
+  },
+  'verification-receipt-stale': {
+    severity: 'error',
+    requiredAction: 'refresh-verification-receipts',
+    retry: 'next',
+    repair: 'none',
+  },
+  'verification-receipt-invalid': {
+    severity: 'error',
+    requiredAction: 'refresh-verification-receipts',
     retry: 'next',
     repair: 'none',
   },
@@ -100,6 +136,36 @@ const EXACT_METADATA: Record<string, FindingMetadata> = {
     retry: 'status',
     repair: 'doctor',
   },
+  'workspace-binding-root-changed': {
+    severity: 'error',
+    requiredAction: 'return-to-bound-working-directory',
+    retry: 'status',
+    repair: 'none',
+  },
+  'workspace-binding-invalid': {
+    severity: 'error',
+    requiredAction: 'repair-workspace-binding',
+    retry: 'status',
+    repair: 'none',
+  },
+  'workspace-branch-changed': {
+    severity: 'error',
+    requiredAction: 'return-to-bound-working-directory',
+    retry: 'status',
+    repair: 'none',
+  },
+  'workspace-kind-changed': {
+    severity: 'error',
+    requiredAction: 'return-to-bound-working-directory',
+    retry: 'status',
+    repair: 'none',
+  },
+  'workspace-vcs-unavailable': {
+    severity: 'error',
+    requiredAction: 'return-to-bound-working-directory',
+    retry: 'status',
+    repair: 'none',
+  },
   'repair-stagnation-warning': {
     severity: 'warning',
     requiredAction: 'change-repair-approach',
@@ -108,19 +174,19 @@ const EXACT_METADATA: Record<string, FindingMetadata> = {
   },
   'repair-stagnation-stop': {
     severity: 'error',
-    requiredAction: 'make-progress-or-explicitly-override-repair',
+    requiredAction: 'try-new-repair-hypothesis-with-status-override',
     retry: 'none',
     repair: 'none',
   },
   'repair-iteration-limit': {
     severity: 'error',
-    requiredAction: 'change-implementation-before-starting-a-new-repair-episode',
-    retry: 'next',
+    requiredAction: 'choose-repair-continuation',
+    retry: 'none',
     repair: 'none',
   },
   'repair-override-exhausted': {
     severity: 'error',
-    requiredAction: 'review-repeated-failure-after-override',
+    requiredAction: 'choose-repair-continuation',
     retry: 'none',
     repair: 'none',
   },
@@ -213,7 +279,11 @@ function retryCommand(
 ): string | null {
   if (retry === 'next') {
     return `comet native next ${state.name} --summary "<summary>"${
-      code === 'contract-changed-after-approval' ? ' --confirmed' : ''
+      code === 'contract-changed-after-approval' ||
+      code === 'shape-confirmation-required' ||
+      code === 'approval-confirmation-required'
+        ? ' --confirmed'
+        : ''
     }`;
   }
   if (retry === 'status') return `comet native status ${state.name} --details`;
@@ -245,6 +315,8 @@ export function structureNativeFindings(options: {
         // missing data must never be presented as a user decision.
         requiresUserDecision:
           finding.code === 'brief-blocking-question' ||
+          finding.code === 'shape-confirmation-required' ||
+          finding.code === 'approval-confirmation-required' ||
           finding.code === 'contract-changed-after-approval' ||
           finding.code === 'verification-scope-partial' ||
           finding.code === 'repair-iteration-limit' ||

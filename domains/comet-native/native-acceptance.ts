@@ -8,16 +8,24 @@ import type {
 
 const ACCEPTANCE_HASH_TAG = 'comet.native.acceptance.v1';
 const ACCEPTANCE_ID_PATTERN = /^acceptance-[a-f0-9]{64}$/u;
-const EVIDENCE_ENTRY_KEYS = new Set(['acceptance_id', 'evidence_refs', 'skipped_reason']);
+const EVIDENCE_ENTRY_KEYS = new Set(['acceptance_id', 'status', 'evidence_refs', 'skipped_reason']);
+const TYPED_RECEIPT_REF_PATTERN = /^runtime\/evidence\/receipts\/[a-f0-9]{64}\.json$/u;
 const ACCEPTANCE_HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const ACCEPTANCE_CURSOR_PATTERN =
   /^native-acceptance-v1\.([a-f0-9]{64})\.([0-9a-z]+)\.([a-f0-9]{64})$/u;
+
+function compareText(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
 
 export const NATIVE_ACCEPTANCE_PAGE_LIMITS = Object.freeze({
   maxItems: 16,
   maxTextBytes: 512,
   maxContextItems: 4,
   maxContextItemBytes: 256,
+  maxFailedCheckIds: 16,
   maxSerializedBytes: 32 * 1024,
 });
 
@@ -30,7 +38,7 @@ export const NATIVE_ACCEPTANCE_EVIDENCE_START_MARKER =
 export const NATIVE_ACCEPTANCE_EVIDENCE_END_MARKER =
   '<!-- comet-native:acceptance-evidence:end -->';
 
-export type NativeAcceptanceKind = 'brief-example' | 'spec-scenario';
+export type NativeAcceptanceKind = 'brief-example' | 'spec-scenario' | 'spec-must';
 
 export interface NativeAcceptanceCriterion {
   id: string;
@@ -42,6 +50,7 @@ export interface NativeAcceptanceCriterion {
 
 export interface NativeAcceptanceEvidenceEntry {
   acceptance_id: string;
+  status: 'passed' | 'failed';
   evidence_refs: string[];
   skipped_reason?: string;
 }
@@ -105,6 +114,7 @@ function acceptanceOffset(options: {
 
 function acceptanceProjection(
   criterion: NativeAcceptanceCriterion,
+  verificationStatus: NativeAcceptanceCriterionProjection['verificationStatus'],
 ): NativeAcceptanceCriterionProjection {
   const text = truncateUtf8(criterion.text, NATIVE_ACCEPTANCE_PAGE_LIMITS.maxTextBytes);
   const projectedContext = criterion.context
@@ -120,6 +130,7 @@ function acceptanceProjection(
       criterion.context.length > projectedContext.length ||
       projectedContext.some((entry) => entry.truncated),
     textTruncated: text.truncated,
+    verificationStatus,
   };
 }
 
@@ -128,6 +139,11 @@ export function projectNativeAcceptancePage(options: {
   criteria: readonly NativeAcceptanceCriterion[];
   acceptanceHash: string;
   cursor?: string | null;
+  verificationStatuses?: ReadonlyMap<
+    string,
+    NativeAcceptanceCriterionProjection['verificationStatus']
+  >;
+  failedCheckIds?: readonly string[];
 }): NativeAcceptancePageProjection {
   const offset = acceptanceOffset({
     acceptanceHash: options.acceptanceHash,
@@ -135,9 +151,20 @@ export function projectNativeAcceptancePage(options: {
     cursor: options.cursor,
   });
   const items: NativeAcceptanceCriterionProjection[] = [];
+  const failedCheckIds = [...new Set(options.failedCheckIds ?? [])].sort(compareText);
+  const projectedFailedCheckIds = failedCheckIds.slice(
+    0,
+    NATIVE_ACCEPTANCE_PAGE_LIMITS.maxFailedCheckIds,
+  );
   const remaining = options.criteria.slice(offset, offset + NATIVE_ACCEPTANCE_PAGE_LIMITS.maxItems);
   for (const criterion of remaining) {
-    const candidate = [...items, acceptanceProjection(criterion)];
+    const candidate = [
+      ...items,
+      acceptanceProjection(
+        criterion,
+        options.verificationStatuses?.get(criterion.id) ?? 'unverified',
+      ),
+    ];
     const nextOffset = offset + candidate.length;
     const trial: NativeAcceptancePageProjection = {
       schema: 'comet.native.acceptance-page.v1',
@@ -145,6 +172,14 @@ export function projectNativeAcceptancePage(options: {
       total: options.criteria.length,
       offset,
       items: candidate,
+      failedAcceptanceIds: candidate
+        .filter((item) => item.verificationStatus === 'failed')
+        .map((item) => item.id),
+      missingAcceptanceIds: candidate
+        .filter((item) => item.verificationStatus === 'missing')
+        .map((item) => item.id),
+      failedCheckIds: projectedFailedCheckIds,
+      failedCheckIdsTruncated: failedCheckIds.length > projectedFailedCheckIds.length,
       nextCursor:
         nextOffset < options.criteria.length
           ? acceptanceCursor(options.acceptanceHash, nextOffset)
@@ -172,6 +207,14 @@ export function projectNativeAcceptancePage(options: {
     total: options.criteria.length,
     offset,
     items,
+    failedAcceptanceIds: items
+      .filter((item) => item.verificationStatus === 'failed')
+      .map((item) => item.id),
+    missingAcceptanceIds: items
+      .filter((item) => item.verificationStatus === 'missing')
+      .map((item) => item.id),
+    failedCheckIds: projectedFailedCheckIds,
+    failedCheckIdsTruncated: failedCheckIds.length > projectedFailedCheckIds.length,
     nextCursor:
       nextOffset < options.criteria.length
         ? acceptanceCursor(options.acceptanceHash, nextOffset)
@@ -230,43 +273,49 @@ function nextFenceState(line: string, current: FenceState | null): FenceState | 
   return current;
 }
 
+function closesHtmlComment(line: string): boolean {
+  return line.includes('-->') || line.includes('--!>');
+}
+
 function* iterateScannedMarkdown(markdown: string): Generator<IndexedScannedMarkdownLine> {
   let fence: FenceState | null = null;
   let htmlComment = false;
-  let htmlTag: string | null = null;
+  let opaqueHtmlTag: string | null = null;
+  const opaqueHtmlTags = new Set(['code', 'pre', 'script', 'style', 'svg', 'template']);
   const normalized = markdown.replace(/\r\n?/gu, '\n');
   let start = 0;
   let index = 0;
   while (start <= normalized.length) {
     const end = normalized.indexOf('\n', start);
     const line = end === -1 ? normalized.slice(start) : normalized.slice(start, end);
-    const body = fence === null && !htmlComment && htmlTag === null;
+    const body = fence === null && !htmlComment && opaqueHtmlTag === null;
     yield { line, body, index };
     index += 1;
 
     if (fence !== null) {
       fence = nextFenceState(line, fence);
     } else if (htmlComment) {
-      if (line.includes('-->')) htmlComment = false;
-    } else if (htmlTag !== null) {
-      if (new RegExp(`</${htmlTag}\\s*>`, 'iu').test(line)) htmlTag = null;
+      if (closesHtmlComment(line)) htmlComment = false;
+    } else if (opaqueHtmlTag !== null) {
+      if (new RegExp(`</${opaqueHtmlTag}\\s*>`, 'iu').test(line)) opaqueHtmlTag = null;
     } else {
       const nextFence = nextFenceState(line, null);
       if (nextFence !== null) {
         fence = nextFence;
       } else {
         const trimmed = line.trimStart();
-        if (trimmed.startsWith('<!--') && !trimmed.includes('-->')) {
+        if (trimmed.startsWith('<!--') && !closesHtmlComment(trimmed)) {
           htmlComment = true;
         } else {
           const htmlStart = /^<([A-Za-z][A-Za-z0-9-]*)\b[^>]*>/u.exec(trimmed);
           if (
             htmlStart &&
+            opaqueHtmlTags.has(htmlStart[1].toLowerCase()) &&
             !trimmed.startsWith('</') &&
             !trimmed.endsWith('/>') &&
             !new RegExp(`</${htmlStart[1]}\\s*>`, 'iu').test(trimmed)
           ) {
-            htmlTag = htmlStart[1];
+            opaqueHtmlTag = htmlStart[1];
           }
         }
       }
@@ -452,6 +501,96 @@ export function deriveSpecAcceptanceCriteria(
   return uniqueCriteria(criteria, 'Specification');
 }
 
+/**
+ * Conservatively derive every substantive specification statement outside Scenario blocks.
+ * Scenario blocks are already represented by `spec-scenario`; excluding their body avoids
+ * duplicate criteria while prose, numbered requirements, and MUST bullets cannot disappear.
+ */
+export function deriveSpecMandatoryAcceptanceCriteria(
+  markdown: string,
+  source = 'spec.md',
+  maxCriteria: number = NATIVE_ACCEPTANCE_LIMITS.maxCriteria,
+): NativeAcceptanceCriterion[] {
+  if (!Number.isSafeInteger(maxCriteria) || maxCriteria < 0) {
+    throw new Error('Native specification acceptance budget is invalid');
+  }
+  const criteria: NativeAcceptanceCriterion[] = [];
+  const ancestry: MarkdownHeading[] = [];
+  let scenarioLevel: number | null = null;
+  let active: {
+    parts: string[];
+    context: string[];
+  } | null = null;
+  const flush = () => {
+    if (active === null) return;
+    if (criteria.length >= maxCriteria) {
+      throw new Error(`Native acceptance exceeds its ${maxCriteria}-criterion acceptance budget`);
+    }
+    criteria.push(criterion('spec-must', source, active.parts.join(' '), active.context));
+    active = null;
+  };
+  const excludedSection = () =>
+    ancestry.some((heading) => /^(?:non-?goals?|非目标)$/iu.test(heading.text.trim()));
+  for (const { line, body } of iterateScannedMarkdown(markdown)) {
+    const heading = body ? markdownHeading(line) : null;
+    if (heading) {
+      flush();
+      if (scenarioLevel !== null && heading.level <= scenarioLevel) scenarioLevel = null;
+      while (ancestry.at(-1) && ancestry.at(-1)!.level >= heading.level) ancestry.pop();
+      ancestry.push(heading);
+      if (/^Scenario\s*:/iu.test(heading.text)) scenarioLevel = heading.level;
+      continue;
+    }
+    const trimmed = line.trim();
+    if (!body || scenarioLevel !== null || excludedSection()) {
+      flush();
+      continue;
+    }
+    if (
+      trimmed.length === 0 ||
+      nextFenceState(line, null) !== null ||
+      trimmed.startsWith('<!--') ||
+      trimmed === '-->' ||
+      trimmed === '--!>' ||
+      /^<\/?[A-Za-z][^>]*>$/u.test(trimmed) ||
+      /^<[A-Za-z][^>]*>.*<\/[A-Za-z][^>]*>$/u.test(trimmed) ||
+      /^(?:[-*_]\s*){3,}$/u.test(trimmed) ||
+      /^\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/u.test(trimmed)
+    ) {
+      flush();
+      continue;
+    }
+    const item = /^\s*(?:[-*+]|\d+[.)])[ \t]+(.+)$/u.exec(line);
+    if (item) {
+      flush();
+      active = {
+        parts: [item[1]],
+        context: ancestry.map((entry) => entry.text),
+      };
+      continue;
+    }
+    if (/^\|.*\|$/u.test(trimmed)) {
+      flush();
+      active = {
+        parts: [trimmed],
+        context: ancestry.map((entry) => entry.text),
+      };
+      flush();
+      continue;
+    }
+    if (active === null) {
+      active = {
+        parts: [trimmed],
+        context: ancestry.map((entry) => entry.text),
+      };
+    } else {
+      active.parts.push(trimmed);
+    }
+  }
+  flush();
+  return uniqueCriteria(criteria, 'Specification mandatory requirements');
+}
+
 function normalizeEvidenceRef(value: string, acceptanceId: string): string {
   const normalized = value.trim().replaceAll('\\', '/');
   if (
@@ -475,6 +614,11 @@ function normalizeEvidenceRef(value: string, acceptanceId: string): string {
       )
   ) {
     throw new Error(`Acceptance evidence ${acceptanceId} references sensitive content`);
+  }
+  if (!TYPED_RECEIPT_REF_PATTERN.test(portable)) {
+    throw new Error(
+      `Acceptance evidence ${acceptanceId} must reference a content-addressed typed receipt`,
+    );
   }
   return portable;
 }
@@ -520,6 +664,10 @@ function validateEvidenceEntries(value: unknown): NativeAcceptanceEvidenceEntry[
     if (new Set(evidenceRefs).size !== evidenceRefs.length) {
       throw new Error(`Acceptance evidence ${acceptanceId} has a duplicate evidence ref`);
     }
+    const status = record.status;
+    if (status !== 'passed' && status !== 'failed') {
+      throw new Error(`Acceptance evidence ${acceptanceId} status is invalid`);
+    }
 
     let skippedReason: string | undefined;
     if (Object.prototype.hasOwnProperty.call(record, 'skipped_reason')) {
@@ -530,18 +678,20 @@ function validateEvidenceEntries(value: unknown): NativeAcceptanceEvidenceEntry[
       }
       skippedReason = record.skipped_reason.trim();
     }
-    if (evidenceRefs.length === 0 && skippedReason === undefined) {
+    if (status === 'passed' && evidenceRefs.length === 0) {
+      throw new Error(`Acceptance evidence ${acceptanceId} passed status requires evidence_refs`);
+    }
+    if (status === 'failed' && evidenceRefs.length === 0 && skippedReason === undefined) {
       throw new Error(
-        `Acceptance evidence ${acceptanceId} requires evidence_refs or skipped_reason`,
+        `Acceptance evidence ${acceptanceId} failed status requires evidence_refs or a skipped_reason`,
       );
     }
-    if (evidenceRefs.length > 0 && skippedReason !== undefined) {
-      throw new Error(
-        `Acceptance evidence ${acceptanceId} must not include both evidence and a skip`,
-      );
+    if (status === 'passed' && skippedReason !== undefined) {
+      throw new Error(`Acceptance evidence ${acceptanceId} passed status has invalid fields`);
     }
     return {
       acceptance_id: acceptanceId,
+      status,
       evidence_refs: evidenceRefs,
       ...(skippedReason === undefined ? {} : { skipped_reason: skippedReason }),
     };

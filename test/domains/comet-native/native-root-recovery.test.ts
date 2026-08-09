@@ -5,6 +5,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  DEFAULT_NATIVE_SNAPSHOT_CONFIG,
   readProjectConfig,
   resolveNativeProject,
   writeProjectConfig,
@@ -46,6 +47,7 @@ describe('Native artifact root recovery', () => {
     await enableBatchClarification();
     await createNativeChange({
       paths: await nativeProjectPaths(projectRoot, '.'),
+      verificationProtocol: 'legacy-v1',
       name: 'identity-change',
       language: 'en',
     });
@@ -67,6 +69,7 @@ describe('Native artifact root recovery', () => {
     await expect(
       createNativeChange({
         paths: await nativeProjectPaths(projectRoot, '.'),
+        verificationProtocol: 'legacy-v1',
         name: 'must-not-start',
         language: 'en',
       }),
@@ -78,6 +81,9 @@ describe('Native artifact root recovery', () => {
       artifact_root: 'docs',
       language: 'en',
       clarification_mode: 'batch',
+      archive_confirmation: 'automatic',
+      max_verify_failures: 5,
+      snapshot: DEFAULT_NATIVE_SNAPSHOT_CONFIG,
     });
     await expect(fs.access(source)).rejects.toMatchObject({ code: 'ENOENT' });
     const destinationPaths = await nativeProjectPaths(projectRoot, 'docs');
@@ -91,7 +97,12 @@ describe('Native artifact root recovery', () => {
     const source = await seedNativeRoot(projectRoot, '.');
     await enableBatchClarification();
     const sourcePaths = await nativeProjectPaths(projectRoot, '.');
-    await createNativeChange({ paths: sourcePaths, name: 'identity-change', language: 'en' });
+    await createNativeChange({
+      paths: sourcePaths,
+      name: 'identity-change',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     let transactionId = '';
     await expect(
       moveNativeRoot({
@@ -112,6 +123,9 @@ describe('Native artifact root recovery', () => {
       artifact_root: '.',
       language: 'en',
       clarification_mode: 'batch',
+      archive_confirmation: 'automatic',
+      max_verify_failures: 5,
+      snapshot: DEFAULT_NATIVE_SNAPSHOT_CONFIG,
     });
     expect(
       (await readNativeTransaction(await nativeProjectPaths(projectRoot, '.'), transactionId))
@@ -130,6 +144,7 @@ describe('Native artifact root recovery', () => {
     await seedNativeRoot(projectRoot, '.');
     await createNativeChange({
       paths: await nativeProjectPaths(projectRoot, '.'),
+      verificationProtocol: 'legacy-v1',
       name: 'identity-change',
       language: 'en',
     });
@@ -192,6 +207,9 @@ describe('Native artifact root recovery', () => {
       artifact_root: 'docs',
       language: 'en',
       clarification_mode: 'sequential',
+      archive_confirmation: 'automatic',
+      max_verify_failures: 5,
+      snapshot: DEFAULT_NATIVE_SNAPSHOT_CONFIG,
     });
   });
 
@@ -222,6 +240,9 @@ describe('Native artifact root recovery', () => {
       artifact_root: 'docs',
       language: 'en',
       clarification_mode: 'sequential',
+      archive_confirmation: 'automatic',
+      max_verify_failures: 5,
+      snapshot: DEFAULT_NATIVE_SNAPSHOT_CONFIG,
     });
     await expect(fs.access(quarantine)).rejects.toMatchObject({ code: 'ENOENT' });
   });
@@ -309,6 +330,9 @@ describe('Native artifact root recovery', () => {
       artifact_root: '.',
       language: 'en',
       clarification_mode: 'sequential',
+      archive_confirmation: 'automatic',
+      max_verify_failures: 5,
+      snapshot: DEFAULT_NATIVE_SNAPSHOT_CONFIG,
     });
     await expect(fs.access(quarantine)).rejects.toMatchObject({ code: 'ENOENT' });
   });

@@ -13,8 +13,14 @@ import {
   writeProjectConfig,
 } from '../../../domains/comet-native/native-config.js';
 import { nativeProjectPaths } from '../../../domains/comet-native/native-paths.js';
-import { collectNativeDashboardProjection } from '../../../domains/dashboard/native-collector.js';
+import {
+  collectNativeDashboardChangeDetail,
+  collectNativeDashboardChangePage,
+  collectNativeDashboardOverview,
+  collectNativeDashboardProjection,
+} from '../../../domains/dashboard/native-collector.js';
 import { collectDashboardSnapshot } from '../../../domains/dashboard/collector.js';
+import { prepareNativeArchiveFixture } from '../../helpers/native-archive.js';
 
 const brief = `# Outcome
 Show Native safely.
@@ -118,15 +124,10 @@ describe('Native Dashboard collector', () => {
   it('collects archived Native changes and their user-facing Markdown artifacts', async () => {
     await writeProjectConfig(projectRoot, defaultProjectConfig('docs'));
     const paths = await nativeProjectPaths(projectRoot, 'docs');
-    const state = await createNativeChange({ paths, name: 'archived-dashboard', language: 'en' });
-    const activeDir = nativeChangeDir(paths, state.name);
-    await fs.writeFile(path.join(activeDir, 'brief.md'), brief);
-    await fs.writeFile(path.join(activeDir, 'verification.md'), '# Conclusion\nPassed.\n');
+    const fixture = await prepareNativeArchiveFixture({ paths, name: 'archived-dashboard' });
+    const activeDir = fixture.changeDir;
     await writeNativeChangeFile(path.join(activeDir, 'comet-state.yaml'), {
-      ...state,
-      phase: 'archive',
-      verification_result: 'pass',
-      verification_report: 'verification.md',
+      ...fixture.state,
       archived: true,
     });
     const archiveDir = path.join(paths.archiveDir, '2026-07-18-archived-dashboard');
@@ -151,17 +152,60 @@ describe('Native Dashboard collector', () => {
             summary: 'Native change 已完成并归档。',
           },
           specs: { total: 0, capabilities: [] },
-          acceptance: { total: 1, evidenced: 0, skipped: 0, missing: 1 },
+          acceptance: { total: 1, evidenced: 1, skipped: 0, missing: 0 },
           artifacts: expect.arrayContaining([
-            expect.objectContaining({ key: 'brief', exists: true, content: brief }),
+            expect.objectContaining({
+              key: 'brief',
+              exists: true,
+              content: expect.stringContaining('# Outcome\nShip the capability.'),
+            }),
             expect.objectContaining({
               key: 'verification',
               exists: true,
-              content: '# Conclusion\nPassed.\n',
+              content: expect.stringContaining('# Conclusion\nPass.'),
             }),
           ]),
         },
       ],
+    });
+  });
+
+  it('keeps the acceptance coverage from a legacy archived Native evidence envelope', async () => {
+    await writeProjectConfig(projectRoot, defaultProjectConfig('docs'));
+    const paths = await nativeProjectPaths(projectRoot, 'docs');
+    const fixture = await prepareNativeArchiveFixture({ paths, name: 'legacy-archived-dashboard' });
+    const evidenceHash = 'a'.repeat(64);
+    const legacyEvidenceRef = `runtime/evidence/verifications/${evidenceHash}.json`;
+    await fs.writeFile(
+      path.join(fixture.changeDir, ...legacyEvidenceRef.split('/')),
+      JSON.stringify({
+        schema: 'comet.native.verification-evidence.v1',
+        change: fixture.state.name,
+        envelopeHash: evidenceHash,
+        acceptanceTrace: {
+          schema: 'comet.native.acceptance-trace.v1',
+          total: 3,
+          evidenced: 3,
+          skipped: 0,
+        },
+      }),
+    );
+    await writeNativeChangeFile(path.join(fixture.changeDir, 'comet-state.yaml'), {
+      ...fixture.state,
+      verification_evidence: legacyEvidenceRef,
+      archived: true,
+    });
+    const archiveDir = path.join(paths.archiveDir, '2026-07-18-legacy-archived-dashboard');
+    await fs.mkdir(paths.archiveDir, { recursive: true });
+    await fs.rename(fixture.changeDir, archiveDir);
+
+    const projection = await collectNativeDashboardProjection(projectRoot, {
+      now: new Date('2026-07-19T10:00:00.000Z'),
+    });
+
+    expect(projection?.changes[0]).toMatchObject({
+      name: 'legacy-archived-dashboard',
+      acceptance: { total: 3, evidenced: 3, skipped: 0, missing: 0 },
     });
   });
 
@@ -190,5 +234,92 @@ describe('Native Dashboard collector', () => {
     expect(projection?.changes).toHaveLength(32);
     expect(projection?.changes[0].name).toBe('dashboard-page-00');
     expect(projection?.changes.at(-1)?.name).toBe('dashboard-page-31');
+  });
+
+  it('keeps Native pages lightweight and loads one full change projection on demand', async () => {
+    await writeProjectConfig(projectRoot, defaultProjectConfig('docs'));
+    const paths = await nativeProjectPaths(projectRoot, 'docs');
+    for (let index = 0; index < 6; index += 1) {
+      const state = await createNativeChange({
+        paths,
+        name: `dashboard-lazy-${index}`,
+        language: 'en',
+      });
+      await fs.writeFile(path.join(nativeChangeDir(paths, state.name), 'brief.md'), brief);
+    }
+
+    const overview = await collectNativeDashboardOverview(projectRoot, {
+      now: new Date('2026-07-17T10:00:00.000Z'),
+    });
+    expect(overview).toMatchObject({
+      totalChangeCount: 6,
+      activeChangeCount: 6,
+      visibleChangeCount: 0,
+      changes: [],
+    });
+
+    const first = await collectNativeDashboardChangePage(projectRoot, {
+      status: 'active',
+      limit: 5,
+      now: new Date('2026-07-17T10:00:00.000Z'),
+    });
+    expect(first).toMatchObject({ total: 6, items: expect.any(Array) });
+    expect(first.items).toHaveLength(5);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    expect(first.items[0]).toMatchObject({
+      name: 'dashboard-lazy-0',
+      status: 'active',
+      phase: 'shape',
+    });
+    expect(first.items[0]).not.toHaveProperty('artifacts');
+    expect(first.items[0]).not.toHaveProperty('continuation');
+
+    const detail = await collectNativeDashboardChangeDetail(projectRoot, {
+      status: 'active',
+      name: first.items[0].name,
+      now: new Date('2026-07-17T10:00:00.000Z'),
+    });
+    expect(detail).toMatchObject({
+      name: 'dashboard-lazy-0',
+      artifacts: [expect.objectContaining({ key: 'brief', content: brief })],
+      continuation: expect.any(Object),
+    });
+
+    const second = await collectNativeDashboardChangePage(projectRoot, {
+      status: 'active',
+      limit: 5,
+      cursor: first.nextCursor ?? undefined,
+      now: new Date('2026-07-17T10:00:00.000Z'),
+    });
+    expect(second.items).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it('does not skip Native changes when the page limit is larger than the overview cap', async () => {
+    await writeProjectConfig(projectRoot, defaultProjectConfig('docs'));
+    const paths = await nativeProjectPaths(projectRoot, 'docs');
+    for (let index = 0; index < 40; index += 1) {
+      await fs.mkdir(path.join(paths.changesDir, `dashboard-full-page-${index}`), {
+        recursive: true,
+      });
+    }
+
+    const page = await collectNativeDashboardChangePage(projectRoot, {
+      status: 'active',
+      limit: 50,
+      now: new Date('2026-07-17T10:00:00.000Z'),
+    });
+
+    expect(page.total).toBe(40);
+    expect(page.items).toHaveLength(40);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it('rejects a Native page limit above the shared Dashboard maximum', async () => {
+    await writeProjectConfig(projectRoot, defaultProjectConfig('docs'));
+
+    await expect(
+      collectNativeDashboardChangePage(projectRoot, { status: 'active', limit: 51 }),
+    ).rejects.toThrow('between 1 and 50');
   });
 });

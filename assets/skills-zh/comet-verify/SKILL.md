@@ -5,6 +5,8 @@ description: "仅在用户明确调用 /comet-verify，或由 Comet 根 Skill/ru
 
 # Comet 阶段 4：验证（Verify）
 
+开始或恢复前必须先读取并执行 `comet/reference/classic-layout.md`；本文件中的 OpenSpec CLI 调用必须使用 adapter，文件路径必须使用该协议绑定的 `<classic-*>` 逻辑根。
+
 ## 前置条件
 
 - 代码已提交（阶段 3 完成）
@@ -61,7 +63,7 @@ comet state get <change-name> plan
 git diff --stat <从 plan frontmatter 读取的 base-ref>...HEAD
 ```
 
-第一条命令返回 plan 路径；使用当前平台的文件读取能力解析其 frontmatter 中唯一的 `base-ref`，确认它是有效提交后再代入第二条命令。不得依赖 POSIX 文本管道。
+第一条命令返回 plan 路径；使用文件读取工具解析其 frontmatter 中唯一的 `base-ref`，确认它是有效提交后再代入第二条命令。不得依赖 POSIX 文本管道。
 
 若提交区间显示改动超过轻量阈值（> 8 个文件、跨模块协调、或 delta spec 超过 1 个 capability），手动设置为完整验证：
 
@@ -152,9 +154,12 @@ comet state transition <change-name> verify-fail
 
 **立即执行：** 使用 Skill 工具加载 `openspec-verify-change` 技能。禁止跳过此步骤。
 
+<!-- external-openspec-skill-override -->
+**外部 OpenSpec Skill 覆写：** 加载后只采用其验证语义；其中任何直接官方 CLI、固定 cwd 或固定物理 OpenSpec 路径都必须替换为 `comet classic openspec -- <args...>` 与 resolver 返回的 `<classic-*>` 逻辑根。
+
 技能加载后，按其指引验证。检查项：
 1. tasks.md 全部任务已完成（`[x]`）
-2. 实现符合 `openspec/changes/<name>/design.md` 高层设计决策
+2. 实现符合 `<classic-change-dir>/design.md` 高层设计决策
 3. 实现符合 Design Doc（`docs/superpowers/specs/` 下的技术设计文档）
 4. 能力规格场景全部通过
 5. proposal.md 目标已满足
@@ -168,7 +173,7 @@ comet state transition <change-name> verify-fail
 ```
 
 **Spec 漂移处理**（用户决策点）：
-- 若检查项 6 发现矛盾（delta spec 有内容但 design doc 未体现），**必须使用当前平台可用的用户输入/确认机制以单选题形式暂停并等待用户选择处理方式**，不得自动选择。选项：
+- 若检查项 6 发现矛盾（delta spec 有内容但 design doc 未体现），**必须以单选题形式暂停、展示处理方式并等待用户选择**，不得自动选择。选项：
   - 选项 A：在 design doc 追加 "Implementation Divergence" 节记录偏差原因。选项 A 属于 verify 阶段允许产物；写入后不得因该 design doc 变更再次触发 Step 1b dirty-worktree 决策
   - 选项 B：用户选择 B 后，运行 `comet state transition <change-name> verify-fail`，然后调用 `/comet-build`；由 `/comet-build` 的 Spec 增量更新规则加载 Superpowers `brainstorming` 更新 Design Doc + delta spec
   - 选项 C：确认偏差可接受，继续验证（归档时 design doc 将标记为 `superseded-by-main-spec`）
@@ -181,7 +186,7 @@ comet state transition <change-name> verify-fail
 comet state set <change-name> verification_report docs/superpowers/reports/YYYY-MM-DD-<change-name>-verify.md
 ```
 
-使用当前平台的文件能力创建 `docs/superpowers/reports/` 和报告文件，不依赖 POSIX 专用目录命令。
+使用文件工具创建 `docs/superpowers/reports/` 和报告文件，不依赖 POSIX 专用目录命令。
 
 ## 退出条件
 

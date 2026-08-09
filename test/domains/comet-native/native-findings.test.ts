@@ -22,7 +22,12 @@ describe('Native structured findings', () => {
   beforeEach(async () => {
     projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-native-findings-'));
     paths = await nativeProjectPaths(projectRoot, '.');
-    state = await createNativeChange({ paths, name: 'finding-shape', language: 'en' });
+    state = await createNativeChange({
+      paths,
+      name: 'finding-shape',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
   });
 
   afterEach(async () => {
@@ -54,12 +59,16 @@ describe('Native structured findings', () => {
     expect(findings[1].path).toBe('comet/specs');
   });
 
-  it('reserves user-decision pauses for brief blocking questions only', () => {
+  it('reserves user-decision pauses for explicit clarification decisions', () => {
     const findings = structureNativeFindings({
       paths,
       state,
       findings: [
         { code: 'brief-blocking-question', message: 'decision needed', path: 'brief.md' },
+        {
+          code: 'shape-confirmation-required',
+          message: 'shared understanding must be confirmed',
+        },
         { code: 'build-evidence-missing', message: 'model work needed' },
       ],
     });
@@ -67,16 +76,66 @@ describe('Native structured findings', () => {
       requiredAction: 'answer-blocking-question',
       requiresUserDecision: true,
     });
+    expect(
+      findings.find((finding) => finding.code === 'shape-confirmation-required'),
+    ).toMatchObject({
+      requiredAction: 'confirm-shared-understanding',
+      retryCommand: 'comet native next finding-shape --summary "<summary>" --confirmed',
+      requiresUserDecision: true,
+    });
     expect(findings.find((finding) => finding.code === 'build-evidence-missing')).toMatchObject({
       requiredAction: 'record-build-evidence',
       requiresUserDecision: false,
     });
     expect(summarizeNativeFindings(findings)).toMatchObject({
-      total: 2,
-      errors: 2,
+      total: 3,
+      errors: 3,
       requiresUserDecision: true,
       truncated: false,
     });
+  });
+
+  it('routes stale implementation scope back to Build without a user decision', () => {
+    const [finding] = structureNativeFindings({
+      paths,
+      state: { ...state, phase: 'verify' },
+      findings: [
+        {
+          code: 'verification-implementation-stale',
+          message: 'The implementation changed after Build.',
+        },
+      ],
+    });
+
+    expect(finding).toMatchObject({
+      requiredAction: 'return-to-build-and-refresh-implementation-scope',
+      retryCommand: 'comet native next finding-shape --summary "<summary>"',
+      repairCommand: null,
+      requiresUserDecision: false,
+    });
+  });
+
+  it('reserves repair decisions for exhausted overrides and verification budgets', () => {
+    const findings = structureNativeFindings({
+      paths,
+      state,
+      findings: [
+        { code: 'repair-stagnation-stop', message: 'A repeated failure needs a new hypothesis.' },
+        { code: 'repair-override-exhausted', message: 'The one repair override was exhausted.' },
+        { code: 'repair-iteration-limit', message: 'The verification budget was exhausted.' },
+      ],
+    });
+
+    expect(findings.find((finding) => finding.code === 'repair-stagnation-stop')).toMatchObject({
+      requiredAction: 'try-new-repair-hypothesis-with-status-override',
+      requiresUserDecision: false,
+    });
+    for (const code of ['repair-override-exhausted', 'repair-iteration-limit']) {
+      expect(findings.find((finding) => finding.code === code)).toMatchObject({
+        requiredAction: 'choose-repair-continuation',
+        requiresUserDecision: true,
+      });
+    }
   });
 
   it('fails closed without advertising an impossible repair for an invalid checkpoint', () => {

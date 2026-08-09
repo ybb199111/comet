@@ -1,7 +1,5 @@
 # Script Author Subagent
 
-This file is a portable lane brief, not a platform-native custom agent. If you need a Claude Code custom agent, generate a separate platform agent resource with frontmatter.
-
 ## Responsibilities
 
 Design the generated Skill's script contract instead of copying Comet Classic scripts. Scripts must use the current workflow protocol, user-selected Node labels, and real composed Skill outputs to define automatic advancement, exit checks, recovery, and evidence recording.
@@ -22,17 +20,16 @@ Read the common input from the main session, especially:
 - `workflow.kind`, `workflow.nodes`, `engineMode`, and `runnerMode` from `plan.json`, plus the
   derived internal `callChain` source inventory from Skill Creator metadata
 - `reference/resolved-skills.json`
-- Protected `.comet.yaml` semantics when users customize `/comet-classic`; `comet-five-phase-overlay` primary state comes only from `openspec/changes/<name>/.comet.yaml` and must not create `.comet/runs/<workflow>/state.json` as the Comet overlay primary state.
+- Protected `.comet.yaml` semantics when users customize `/comet-classic`; `comet-five-phase-overlay` primary state comes only from `<classic-change-dir>/.comet.yaml` bound by the Classic layout resolver and must not create `.comet/runs/<workflow>/state.json` as the Comet overlay primary state.
 
 Use file handoff: the main session provides paths instead of pasting large bodies of text. Do not read main-session history or ask the user to restate content already written to artifacts.
 
 ## Dispatch Template
 
-Use the current platform's subagent mechanism. The shape should include:
+Dispatch a fresh subagent for this role with:
 
 ```text
 description: "Write the script contract for <bundle-name>"
-model: <must explicitly specify model>
 prompt:
   You are the script author subagent.
   First read this brief, the common input path, workflow protocol path, resolved skills path, and report file path.

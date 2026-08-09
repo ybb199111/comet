@@ -32,7 +32,7 @@ description: "仅在用户明确调用 /comet-any，或明确要求定制 /comet
 
 `comet-five-phase-overlay` 保留 Comet Classic 五阶段主流程和 `.comet.yaml` 状态语义。普通模式下：
 
-- `comet-five-phase-overlay` 的主状态只来自 `openspec/changes/<name>/.comet.yaml`；没有 active change 或多个 active changes 时必须阻塞并请用户选择。
+- `comet-five-phase-overlay` 的主状态只来自 Classic layout resolver 绑定的 `<classic-change-dir>/.comet.yaml`；没有 active change 或多个 active changes 时必须阻塞并请用户选择。
 - 不得创建 `.comet/runs/<workflow>/state.json` 作为 Comet overlay 主状态。Bundle 草稿、eval evidence 和 publish readiness 可以有自己的证据文件，但不能替代 `.comet.yaml`。
 - `control` Node 不允许 override：`open`、`execute`、`verify`、`archive`。
 - `producer` Node 可以 override：`design`、`plan`，但必须满足对应 Output Schema。
@@ -48,7 +48,7 @@ description: "仅在用户明确调用 /comet-any，或明确要求定制 /comet
 4. 展示确认页：说明每个 Node 的职责、绑定 Skill、Required Skill Call、Output Schema、可执行披露和 readiness 影响。确认页必须为每个新增 binding 或 schema 显示 enforcement：`guarded`、`handoff-guarded`、`evidence-only` 或 `advisory`。
 5. 等待用户确认：未确认前不得写 Bundle draft；存在 missing / ambiguous Skill 时必须暂停。
 6. 初始化后端状态：确认后调用 `comet creator init <name> --file <plan.json> --confirmed-proposal --json`。
-7. 运行创作管线并生成 Bundle：先运行 `comet creator authoring-plan <name> --depth quick|full --json` 取得 lane DAG。按 DAG 派发 lane——wave1（`script`、`reference`、`pause-points`）在支持子代理的平台可并发（否则按依赖顺序内联），wave2（`workflow-entry`、`skill-core`）在 script 契约之后，`skill-review` 作为汇聚 barrier。每个 lane 的产出用 `comet creator authoring-record <name> --lane <id> --file <out.json> --json` 记录（经 schema 校验；BLOCKED/NEEDS_CONTEXT 会被拒绝）。随后运行 `comet creator generate <name> --json`：把记录的内容叶子草稿（entry/node SKILL.md、decision-points、recovery）合并进包，而确定性脊梁（protocol/scripts/manifest）保持模板化，并渲染真实审查证据。产出 entry Skill、Node Skills、`reference/workflow-protocol.json`、六个 scripts、rules、hooks 与 `comet/eval.yaml`。
+7. 运行创作管线并生成 Bundle：先运行 `comet creator authoring-plan <name> --depth quick|full --json` 取得 lane DAG。按 DAG 派发 lane——wave1（`script`、`reference`、`pause-points`）并发派发，wave2（`workflow-entry`、`skill-core`）在 script 契约之后并发派发，`skill-review` 作为汇聚 barrier。每个 lane 的产出用 `comet creator authoring-record <name> --lane <id> --file <out.json> --json` 记录（经 schema 校验；BLOCKED/NEEDS_CONTEXT 会被拒绝）。随后运行 `comet creator generate <name> --json`：把记录的内容叶子草稿（entry/node SKILL.md、decision-points、recovery）合并进包，而确定性脊梁（protocol/scripts/manifest）保持模板化，并渲染真实审查证据。产出 entry Skill、Node Skills、`reference/workflow-protocol.json`、六个 scripts、rules、hooks 与 `comet/eval.yaml`。
 8. 验证：展示 quick/full eval 工作量，运行或记录当前 draft hash 的 eval evidence；失败、skip 或证据 hash 过期时不得进入 ready。
 9. Review / readiness：读取 `comet publish review <name> --platform <reference-platform> --json`，展示 `Readiness:`、`Blockers:`、`Warnings:`、`Evidence:`。
 10. Publish / install preview：人工批准后才能 publish；安装前必须先运行 preview，并展示 `No files were written`。

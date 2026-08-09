@@ -3,12 +3,18 @@ import { promises as fs } from 'fs';
 
 import { discoverNativeProject } from '../comet-native/native-paths.js';
 import {
+  assertClassicLayoutReadable,
+  discoverClassicProject,
+} from '../comet-classic/classic-layout.js';
+import {
   COMET_HOOK_PLATFORM_IDS,
   readCometHookRequest,
   renderCometHookDecision,
 } from './hook-adapter.js';
+import { runWithHookReadCache } from '../../platform/process/hook-read-cache.js';
 import { inspectCometHook } from './hook-router.js';
 import type { CometHookDecision } from './hook-types.js';
+import { resolveCometHookProjectRoot } from './hook-project-root.js';
 
 const USAGE = 'Usage: comet-hook-router --platform <platform-id> [--project-root <project-root>]';
 
@@ -40,10 +46,15 @@ function parseArgs(args: readonly string[]): ParsedArgs {
   return { platformId, ...(projectRoot ? { projectRoot: path.resolve(projectRoot) } : {}) };
 }
 
-export async function projectRootFrom(parsed: ParsedArgs): Promise<string | null> {
-  if (parsed.projectRoot) return parsed.projectRoot;
+export async function projectRootFrom(
+  parsed: ParsedArgs,
+  request?: ReturnType<typeof readCometHookRequest>,
+): Promise<string | null> {
+  if (parsed.projectRoot) {
+    return request ? resolveCometHookProjectRoot(parsed.projectRoot, request) : parsed.projectRoot;
+  }
   const discovered = await discoverNativeProject(process.cwd());
-  for (const marker of [['.comet', 'config.yaml'], ['.git'], ['openspec', 'changes']]) {
+  for (const marker of [['.comet', 'config.yaml'], ['.git']]) {
     try {
       await fs.lstat(path.join(discovered, ...marker));
       return discovered;
@@ -51,17 +62,13 @@ export async function projectRootFrom(parsed: ParsedArgs): Promise<string | null
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
-  let cursor = path.resolve(process.cwd());
-  while (true) {
-    try {
-      await fs.lstat(path.join(cursor, 'openspec', 'changes'));
-      return cursor;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    const parent = path.dirname(cursor);
-    if (parent === cursor) break;
-    cursor = parent;
+  const classic = await discoverClassicProject(process.cwd());
+  const layout = await assertClassicLayoutReadable(classic);
+  try {
+    await fs.lstat(layout.changesDir);
+    return classic;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
   return null;
 }
@@ -77,9 +84,10 @@ export async function runCometHookRouter(args: readonly string[]): Promise<numbe
 
   let decision: CometHookDecision;
   try {
-    const projectRoot = await projectRootFrom(parsed);
+    const request = readCometHookRequest();
+    const projectRoot = await projectRootFrom(parsed, request);
     decision = projectRoot
-      ? await inspectCometHook(projectRoot, readCometHookRequest())
+      ? await runWithHookReadCache(() => inspectCometHook(projectRoot, request))
       : { allowed: true, reason: 'No Comet project discovered' };
   } catch (error) {
     decision = {

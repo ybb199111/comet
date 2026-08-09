@@ -34,15 +34,15 @@ vi.mock('../../../domains/comet-native/native-snapshot.js', async (importOrigina
     await importOriginal<typeof import('../../../domains/comet-native/native-snapshot.js')>();
   return {
     ...actual,
-    createNativeContentSnapshot: async (
-      ...args: Parameters<typeof actual.createNativeContentSnapshot>
+    createNativeCurrentContentSnapshot: async (
+      ...args: Parameters<typeof actual.createNativeCurrentContentSnapshot>
     ) => {
       if (snapshotMock.next !== null) {
         const next = snapshotMock.next;
         snapshotMock.next = null;
         return next;
       }
-      return actual.createNativeContentSnapshot(...args);
+      return actual.createNativeCurrentContentSnapshot(...args);
     },
     filterNativeContentSnapshotToProjectScope: async (
       ...args: Parameters<typeof actual.filterNativeContentSnapshotToProjectScope>
@@ -217,6 +217,7 @@ describe('Native Build evidence preparation', () => {
     paths = await nativeProjectPaths(projectRoot, '.');
     const created = await createNativeChange({
       paths,
+      verificationProtocol: 'legacy-v1',
       name: 'focused-change',
       language: 'en',
       now: new Date('2026-07-17T00:00:00.000Z'),
@@ -343,6 +344,7 @@ describe('Native Build evidence preparation', () => {
     );
     const created = await createNativeChange({
       paths,
+      verificationProtocol: 'legacy-v1',
       name: 'git-removal',
       language: 'en',
       now: new Date('2026-07-17T00:00:00.000Z'),

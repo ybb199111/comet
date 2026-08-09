@@ -5,6 +5,8 @@ description: "仅在用户明确调用 /comet-tweak，或由 Comet 根 Skill/run
 
 # Comet 预设路径：Tweak
 
+开始或恢复前必须先读取并执行 `comet/reference/classic-layout.md`；本文件中的 OpenSpec CLI 调用必须使用 adapter，文件路径必须使用该协议绑定的 `<classic-*>` 逻辑根。
+
 Tweak 是 Comet 五阶段能力的预设工作流，不是独立的平行流程。它串联 OpenSpec 的核心流程，复用 open、build、verify、archive 能力，仅跳过 Superpowers brainstorming 和完整 plan。
 
 适用于串联 OpenSpec 的轻量改动，例如配置调整、文档或 prompt 优化，以及需 spec 驱动（含 delta spec）但不需要完整 `/comet-classic` 深度设计流程的中等变更。delta spec 在 tweak 中是一等公民正常产物，需要 delta spec 本身不构成升级理由。
@@ -27,7 +29,7 @@ Tweak 是 Comet 五阶段能力的预设工作流，不是独立的平行流程�
 
 执行链路：open → OpenSpec apply → verify → archive。Tweak 为每个阶段提供默认决策：精简开启、通过 OpenSpec apply 直接构建、按规模与 delta spec 判定验证轻重、验证通过后进入归档前最终确认。
 
-开始前按 `comet/reference/scripts.md` 定位 Comet 脚本（定位 `comet-env.mjs`）；从任意入口恢复时先按 `comet/reference/context-recovery.md` 确认 phase/workflow。
+开始前按 `comet/reference/scripts.md` 运行公开 Comet CLI 命令；从任意入口恢复时先按 `comet/reference/context-recovery.md` 检查 phase/workflow。
 
 恢复已有 tweak change 时，第一项状态操作必须是 `comet state select <change-name>`；创建新 change 时，在 `.comet.yaml` 初始化成功后立即运行该命令，再进入源码写入步骤。
 
@@ -36,6 +38,9 @@ Tweak 是 Comet 五阶段能力的预设工作流，不是独立的平行流程�
 复用 Comet open 能力创建 change，但使用 tweak 默认值：不执行 `openspec-explore` 长探索，直接进入精简 change 创建。
 
 **立即执行：** 使用 Skill 工具加载 `openspec-new-change` 技能。禁止跳过此步骤。
+
+<!-- external-openspec-skill-override -->
+**外部 OpenSpec Skill 覆写：** 加载后不得执行其中直接官方 CLI、固定 cwd 或固定物理 OpenSpec 路径的指令；所有 OpenSpec 命令改用 `comet classic openspec -- <args...>`，所有 change 与 artifact 路径改用本轮绑定的 `<classic-*>` 逻辑根。
 
 技能加载后，按其指引创建精简版产物：
   - `proposal.md` — 变更动机 + 目标 + 范围
@@ -88,10 +93,13 @@ comet guard <change-name> open --apply
 
 **立即执行：** 使用 Skill 工具加载 `openspec-apply-change` 技能。禁止跳过此步骤。
 
+<!-- external-openspec-skill-override -->
+**外部 OpenSpec Skill 覆写：** 加载后只采用其 apply 语义；其中任何直接官方 CLI、固定 cwd 或固定物理 OpenSpec 路径都必须替换为 `comet classic openspec -- <args...>` 与 `<classic-*>` 逻辑根。
+
 技能加载后，以当前 `<change-name>` 作为输入，按 `openspec-apply-change` 的指引执行 OpenSpec apply 流程：
 
-1. 运行或遵循 `openspec status --change "<name>" --json`，确认 schema 和任务 artifact
-2. 运行或遵循 `openspec instructions apply --change "<name>" --json`，读取 OpenSpec 返回的 apply 指令、`contextFiles`、任务进度和动态 instruction
+1. 运行或遵循 `comet classic openspec -- status --change "<name>" --json`，确认 schema 和任务 artifact
+2. 运行或遵循 `comet classic openspec -- instructions apply --change "<name>" --json`，读取 OpenSpec 返回的 apply 指令、`contextFiles`、任务进度和动态 instruction
 3. 读取 apply 指令列出的所有 context files，不得只凭旧对话或手写 tasks 循环实现
 4. 按 apply 指令逐个完成未勾选任务，保持改动最小且聚焦
 5. 每完成一个任务后：
@@ -145,7 +153,7 @@ comet state set <change-name> verify_mode full
 <IMPORTANT>
 Tweak 流程默认 **一次性连续执行**。调用 `/comet-tweak` 后，agent 在 tweak 自有步骤间自动推进，不主动停顿。**例外**：若 `auto_transition: false`，则在每个 phase 边界（build/verify/archive 之间）结束当前调用并按 `HINT` 交还控制权，由用户稍后手动运行下一阶段命令；这是手动衔接，不是新的确认点。无论 `auto_transition` 取何值，以下真正的用户决策仍需暂停：
 
-1. 遇到升级判定信号（见「升级判定」章节），**必须使用当前平台可用的用户输入/确认机制暂停并等待用户明确选择**：继续 tweak 轻量流程，还是升级为完整 `/comet-classic` 流程
+1. 遇到升级判定信号（见「升级判定」章节），**必须暂停、展示选择并等待用户明确选择**：继续 tweak 轻量流程，还是升级为完整 `/comet-classic` 流程
 2. 验证阶段（comet-verify）接受 WARNING/SUGGESTION 偏差、处理 Spec 漂移或超过自动修复上限后的策略决策；前 3 次明确可修复失败自动闭环
 3. 归档前最终确认，以及归档提交后的分支处理决策
 

@@ -5,6 +5,8 @@ description: "Use only when explicitly invoked as /comet-hotfix or routed by the
 
 # Comet Preset Path: Hotfix
 
+Before starting or recovering, read and follow `comet/reference/classic-layout.md`. Every OpenSpec CLI call in this file must use the adapter, and every file path must use the `<classic-*>` logical roots bound by that protocol.
+
 Quick bug fix workflow: open → build → verify → archive. Skip brainstorming and full plan, applicable for behavior fixes not involving new capability design.
 
 **Applicable conditions** (all must be met):
@@ -24,7 +26,7 @@ Streamlined OpenSpec artifacts must use the configured Comet artifact language. 
 
 Execution chain: open → build → root cause check → verify → archive. Hotfix provides default decisions for each phase: streamlined open, direct build, root cause confirmation, scale-based verification, and final archive confirmation after verification passes.
 
-Before starting, locate Comet scripts via `comet/reference/scripts.md`. When resuming from any entry point, first use `comet/reference/context-recovery.md` to confirm phase/workflow.
+Before starting, use `comet/reference/scripts.md` to run the public Comet CLI command. When resuming from any entry point, first use `comet/reference/context-recovery.md` to check phase/workflow.
 
 When resuming an existing hotfix change, the first state operation must be `comet state select <change-name>`. For a new change, run the command immediately after `.comet.yaml` initialization and before source writes.
 
@@ -33,6 +35,9 @@ When resuming an existing hotfix change, the first state operation must be `come
 Reuse Comet open capability to create change, but use hotfix defaults: do not execute `openspec-explore` long exploration, directly enter streamlined change creation.
 
 **Immediately execute:** Use the Skill tool to load the `openspec-new-change` skill. Skipping this step is prohibited.
+
+<!-- external-openspec-skill-override -->
+**External OpenSpec Skill override:** Do not execute its direct official CLI, fixed-cwd, or fixed physical OpenSpec path instructions. Route every OpenSpec command through `comet classic openspec -- <args...>` and use the `<classic-*>` logical roots bound for this run for every change and artifact path.
 
 After the skill loads, create the change skeleton first, then immediately initialize recoverable state and bind the current change:
 
@@ -91,7 +96,7 @@ Before implementation, **reproduce the bug and record failing evidence first**:
 
 After RED evidence exists, execute tasks one by one according to tasks.md:
 
-1. Read `openspec/changes/<name>/tasks.md`, get incomplete task list
+1. Read `<classic-change-dir>/tasks.md`, get incomplete task list
 2. For each incomplete task:
    - Modify code according to task description
    - Run project formatter (e.g., `mvn spotless:apply`, `npm run format`)
@@ -101,7 +106,7 @@ After RED evidence exists, execute tasks one by one according to tasks.md:
 3. After all tasks complete, explicitly run relevant project tests and build commands
 
 **If fix affects existing spec acceptance scenarios**:
-- Create delta spec in `openspec/changes/<name>/specs/<capability>/spec.md`
+- Create delta spec in `<classic-change-dir>/specs/<capability>/spec.md`
 - Only include `## MODIFIED Requirements` section
 
 During hotfix execution, whenever a crash, unexpected behavior, test failure, or build failure appears while running the program, tests, build, or manual verification, must use the Skill tool to load the Superpowers `systematic-debugging` skill. Before root-cause investigation is complete, must not propose or implement source-code fixes.
@@ -156,7 +161,7 @@ Exception: when `.comet.yaml` has `auto_transition: false`, end the current invo
 
 The following genuine user decisions still pause:
 
-1. Encountering an upgrade-assessment signal (see "Upgrade Assessment" section). **Must use the current platform's available user input/confirmation mechanism to pause and wait for the user to explicitly choose**: continue the hotfix flow, or upgrade to the full `/comet-classic` workflow
+1. Encountering an upgrade-assessment signal (see "Upgrade Assessment" section). **Pause, present the choices, and wait for the user to explicitly choose**: continue the hotfix flow, or upgrade to the full `/comet-classic` workflow
 2. Verify-phase acceptance of WARNING/SUGGESTION deviations, Spec drift handling, or strategy after the automatic repair limit; the first 3 clearly repairable failures close automatically
 3. Final archive confirmation and the branch-handling decision after the archive commit
 

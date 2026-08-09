@@ -67,6 +67,142 @@ def _extract_loop_interaction(stderr: str | None) -> dict[str, int | None]:
     }
 
 
+def _bounded_command_evidence(command: str, matches: list[re.Match[str]]) -> str:
+    chunks: list[str] = []
+    remaining = 4000
+    last_end = -1
+    for match in matches:
+        start = max(0, match.start() - 300)
+        end = min(len(command), match.end() + 300)
+        if start <= last_end and chunks:
+            overlap = max(0, last_end - start)
+            addition = command[start + overlap : end]
+            addition = addition[:remaining]
+            chunks[-1] += addition
+            remaining -= len(addition)
+            last_end = max(last_end, end)
+        else:
+            chunk = command[start:end][:remaining]
+            if chunks:
+                separator = "\n...[truncated]...\n"
+                if len(separator) > remaining:
+                    break
+                chunks.append(separator)
+                remaining -= len(separator)
+            chunks.append(chunk)
+            remaining -= len(chunk)
+            last_end = end
+        if remaining <= 0:
+            break
+    excerpt = "".join(chunks)
+    return re.sub(
+        r"(?i)\b(api[_-]?key|auth[_-]?token|password|secret)\s*=\s*"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s;]+)",
+        r"\1=[REDACTED]",
+        excerpt,
+    )
+
+
+def _tool_result_succeeded(item: dict[str, Any]) -> bool:
+    is_error = item.get("is_error")
+    if is_error is True or str(is_error).strip().lower() == "true" or item.get("error"):
+        return False
+    status = str(item.get("status") or "").strip().lower()
+    if status in {"error", "failed", "failure", "cancelled", "canceled"}:
+        return False
+    content = item.get("content", "")
+    if isinstance(content, list):
+        content = " ".join(
+            str(block.get("text") or "") if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    return not bool(
+        re.search(
+            r"(?i)^\s*(?:error|failed|failure|tool[_ -]?error)\b|"
+            r"\b(?:exit|exited with)(?:\s+code)?\s*[1-9]\d*\b",
+            str(content),
+        )
+    )
+
+
+def _extract_subject_turn_evidence(stdout: str | None) -> list[dict[str, Any]]:
+    """Group safe assistant result text and bounded tool evidence by subject turn."""
+    turns: list[dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
+    tool_calls_by_id: dict[str, dict[str, Any]] = {}
+    last_assistant_text = ""
+    for line in (stdout or "").splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "assistant":
+            content = (event.get("message") or {}).get("content") or []
+            assistant_text = " ".join(
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+            if assistant_text:
+                last_assistant_text = assistant_text
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    name = block.get("name")
+                    if isinstance(name, str) and name:
+                        evidence: dict[str, Any] = {"name": name, "success": False}
+                        tool_input = block.get("input")
+                        if isinstance(tool_input, dict):
+                            for key in ("file_path", "path", "notebook_path"):
+                                value = tool_input.get(key)
+                                if isinstance(value, str) and value:
+                                    evidence["path"] = value[:500]
+                                    break
+                            command = tool_input.get("command")
+                            if isinstance(command, str) and command:
+                                target_matches = list(
+                                    re.finditer(
+                                        r"(?i)(?:[a-z]:)?[./\\\w-]*\.py\b|"
+                                        r"\bbrief\.md\b|"
+                                        r"\bspec\.md\b",
+                                        command,
+                                    )
+                                )
+                                if target_matches:
+                                    evidence["command"] = _bounded_command_evidence(
+                                        command, target_matches
+                                    )
+                        tool_calls.append(evidence)
+                        tool_id = block.get("id")
+                        if isinstance(tool_id, str) and tool_id:
+                            tool_calls_by_id[tool_id] = evidence
+            continue
+        if event.get("type") == "user":
+            content = (event.get("message") or {}).get("content") or []
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tool_use_id = block.get("tool_use_id")
+                if isinstance(tool_use_id, str) and tool_use_id in tool_calls_by_id:
+                    tool_calls_by_id[tool_use_id]["success"] = _tool_result_succeeded(block)
+            continue
+        if event.get("type") != "result":
+            continue
+        result = event.get("result")
+        turns.append(
+            {
+                "turn": len(turns) + 1,
+                "result": result if isinstance(result, str) and result else last_assistant_text,
+                "tool_calls": tool_calls,
+            }
+        )
+        tool_calls = []
+        tool_calls_by_id = {}
+        last_assistant_text = ""
+    return turns
+
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -78,6 +214,8 @@ REPOSITORY_ROOT = EVAL_ROOT.parent
 # Shared files for xdist worker coordination
 XDIST_EXPERIMENT_FILE = PROJECT_ROOT / ".pytest_experiment_id"
 DOCKER_BUILD_LOCK = PROJECT_ROOT / ".pytest_docker_build.lock"
+EXPERIMENT_ID_ENV = "COMET_EVAL_EXPERIMENT_ID"
+EXPERIMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 # Global plugin instance (set during pytest_configure)
 _plugin: "ExperimentPlugin | None" = None
@@ -233,6 +371,8 @@ def _copy_current_comet_cli_snapshot(environment_dir: Path, test_dir: Path) -> N
     target.mkdir(parents=True)
     package_file = REPOSITORY_ROOT / "package.json"
     bin_dir = REPOSITORY_ROOT / "bin"
+    assets_dir = REPOSITORY_ROOT / "assets"
+    assets_manifest = assets_dir / "manifest.json"
     source_roots = [
         REPOSITORY_ROOT / "app",
         REPOSITORY_ROOT / "domains",
@@ -253,7 +393,15 @@ def _copy_current_comet_cli_snapshot(environment_dir: Path, test_dir: Path) -> N
         )
         if path.is_file()
     )
-    if not package_file.is_file() or not bin_dir.is_dir() or not source_files:
+    asset_files = _regular_tree_files(assets_dir) if assets_dir.is_dir() else []
+    source_files.extend(asset_files)
+    if (
+        not package_file.is_file()
+        or not bin_dir.is_dir()
+        or not assets_manifest.is_file()
+        or not asset_files
+        or not source_files
+    ):
         raise FileNotFoundError("Current Comet source snapshot is incomplete")
     source_hash, source_count = _tree_digest(REPOSITORY_ROOT, sorted(set(source_files)))
     with tempfile.TemporaryDirectory(prefix="comet-eval-source-build-") as temporary:
@@ -261,9 +409,12 @@ def _copy_current_comet_cli_snapshot(environment_dir: Path, test_dir: Path) -> N
         compiler_version = _build_current_comet_dist(REPOSITORY_ROOT, built_dist)
         shutil.copytree(built_dist, target / "dist")
     shutil.copytree(bin_dir, target / "bin")
+    shutil.copytree(assets_dir, target / "assets")
     shutil.copy2(package_file, target / "package.json")
     snapshot_files = [
-        path for relative in ("bin", "dist") for path in _regular_tree_files(target / relative)
+        path
+        for relative in ("assets", "bin", "dist")
+        for path in _regular_tree_files(target / relative)
     ] + [target / "package.json"]
     snapshot_hash, snapshot_count = _tree_digest(target, sorted(snapshot_files))
     identity = {
@@ -273,6 +424,9 @@ def _copy_current_comet_cli_snapshot(environment_dir: Path, test_dir: Path) -> N
         "snapshotHash": snapshot_hash,
         "snapshotFileCount": snapshot_count,
         "packageHash": hashlib.sha256((target / "package.json").read_bytes()).hexdigest(),
+        "assetsHash": _tree_digest(target, _regular_tree_files(target / "assets"))[0],
+        "assetsFileCount": len(_regular_tree_files(target / "assets")),
+        "manifestHash": hashlib.sha256((target / "assets/manifest.json").read_bytes()).hexdigest(),
         "entryHash": hashlib.sha256((target / "dist/app/cli/index.js").read_bytes()).hexdigest(),
         "nativeAdapterHash": hashlib.sha256(
             (target / "dist/domains/dashboard/native-adapter.js").read_bytes()
@@ -329,7 +483,6 @@ def _copy_trusted_native_runtime_snapshot(
     )
 
 
-# =============================================================================
 # PYTEST HOOKS
 # =============================================================================
 
@@ -695,6 +848,7 @@ def _resolve_interaction_config(task, profile_name: str, config):
         task_interaction.decision_patterns or profile_default.decision_patterns
     )
     decision_reply = task_interaction.decision_reply or profile_default.decision_reply
+    decision_replies = list(task_interaction.decision_replies or profile_default.decision_replies)
     continue_prompt = task_interaction.continue_prompt or profile_default.continue_prompt
     fresh_resume_marker = task_interaction.fresh_resume_marker
 
@@ -712,7 +866,7 @@ def _resolve_interaction_config(task, profile_name: str, config):
     prompt_path = Path(prompt_file) if prompt_file else (EVAL_ROOT / "simulator-instruction.md")
     if not prompt_path.is_absolute():
         prompt_path = EVAL_ROOT / prompt_path
-    if prompt_path.exists():
+    if prompt_path.exists() and (prompt_file or not task_interaction.simulator_prompt):
         simulator_prompt = prompt_path.read_text(encoding="utf-8")
 
     if simulator_prompt_override:
@@ -724,6 +878,7 @@ def _resolve_interaction_config(task, profile_name: str, config):
         simulator_prompt=simulator_prompt,
         decision_patterns=decision_patterns,
         decision_reply=decision_reply,
+        decision_replies=decision_replies,
         continue_prompt=continue_prompt,
         fresh_resume_marker=fresh_resume_marker,
     )
@@ -777,6 +932,14 @@ def _ensure_claude_pre_tool_hook(test_dir: Path, command: str | None) -> None:
 
 def _get_or_create_experiment_id(name: str, use_coordination: bool) -> str:
     """Get shared experiment ID or create new one."""
+    requested = os.environ.get(EXPERIMENT_ID_ENV)
+    if requested is not None:
+        if not EXPERIMENT_ID_RE.fullmatch(requested):
+            raise ValueError(
+                f"{EXPERIMENT_ID_ENV} must contain only letters, digits, dot, underscore, or hyphen"
+            )
+        return requested
+
     if not use_coordination:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"{name}_{timestamp}"
@@ -945,6 +1108,31 @@ def verify_environment(project_root, request):
         pytest.skip("Claude CLI not available")
 
 
+def _docker_environment_dirs_for_request(request, tasks_dir: Path) -> list[Path]:
+    """Return only task environments selected by the current eval invocation."""
+    if not tasks_dir.exists():
+        return []
+
+    all_task_names = sorted(task_dir.name for task_dir in tasks_dir.iterdir() if task_dir.is_dir())
+    task_filter = request.config.getoption("--task")
+    manifest_path = request.config.getoption("--eval-manifest")
+    if task_filter:
+        task_names = [task_filter]
+    elif manifest_path:
+        from scaffold.python.manifests import load_eval_manifest
+
+        task_names = load_eval_manifest(manifest_path).recommended_tasks or all_task_names
+    else:
+        task_names = all_task_names
+
+    return [
+        environment_dir
+        for task_name in task_names
+        if (environment_dir := tasks_dir / task_name / "environment").is_dir()
+        and (environment_dir / "Dockerfile").is_file()
+    ]
+
+
 @pytest.fixture(scope="session", autouse=True)
 def prebuild_docker_image(request):
     """Pre-build Docker image once per session to avoid race conditions."""
@@ -953,14 +1141,10 @@ def prebuild_docker_image(request):
         return
 
     tasks_dir = PROJECT_ROOT / "tasks"
-    if tasks_dir.exists():
-        for task_dir in tasks_dir.iterdir():
-            if task_dir.is_dir():
-                env_dir = task_dir / "environment"
-                if env_dir.exists() and (env_dir / "Dockerfile").exists():
-                    image = _build_docker_image_with_lock(env_dir)
-                    if image:
-                        print(f"\nPre-built Docker image: {image}")
+    for env_dir in _docker_environment_dirs_for_request(request, tasks_dir):
+        image = _build_docker_image_with_lock(env_dir)
+        if image:
+            print(f"\nPre-built Docker image: {image}")
 
     yield
 
@@ -1012,7 +1196,10 @@ def setup_test_context(test_dir):
 
     def _copy_environment(environment_dir: Path) -> None:
         for item in environment_dir.iterdir():
-            if item.name in {CURRENT_COMET_CLI_MARKER, TRUSTED_NATIVE_RUNTIME_MARKER}:
+            if item.name in {
+                CURRENT_COMET_CLI_MARKER,
+                TRUSTED_NATIVE_RUNTIME_MARKER,
+            }:
                 continue
             dest = test_dir / item.name
             if item.is_dir():
@@ -1137,12 +1324,18 @@ def run_claude(test_dir, experiment_logger, request):
                 loop_args += ["--decision-pattern", pattern]
             if interaction.decision_reply:
                 loop_args += ["--decision-reply", interaction.decision_reply]
+            for decision_reply_step in interaction.decision_replies:
+                loop_args += ["--decision-reply-step", decision_reply_step]
             if interaction.fresh_resume_marker:
                 loop_args += ["--fresh-resume-marker", interaction.fresh_resume_marker]
 
             prompt_file = None
             try:
-                if interaction.simulator_prompt and not interaction.decision_reply:
+                if (
+                    interaction.simulator_prompt
+                    and not interaction.decision_reply
+                    and not interaction.decision_replies
+                ):
                     prompt_file = test_dir / ".eval-simulator-prompt.txt"
                     prompt_file.write_text(interaction.simulator_prompt, encoding="utf-8")
                     loop_args += [
@@ -1394,7 +1587,9 @@ def _build_docker_image_with_lock(environment_dir: Path) -> str | None:
         return None
 
     with file_lock(DOCKER_BUILD_LOCK):
-        result = run_shell("docker.sh", "build", str(environment_dir), timeout=300, check=False)
+        # A cold image build downloads Debian packages and installs the Claude CLI.
+        # Five minutes is insufficient after cache cleanup or on a proxied connection.
+        result = run_shell("docker.sh", "build", str(environment_dir), timeout=900, check=False)
         if result.returncode == 0:
             return result.stdout.strip()
         return None

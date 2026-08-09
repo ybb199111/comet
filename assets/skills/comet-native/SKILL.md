@@ -1,257 +1,219 @@
 ---
 name: comet-native
-description: Use when the user explicitly invokes /comet-native, asks to start or resume a Native change, or the entry routes to Native; clarify requirements, read state, and drive Shape → Build → Verify → Archive.
+description: Use when the user explicitly invokes /comet-native, asks to start or resume a Native change, or the entry router selects Native; clarify requirements, read state, and drive Shape → Build → Verify → Archive.
 ---
 
 # Comet Native
 
-Native stores requirements, complete target specifications, state, and evidence. You own understanding, implementation, and verification; the Runtime owns state, boundaries, and recovery.
+Native stores requirements, complete target specifications, state, and evidence. You understand, implement, and verify; the Runtime owns state, boundaries, and recovery.
 
-Run the entire workflow inside this Skill. Do not load phase Skills or impose fixed Plan, TDD, Debug, or Review methods.
+## Core rules
 
-## Clarification Protocol
+Read these values from `.comet/config.yaml`:
 
-Read `native.clarification_mode` from `.comet/config.yaml`. Allowed values are `sequential` and `batch`; use `sequential` when the field is absent. This setting changes only how user questions are organized. It does not change Native phases, state, Guards, safety confirmations, or caller-defined stop points.
+- `native.clarification_mode`: defaults to `sequential`;
+- `native.archive_confirmation`: defaults to `automatic`;
+- `native.max_verify_failures`: defaults to `5`.
 
-First identify undefined branches that would change user-visible results. Words such as “normalize,” “intuitive,” “standard,” and “expected” are not product contracts. Only the user's words, a confirmed answer, or a published contract that clearly applies to the current behavior can close such a branch.
+Config, selection, change state, and formal artifacts on disk take precedence over chat memory. Do not directly edit Runtime-managed state, evidence, locks, or transaction files.
 
-Repository conventions, dependency defaults, adjacent features, and industry practice may support a recommendation. They do not replace a user decision. “Preserve existing behavior” constrains existing results; it does not define new behavior automatically.
+The Native main workflow does not depend on any external Skill.
 
-First determine whether a branch affects only implementation and leaves every user-visible result unchanged. If you cannot prove that, treat it as a user decision. Even when the user says not to ask about implementation choices, do not reclassify a product decision as an implementation choice.
+## CLI bootstrap
 
-You are responsible for investigating facts available from the repository, tools, or runtime environment. Do not ask the user to supply them. When the host supports parallel work, independent facts may be investigated in parallel, but parallel capability must not be a workflow prerequisite. An unresolved fact blocks only questions that depend on it, not other questions that are ready.
+The Native Skill uses only the public `comet native <cmd>` CLI on PATH. Packaged command bundles are internal installation and Runtime assets; the Skill does not search for or invoke them directly. If a command returns `command not found`, `executable not found`, or `ENOENT`, stop and explain that the Comet CLI installation is incomplete. Do not search for Skill files, enumerate platform directories, or invoke an internal bundle directly.
 
-Combine details only when they jointly define the same user decision. Do not merge independent user decisions: Sequential mode handles them in separate rounds, while Batch mode numbers each one separately. Do not manufacture ambiguity to increase the question count or include implementation choices in the user question list. If a question still leaves a reasonable interpretation of that same decision uncovered, broaden that question instead of creating another question with an unclear dependency.
+Common commands:
 
-### Question interface
-
-Before asking, inspect the current host's tool list. When the current tool list provides `AskUserQuestion`, prefer it in Claude Code for presenting structured options; on other hosts, use an equivalent user-input tool. Give every option a short label and an impact description. Mark the recommended option in its description, but never select it on the user's behalf.
-
-- Sequential mode submits one structured question per round. Use single-select when the options are mutually exclusive. Use multi-select only when the same user decision genuinely permits multiple compatible selections. Do not compress independent user decisions into one multi-select question.
-- In Batch mode, when the complete set fits the current tool's limits on questions, options, and fields, put the entire ready question set in the same call. Do not split the same round across multiple tool calls so that later questions remain hidden until after an earlier answer.
-- When the current host has no structured question tool, or a Batch round cannot be expressed completely in one call, use the numbered-text fallback for the entire round. Preserve the same questions, options, recommendations, and impacts, then stop and wait for the user to reply with the numbers.
-- If the first call fails or the host reports an error, treat structured questions as unavailable for this session. Use the text fallback for the current round and do not retry it again during this session. After a successful tool call, wait for the user's answers and do not also output a duplicate set of text questions.
-
-### Sequential mode
-
-When a user decision remains:
-
-1. Record one `[blocking]` question in the brief.
-2. Ask only the most upstream question.
-3. Provide “Question / Recommendation / Impact,” then end the turn.
-
-When no user decision remains, continue directly without adding a generic final confirmation.
-
-### Batch mode
-
-Organize unresolved user decisions by their prerequisite relationships. Maintain only reviewable open items, dependency summaries, and formal artifacts; do not persist hidden reasoning or a complete internal exploration.
-
-For each round, compute the ready question set. Every question in the set must have all prerequisite decisions settled, all required environment facts established, and an answer that does not depend on another question in the same round. Defer questions that depend on an unresolved decision or a fact still under investigation.
-
-For the ready question set:
-
-1. Under Open questions in the brief, persist each item using the exact forms `- [blocking] Q1: <question>`, `- [blocking] Q2: <question>`, and so on. Do not replace this prefix with a Markdown ordered list.
-2. Ask the entire set together, giving “Question / Recommendation / Impact” for each item. Numbering must let the user reply in forms such as “1 use the recommendation; 2 choose B.”
-3. After updating the formal artifacts and asking the questions, end the turn. Do not enter Build or call `next`.
-
-Use this format:
-
-```text
-1. Question: …
-   Recommendation: …
-   Impact: …
-
-2. Question: …
-   Recommendation: …
-   Impact: …
-```
-
-After the user answers, write confirmed content into Decisions and the complete target specifications, then remove the corresponding `[blocking]` items. Keep unanswered or ambiguous items `[blocking]`; never fill them from the recommendation. Recompute the ready question set from the new answers and continue round by round as new branches become available.
-
-When the ready question set is empty, all relevant facts are established, and every identified user decision is resolved, perform one completeness review. Recheck that no user-visible branch remains unaddressed or silently assumed. Present a shared-understanding summary that covers the outcome, scope, key decisions, acceptance criteria, and explicit non-goals, then persist the final confirmation as `- [blocking] CONFIRM: <confirmation>` in the brief. Until the user confirms explicitly, do not enter Build or call `next`. If the user adds or rejects anything, update the affected branches and continue with another round. After explicit confirmation, remove the blocking item, record the confirmation, and follow the normal transition.
-
-For text “normalization,” for example, cover case folding, surrounding punctuation, preservation of internal punctuation or apostrophes, and use counterexamples to show how each choice changes output.
-
-Before shared understanding, you may inspect repository facts, create or resume the Native change, and record `[blocking]` in the brief. Do not enter Build, modify project implementation, or call `next`.
-
-After the user answers, update the existing change's brief and complete target specifications, then check again for unresolved user decisions. Do not create another change for a clarification answer or write an unconfirmed option as decided behavior.
-
-When leaving Shape, pass `--confirmed` only if this turn recorded the user's answer to an existing blocking question. Batch mode's final shared-understanding confirmation qualifies; the initial feature request does not.
-
-If the caller requires a stop or session switch after that transition, use this exact sequence: update the formal artifacts → run the one allowed transition → make no tool calls after the transition succeeds → output the agreed marker and end the turn. A Runtime response of `continuation.disposition: continue` does not override that stop point.
-
-## Execution Boundaries and Point-in-Time Evidence
-
-When the caller defines a stop point, complete only the work allowed before it. In the next session, invoke `/comet-native` again and recover from status, selection, and formal artifacts on disk. Do not reconstruct progress from chat memory.
-
-If the caller asks for a Runtime envelope from before a state change or another exact point in time, generate it before crossing that point with the real command in machine-readable mode and redirect stdout directly to the target. The file is immutable evidence. After confirming that it is complete, do not rebuild, refresh, or overwrite it after state changes. Evidence records only what the Runtime actually returned at that time.
-
-## Start or Resume
-
-`/comet-native` is a Skill entry, not a shell command. Invoke it through the host's Skill mechanism; do not execute `/comet-native` in a shell.
-
-Run Native `status` and `show` first. When resuming Verify or Archive, run `status <change-name> --details` and read the bounded acceptance page, detailed findings, `findingsTruncated`, and the latest checkpoint.
-
-- If findings are truncated, address the returned items and read details again.
-- If `acceptancePage.nextCursor` is non-null, continue paging as documented in the command reference.
-- Then read `.comet/config.yaml` and determine `native.clarification_mode` before reading `comet-state.yaml`, the brief, proposed specifications, canonical specifications, repository implementation, project rules, and relevant tests.
-- Disk and repository facts outrank chat memory. Do not ask the user for facts available from the environment.
-
-When active changes exist, first confirm read-only which change matches the current goal. Then select the confirmed change explicitly:
-
-```text
+```bash
+comet native status [--json]
+comet native show <change-name>
 comet native select <change-name>
-```
-
-This establishes the project-wide shared selection. Do not add a `resume` command or rely on side effects from read-only `status` or `show` calls.
-
-If several active changes exist and the selection does not identify the target uniquely, ask the user to choose. Create a new change only when disk facts prove that no active change exists:
-
-```text
-comet native new <change-name> --language en
-```
-
-Derive the name as lowercase kebab-case. Use only the configured `<artifact-root>/comet/`; do not scan or modify another workflow's directories.
-
-See the [command reference](reference/commands.md) for commands and Runtime location, the [artifact reference](reference/artifacts.md) for formats, and the [recovery reference](reference/recovery.md) for interruption handling. The bundled Runtime is [scripts/comet-native-runtime.mjs](scripts/comet-native-runtime.mjs).
-
-Installations have one Comet workflow Rule per platform and one `comet-hook-router.mjs` on platforms that support Hooks. The Rule and Router use `.comet/config.yaml` and `.comet/current-change.json` to identify the current workflow. Each write is routed to at most one Guard.
-
-For a Native change, apply only Native Shape, Build, Verify, and Archive boundaries. Do not run the Native and Classic Guards together or guess ownership from the default workflow. The Native flow does not depend on any external Skill.
-
-## Decision Protocol
-
-Maintain a list of unresolved user-visible branches and handle them in dependency order. Check especially:
-
-- output and default behavior;
-- edge cases and failure results;
-- scope, risk, and irreversible actions;
-- existing constraints that clearly apply to the current behavior.
-
-Rewrite important nouns or actions as distinguishing “input → output” or “trigger → result” examples. If one counterexample separates two reasonable interpretations, the branch still needs a user decision.
-
-For text or token behavior, normally inspect case, surrounding and internal punctuation, whitespace, Unicode, empty input, duplicates, ordering, and tied results. For CLI or API behavior, inspect defaults and error results. Do not invent ambiguity merely to cover a checklist.
-
-Only user-provided information, explicit non-goals, confirmed decisions, or a clear published contract for the current capability may close a branch. When blocked, follow the Clarification Protocol to compute and ask either one question or the ready question set for the configured mode. Do not call `next` or modify project implementation before the answer.
-
-When no unresolved branch remains and the brief, complete target specifications, repository facts, and project rules are sufficient to implement and accept the work, Sequential mode continues directly. Batch mode first completes its final shared-understanding confirmation.
-
-## Progression Contract
-
-Shape, Build, and Verify transitions return `next: auto | manual` together with `continuation.disposition: continue | await-user | blocked | done`, required inputs, and the next action. Archive does not advance through `next`; successful archive returns `done`.
-
-These fields form the machine-readable continuation contract. `next: auto` means that the current transition succeeded; it does not mean that the host executes later work in the background.
-
-After `next: auto` with disposition `continue`, reread the returned phase and required artifacts. When no user decision or Runtime blocker remains, continue into the next phase inside this Skill without waiting for another invocation.
-
-For `await-user`, `blocked`, or `next: manual`, first resolve the returned disk facts and blocking findings. Ask only when the missing input is genuinely a user decision.
-
-In Batch mode, unanswered questions and the final shared-understanding confirmation remain `[blocking]`. They are normal stop points for user input. They do not change the continuation contract and cannot be bypassed by automatic progression.
-
-`workspace-root-changed` and `workspace-inspection-unavailable` are read-only advisories and do not block progress or archive by themselves. Unknown workspace findings, confirmed conflicts, stale evidence, and repair stops must be resolved.
-
-For long work that must resume within a phase, use `comet native checkpoint` to save a short summary, next action, and real artifact references. A checkpoint does not advance phase or replace the brief, specifications, or verification report. Do not create separate resume, handoff, or task-list artifacts.
-
-## Shape
-
-Confirm and record Outcome, Scope, Non-goals, Acceptance examples, Constraints and invariants, Decisions, Open questions, and Verification expectations. Mark blocking questions in the brief as `- [blocking]`; Batch mode may preserve the entire ready question set at once.
-
-Shape is complete only when the brief, complete target specifications, repository facts, and project rules let the next executor implement and accept the change without guessing user-visible behavior.
-
-- Update `brief.md` so it constrains implementation and acceptance.
-- Preserve a user-provided lowercase kebab-case capability ID exactly in `specs/<capability>/spec.md`.
-- If the user provided only a display name, preserve it in the body and derive a stable lowercase kebab-case capability ID.
-- When lasting behavior changes, write the complete post-archive target specification, not an incremental patch.
-- To remove a capability, run `comet native spec remove <change-name> <capability>`; the Runtime infers and freezes the operation and canonical base hash.
-- If unresolved decisions remain, preserve `[blocking]` and stop.
-
-When ready, run:
-
-```text
-comet native next <change-name> --summary <summary>
-```
-
-Append `--confirmed` only when this turn recorded the user's answer to an existing blocking question; Batch mode must first obtain the final shared-understanding confirmation. The Runtime binds approval to the current brief/spec contract hash. If the contract changes during Build, obtain user confirmation for the current contract and retry with the command returned by status. Do not edit `approval` or `approved_contract_hash` manually.
-
-## Build
-
-Choose the simplest reliable implementation that satisfies the brief and proposed specifications. Decide implementation details, whether to save a plan, test granularity, debugging method, and review depth according to risk.
-
-Do not create extra documents merely to satisfy the workflow. If requirements or specifications drift, update the Native artifacts first. If a new user decision appears, mark it `[blocking]` and follow the configured clarification protocol. Batch mode must recompute the ready question set and obtain a final confirmation of the updated shared understanding before implementation continues.
-
-When implementation is complete, provide real project artifacts. If no code changed, provide a concrete reason. Then run:
-
-```text
-comet native next <change-name> --summary <summary> --artifact <project-path> [--confirmed]
-```
-
-Use `--no-code-reason` as documented when no code changed. The Runtime returns the implementation scope and first `acceptancePage`. Preserve Runtime-derived acceptance IDs and read every page through `nextCursor`; never calculate IDs yourself.
-
-Git snapshots contain tracked and non-ignored untracked files, with each submodule/gitlink treated atomically. Non-Git projects use a bounded physical-tree snapshot.
-
-- `git-selection-changed`: wait until Git writes are stable, then retry. It cannot be authorized as partial scope.
-- `git-enumeration-limit`: first reduce or clean the project-owned universe. Use the partial protocol only when the Runtime returns an authorizable scope and the user accepts the specific risk from the unenumerated tail.
-- `physical-selection-changed` or `physical-enumeration-limit`: wait for a stable filesystem or reduce the project tree, then retry. Neither can be authorized as partial scope.
-
-When the Runtime cannot prove that scope is complete, it remains in Build and returns a partial scope hash with unattributed items. First add real artifacts or eliminate unattributed changes. If partial scope is unavoidable, explain the exact gap, obtain user confirmation, and use the same hash:
-
-```text
---allow-partial-scope <sha256> --partial-reason <reason> --confirmed
-```
-
-Never edit snapshots or evidence, guess unenumerated paths, or present partial scope as complete.
-
-## Verify
-
-Run verification appropriate to the Acceptance examples, complete target specifications, and risk. Record actual commands, results, skipped checks, specification consistency, known limitations, and the conclusion. Never record an unrun check as passed.
-
-In the fixed acceptance evidence block of `verification.md`, use every Runtime-provided `acceptance_id`. Each item must contain either project-relative evidence refs or an honest `skipped_reason`. See the artifact reference for the exact format.
-
-When you need reproducible text-hygiene evidence, run the built-in read-only check:
-
-```text
-comet native check <change-name>
-```
-
-This command scans a bounded set of regular project text files in the current implementation scope/current snapshot. It does not invoke Git, a shell, project scripts, external processes, or external Skills. It does not modify project files, phase, Run, or trajectory; it writes a content-addressed receipt. It does not replace risk-based project tests.
-
-After writing the report, run:
-
-```text
-comet native next <change-name> --summary <summary> --result pass|fail --report verification.md [--receipt <ref>]
-```
-
-`fail` returns to Build. Fix the evidenced problem, verify again, and submit stable, non-sensitive failure facts through `--failure-category` and `--failed-check`.
-
-The second identical failure warns. The third with no scope progress stops. A real scope change ends the current repair episode. If scope has not changed but one concrete new hypothesis exists, use the signature returned by status with `--override-repair` once. Never repeat an override for the same signature. At a repair stop, ask the user to decide; do not weaken checks or fabricate a pass.
-
-After entering Archive, changes to the brief, specifications, implementation scope, report, or receipt make the evidence stale. Follow the Runtime continuation back to Build, reseal the scope, and verify again. Do not reuse a stale pass.
-
-## Archive
-
-After the state reaches Archive with a passing Verify result, preflight first:
-
-```text
+comet native new <change-name> [--language en|zh-CN] [--isolation current|branch|worktree]
+comet native next <change-name> --summary <text> [--confirmed]
 comet native archive <change-name> --dry-run
 ```
 
-Inspect create/replace/remove operations, evidence freshness, visible overlap with other changes in the current Native root, and recovery state. When no blocker remains, commit with the exact hash returned by this preflight:
+## Start or resume
+
+1. In a Git project, first read the current branch and `git worktree list --porcelain`. Run read-only `comet native status --project-root <path> --json` for every safely accessible working directory. This is default discovery; do not wait for the user to say “parallel.”
+2. Run `comet native status` in the current working directory and combine it with the other working-directory results to identify the target change, its owning working directory, and phase. If a matching active change exists, resume in that working directory instead of creating another one.
+3. Run `comet native show <change-name>` for the target. In Verify, Archive, or Build after a failure, also run the status command with `--details`.
+4. When more acceptance items are needed, follow `acceptancePage.nextCursor`. If findings are truncated, handle the returned findings and then read details again.
+5. Enter the target's actual working directory and run `comet native select <change-name>`. Do not require the user to run `cd` manually.
+
+If multiple reasonable candidates remain, ask the user to select one. Create a change only after confirming that no matching active change exists in any discovered working directory, then follow the workspace protocol below.
+
+Use only the Native artifact root selected by project configuration.
+
+## Workspace protocol for a new change
+
+The parallelism unit is a change: separate changes may progress concurrently in separate working directories. One change is writable only from its bound working directory and current execution context; Native does not create a long-lived session lease.
+
+Before creation, inspect the current branch, uncommitted changes, active Native changes in the current directory, and registered Git worktrees. Keep three workspace modes:
+
+- `current`: keep the current branch and directory;
+- `branch`: create and switch to a change branch in the current directory;
+- `worktree`: create a separate change branch and Git working directory, then continue there.
+
+Selection rules:
+
+- When the current directory is clean and no discovered working directory has another active change, default directly to `current`; do not ask whether the user wants “parallel” work.
+- When uncommitted changes or other facts make isolation materially affect the user's directory, present one joint `current / branch / worktree` choice with the recommendation, branch, and working-directory path. Do not split it into a separate “parallel?” question.
+- When another active Native change owns the current directory, disclose that `current` and `branch` are unavailable because of baseline-drift risk, then use the only safe `worktree` mode. Active changes already in other worktrees do not disable `current` or `branch` here.
+- In the same choice, the user may override the default branch `comet/<change-name>` and directory `.worktrees/<change-name>`. On a path or branch collision, stop; do not add a random suffix or take over a directory that is not already legally bound to this change.
+
+Prepare `branch` or `worktree` before running `new` and before the baseline is captured. The target branch defaults to the starting branch at the moment the branch or worktree is created:
 
 ```text
-comet native archive <change-name> --expect-preflight <sha256>
+# current
+comet native new <change-name> --language en --isolation current
+
+# branch: create and switch branches first
+comet native new <change-name> --language en \
+  --isolation branch --change-branch comet/<change-name> --target-branch <starting-branch>
+
+# worktree: create and enter .worktrees/<change-name> first
+comet native new <change-name> --language en \
+  --isolation worktree --change-branch comet/<change-name> --target-branch <starting-branch>
 ```
 
-If the caller asks to preserve a preflight or commit envelope, the first invocation itself must use machine-readable mode and write to the target file. Commit with the hash from the saved preflight. Once validated, keep the file immutable; do not overwrite it by rerunning commands after archive.
+Before creating a worktree, add `.worktrees/` to the repository-local Git exclude in the Git common directory's `info/exclude`; do not modify tracked `.gitignore` for this. The Agent continues automatically in the new working directory instead of handing navigation to the user.
 
-The Runtime recomputes the facts under lock and rejects drift. On success, it updates canonical specifications and moves the change into a date-prefixed archive directory.
+Create the worktree from the resolved commit of a verified local target branch. If the source directory has uncommitted content, attribute it first: leave work proven unrelated to the new change in place; if content may belong to the new change and cannot enter through that commit, wait for the user to decide how to preserve it rather than silently committing, copying, or omitting it. The target directory must receive consistent configuration from the target branch or establish legal configuration through public `comet native init`, then verify artifact-root, language, clarification, archive, verify, and snapshot semantics. Stop when consistency cannot be proven. Never copy the source `.comet/current-change.json`.
 
-For a canonical conflict, reread and rewrite the complete target specification, then run `comet native spec rebase <change-name> --summary <summary>`. This returns the change to Build under Runtime control; implement, confirm, verify, and archive again. Follow the recovery reference for incomplete transactions.
+After the target configuration is ready and before running `new`, the Agent must run these commands in the new working directory:
 
-## Invariants
+```bash
+comet doctor --repair --scope project
+comet doctor --scope project --json
+```
 
-- Never edit `phase`, `approval`, `spec_changes`, Run state, trajectory, locks, or transaction journals directly.
-- Never skip phase checks. Shape, Build, and Verify use `comet native next`; Archive uses the two-step preflight and commit protocol.
-- Never invoke external Skills. The Native flow depends only on the bundled Comet Runtime.
-- Do not persist hidden reasoning. Save summaries, artifact references, command results, hashes, state changes, and timestamps.
-- Do not write tokens, passwords, private keys, connection strings, or other credentials into summaries, reasons, or reports.
-- Continue while no user decision or Runtime blocker remains. When a user decision remains, Sequential mode asks only the most upstream question; Batch mode asks the entire ready question set, then waits for the user's answers.
+Continue only when Doctor confirms that the Hook runtime is current, the platform has exactly one Router rooted in the target project, and no legacy or duplicate Comet Hook remains. The Agent runs these commands in the new working directory without asking the user to enter it manually, and never copies `.comet/current-change.json` from the source directory. If the target branch did not provide project configuration, first use the public `comet native init` command to establish the source project's verified semantics, then run the Doctor sequence above.
+
+If worktree creation completes only some steps, stop immediately and report the original error, target branch and path, every branch/worktree/exclude/config/change resource known to have been created, and the recoverable next action. Clean up only resources proven to be newly created by this operation and safe to remove. Preserve the scene when ownership is uncertain; never remove an existing or possibly user-owned worktree, branch, or file.
+
+Runtime rechecks for a newly active change inside the same mutation lock used by `new`. If a system-default `current` loses this race and returns `workspace-isolation-required`, automatically prepare the default worktree and retry there. If an explicit user choice becomes invalid before execution, stop and reconfirm rather than silently changing modes.
+
+Existing active changes without a workspace v3 binding remain compatible: do not generate worktrees, move files, or refresh their baselines automatically. Continue selecting only one change at a time in a shared legacy directory. Only real baseline or scope drift fails closed and requires the user to decide whether to recover, recreate, or abandon the change.
+
+## On-demand loading
+
+After confirming the current change and phase, read one corresponding reference on demand:
+
+- When entering Shape, you must first read and execute the [clarification reference](reference/clarification.md). Do not skip it because “the requirements look clear.” Do not modify project implementation or advance to Build until shared understanding is confirmed.
+- If you need advanced options, receipts, or partial-scope commands, read the [command reference](reference/commands.md).
+- If you need to edit the brief, specifications, or verification report, read the [artifact reference](reference/artifacts.md).
+- If interruption, stale evidence, a repair stop, conflict, lock, or migration occurs, read the [recovery reference](reference/recovery.md).
+
+## Shape
+
+First investigate facts available from the repository, tools, and runtime environment. Ask the user only when different choices would materially change user-visible results and the existing requirements do not resolve the choice reliably. You own implementation choices.
+
+Follow the clarification reference according to `clarification_mode`. Even when the initial assessment finds no unresolved behavior, complete its information classification and silent-assumption check. After every user answer, immediately update Decisions, the brief, and the complete target specifications in the same change. Keep unresolved items `[blocking]`; do not modify project implementation or advance while a blocker remains.
+
+After all user decisions are resolved, check again for silent assumptions. Give the user a shared-understanding summary covering the goal, scope, key decisions, acceptance criteria, and non-goals. Only after explicit confirmation may you remove the final blocker and advance:
+
+```text
+comet native next <change-name> --summary <summary> --confirmed
+```
+
+If the brief or specifications change confirmed behavior, obtain confirmation again. Do not edit confirmation state manually.
+
+## Build
+
+Implement the simplest reliable solution that satisfies the brief and complete target specifications. Work may proceed in batches. Long tasks may use a checkpoint for recovery context, but a checkpoint is not completion evidence.
+
+When requirements change, update the formal artifacts first. If a new user decision appears, stay in Build but repeat the Shape clarification and confirmation boundary: save a `[blocking]` item, pause implementation, and ask the user. After confirmation, update Decisions, the brief, and the complete target specifications, then remove the blocker. When leaving Build, run the command returned by the Runtime and pass `--confirmed`.
+
+After the candidate implementation is complete, review it against the complete specifications and every acceptance item for omissions, then advance with real project artifacts:
+
+```text
+comet native next <change-name> \
+  --summary <summary> \
+  --artifact <project-path> \
+  [--confirmed]
+```
+
+If no code changed or the Runtime cannot prove complete scope, read the command reference. Never describe unknown or incomplete scope as complete.
+
+## Completion Loop
+
+After entering Build, converge through this loop:
+
+1. Run `comet native status <change-name> --details` and read the currently required acceptance pages. After a Verify failure, prioritize failed or missing acceptance items and failed checks.
+2. Complete one related batch of real repairs. You may write a checkpoint before interruption, but a checkpoint is not completion evidence.
+3. When a candidate implementation exists, reread the brief, complete specifications, and every acceptance item, then perform one complete review.
+4. Run real validation and submit the Verify result.
+5. `fail` returns to Build and repeats from step 1 without running Archive; only `pass` enters Archive.
+
+`blocked` pauses the normal Build → Verify loop and enters a recovery branch. After handling the findings, resume from step 1 according to the new continuation. End the current work only at `done`, `await-user`, or an explicit caller stop point. One Agent turn, one checkpoint, one `blocked` result, or the Agent saying “complete” is not a terminal state. The Agent finds and repairs gaps; the Runtime decides whether completion has been proven.
+
+## Verify
+
+Run real validation based on the acceptance items, complete target specifications, and change risk. Record actual results in `verification.md` and the acceptance evidence. A check that did not run or failed cannot be reported as passed.
+
+Use acceptance IDs and receipts returned by the Runtime. Read the artifact and command references when you need to generate the evidence block or record an automated or manual receipt.
+
+Submit `pass` only when the Runtime accepts the complete, fresh acceptance matrix and required checks. Reverify after relevant implementation, specification, report, or evidence changes.
+
+When submitting Verify, pass only `--result` and `--report`; `next` does not accept `--receipt` or caller-supplied required-check arguments. The Runtime validates the report format, complete acceptance matrix, and acceptance receipts before it runs or reuses the built-in required check for the current scope. If the report is invalid, fix it before retrying instead of submitting the same `next` command repeatedly.
+
+`fail` returns to Build. Fix the failed or missing acceptance items and failed checks reported by the Runtime before verifying again; another `next` call is not itself a repair. For `repair-stagnation-stop`, follow the recovery reference to form a new hypothesis and use the Runtime-provided override. Wait for the user only when the continuation requires `repair-continuation-decision`.
+
+An intermediate Verify failure never runs Archive or triggers archive confirmation. Continue Build → Verify until pass, a Runtime block, or a required user decision.
+
+## Archive
+
+Prepare Archive only after the final Verify pass. First read the change's workspace binding; treat legacy workspace metadata as `current` for compatibility.
+
+`current` continues to use `native.archive_confirmation` without a separate branch-finishing question. Before Archive, `branch` or `worktree` requires one joint choice:
+
+1. archive and merge locally into the bound target branch;
+2. archive and push the change branch;
+3. archive, push, and open a PR;
+4. archive and keep the current branch/working directory;
+5. do not archive yet.
+
+Show the exact change branch, target branch, and working directory. Recommend one option based on whether the target branch is locally available and its working directory is clean. Execute external Git actions only after the user chooses; preserve the scene and stop on “do not archive.”
+
+Then preview:
+
+```text
+# current
+comet native archive <change-name> --dry-run
+
+# branch / worktree: persist the joint choice in formal workspace metadata
+comet native archive <change-name> --dry-run --finish merge|push|pull-request|keep
+```
+
+After a successful preview:
+
+- `automatic`: run the exact commit command returned by the continuation;
+- `required`: show the implementation, verification, and specification-operation summary, then wait for the user to archive now or keep the change active.
+
+Do not reuse an old preflight. If facts drift or a canonical conflict or unfinished transaction appears, follow the continuation and the recovery reference.
+
+The returned `workspaceFinish` must match the user's choice. Later sessions recover that decision from formal workspace metadata without another routine prompt. After Archive succeeds, stage and commit only confirmed implementation, specification, and Archive paths owned by this change; exclude unrelated user work. The preceding joint choice authorizes this one exact stage/commit and the selected finishing action:
+
+- Local merge: merge the change branch in the bound target branch's working directory and run post-merge validation proportional to the change risk. On success, remove the clean change worktree and the merged local branch. Preserve both on any failure.
+- Push: push the change branch. On success, a clean change worktree may be removed, but retain the local and remote branches.
+- Push and PR: after pushing, create the PR with the workspace's persisted `targetBranch` as its base instead of inferring the repository default branch, then apply the push cleanup. Native does not continuously monitor the PR.
+- Keep: retain the branch and working directory after committing; do not merge or push.
+
+Archive multiple changes independently. Only local merges that update the same target ref must be serialized. Resolve a conflict automatically only when the resolution mechanically preserves both confirmed contracts, then revalidate. Abort any semantic conflict and ask whether to create a separate integration change; never silently overwrite either side.
+
+## Continuation and stop points
+
+Shape, Build, and Verify transitions return `next: auto | manual` together with `continuation.disposition: continue | await-user | blocked | done`, required inputs, and the next action. Archive does not advance through `next`; a successful archive returns `done`. After every transition, act on that Runtime continuation:
+
+- `continue`: reread the phase and currently required artifacts, then continue;
+- `await-user`: wait for a decision or missing input that genuinely requires the user;
+- `blocked`: pause the normal loop, handle the findings, and read the recovery reference when needed; then resume according to the new continuation rather than ending the task because it was `blocked`;
+- `done`: the change is complete.
+
+`next: auto` means only that the current transition succeeded; later work has not run automatically. If the caller explicitly requests a stop after a transition, update the formal artifacts, run the one allowed transition, make no tool calls after the transition succeeds, then output the agreed marker and end the turn, even when the continuation is `continue`.
+
+For legacy metadata, `workspace-root-changed` and `workspace-inspection-unavailable` are read-only advisories and do not block progression or Archive by themselves. `workspace-binding-root-changed`, `workspace-branch-changed`, `workspace-kind-changed`, and `workspace-vcs-unavailable` mean a new binding is invalid; return to the bound working directory and branch or stop for recovery. Other unknown workspace-integrity findings, confirmed conflicts, stale evidence, and repair stops must also be resolved. When the Runtime requires workspace identity repair, run read-only doctor and then follow its explicit `doctor --repair` report.
+
+Never place tokens, passwords, private keys, connection strings, or other credentials in summaries, reasons, reports, or artifacts.

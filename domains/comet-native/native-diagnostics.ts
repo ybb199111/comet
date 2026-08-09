@@ -25,15 +25,18 @@ import {
 import { inspectNativeArchivePreflight } from './native-archive-inspection.js';
 import { inspectNativeChangeConflicts } from './native-conflict-inspection.js';
 import { inspectNativeRepairStatus } from './native-repair-integration.js';
+import { readNativeVerificationEvidence } from './native-evidence-storage.js';
 import { inspectNativeImplementationScopeFreshness } from './native-verification-runtime.js';
 import {
   inspectNativeWorkspaceAdvisory,
+  inspectNativeWorkspaceBinding,
   isNativeWorkspaceAdvisoryCode,
   readNativeWorkspaceIdentity,
 } from './native-workspace.js';
 import { captureNativeProtectedDirectoryGuard } from './native-protected-file.js';
 import type {
   NativeChangeState,
+  NativeClarificationMode,
   NativeFinding,
   NativeProjectPaths,
   NativeStatusPageProjection,
@@ -50,17 +53,14 @@ export const NATIVE_STATUS_PAGE_LIMITS = Object.freeze({
 });
 
 async function selectedName(paths: NativeProjectPaths): Promise<string | null> {
-  try {
-    return (await readNativeSelectionRecord(paths))?.change ?? null;
-  } catch {
-    return null;
-  }
+  return (await readNativeSelectionRecord(paths))?.change ?? null;
 }
 
 export function nativeNextCommand(
   state: NativeChangeState,
   archiveReady: boolean,
   evidenceRetreat = false,
+  _clarificationMode?: NativeClarificationMode,
 ): string | null {
   if (state.phase === 'archive') {
     return archiveReady
@@ -69,7 +69,11 @@ export function nativeNextCommand(
         ? `comet native next ${state.name} --summary "<summary>"`
         : null;
   }
-  return `comet native next ${state.name} --summary "<summary>"`;
+  return `comet native next ${state.name} --summary "<summary>"${
+    state.phase === 'shape' || (state.phase === 'build' && state.approval !== 'confirmed')
+      ? ' --confirmed'
+      : ''
+  }`;
 }
 
 async function statusFindings(
@@ -164,7 +168,13 @@ async function statusFindings(
 export async function inspectNativeStatus(
   paths: NativeProjectPaths,
   name: string,
-  options?: { details?: boolean; acceptanceCursor?: string },
+  options?: {
+    details?: boolean;
+    acceptanceCursor?: string;
+    includeConflictFindings?: boolean;
+    clarificationMode?: NativeClarificationMode;
+    maxVerifyFailures?: number;
+  },
 ): Promise<NativeStatusProjection> {
   const selected = (await selectedName(paths)) === name;
   let state: NativeChangeState;
@@ -273,78 +283,12 @@ export async function inspectNativeStatus(
     };
   }
   const resume = await buildNativeResumeView({ paths, state });
-  let acceptancePage: NativeStatusProjection['acceptancePage'];
-  if (options?.details && (state.phase === 'verify' || state.phase === 'archive')) {
-    try {
-      const contract = await collectNativeContractFiles({
-        changeDir: nativeChangeDir(paths, state.name),
-        briefRef: state.brief,
-        specChanges: state.spec_changes,
-      });
-      acceptancePage = projectNativeAcceptancePage({
-        criteria: contract.contract.acceptance,
-        acceptanceHash: contract.contract.acceptanceHash,
-        ...(options.acceptanceCursor ? { cursor: options.acceptanceCursor } : {}),
-      });
-    } catch (error) {
-      if (options.acceptanceCursor) throw error;
-      acceptancePage = undefined;
-    }
-  }
-  const conflictFindings: NativeFinding[] = [];
-  try {
-    const conflicts = await inspectNativeChangeConflicts(paths, state.name);
-    conflictFindings.push(
-      ...conflicts.findingCodes.map((code) => ({
-        code,
-        message: `Native change overlap is visible in the current root: ${code}`,
-      })),
-    );
-  } catch {
-    conflictFindings.push({
-      code: 'native-conflict-inspection-invalid',
-      message: 'Native change overlap could not be recomputed safely',
-    });
-  }
-  const workspaceFindings: NativeFinding[] = [];
-  try {
-    const identity = await readNativeWorkspaceIdentity(paths, state.name);
-    if (identity) {
-      const workspace = await inspectNativeWorkspaceAdvisory({
-        paths,
-        identity,
-      });
-      workspaceFindings.push(
-        ...workspace.findingCodes.map((code) => ({
-          code,
-          message: `Native workspace advisory changed: ${code} (${workspace.driftComponents.join(', ') || 'no-component'})`,
-        })),
-      );
-    }
-  } catch {
-    workspaceFindings.push({
-      code: 'workspace-inspection-unavailable',
-      message: 'Native workspace advisory could not be recomputed safely',
-    });
-  }
-  const verifyScopeFindings: NativeFinding[] = [];
-  let verifyEvidenceRetreat = false;
-  if (state.phase === 'verify') {
-    const freshness = await inspectNativeImplementationScopeFreshness({ paths, state });
-    verifyEvidenceRetreat = freshness.freshness !== 'fresh';
-    verifyScopeFindings.push(
-      ...freshness.findingCodes.map((code) => ({
-        code,
-        message: `Native Verify implementation scope is not current: ${code}`,
-      })),
-    );
-  }
   let repair: Awaited<ReturnType<typeof inspectNativeRepairStatus>> = null;
   const repairFindings: NativeFinding[] = [];
   if (state.phase === 'build' && state.verification_result === 'fail') {
     try {
-      repair = await inspectNativeRepairStatus(paths, state);
-      if (repair) {
+      repair = await inspectNativeRepairStatus(paths, state, options?.maxVerifyFailures ?? 5);
+      if (repair && (repair.disposition === 'manual-stop' || repair.disposition === 'hard-stop')) {
         const code =
           repair.disposition === 'hard-stop'
             ? 'repair-iteration-limit'
@@ -362,6 +306,113 @@ export async function inspectNativeStatus(
         message: 'Native repair history could not be reconstructed safely',
       });
     }
+  }
+  let acceptancePage: NativeStatusProjection['acceptancePage'];
+  if (
+    options?.details &&
+    (state.phase === 'build' || state.phase === 'verify' || state.phase === 'archive')
+  ) {
+    try {
+      const contract = await collectNativeContractFiles({
+        changeDir: nativeChangeDir(paths, state.name),
+        briefRef: state.brief,
+        specChanges: state.spec_changes,
+      });
+      const verificationStatuses = new Map<
+        string,
+        'satisfied' | 'failed' | 'missing' | 'unverified'
+      >();
+      if (
+        state.phase === 'build' &&
+        state.verification_result === 'fail' &&
+        state.verification_evidence
+      ) {
+        const envelope = await readNativeVerificationEvidence(
+          paths,
+          state.name,
+          state.verification_evidence,
+        );
+        for (const entry of envelope.acceptanceTrace.entries) {
+          verificationStatuses.set(
+            entry.acceptanceId,
+            entry.status === 'failed'
+              ? 'failed'
+              : entry.status === 'missing'
+                ? 'missing'
+                : 'satisfied',
+          );
+        }
+      }
+      acceptancePage = projectNativeAcceptancePage({
+        criteria: contract.contract.acceptance,
+        acceptanceHash: contract.contract.acceptanceHash,
+        verificationStatuses,
+        failedCheckIds: repair?.failedCheckIds ?? [],
+        ...(options.acceptanceCursor ? { cursor: options.acceptanceCursor } : {}),
+      });
+    } catch (error) {
+      if (options.acceptanceCursor) throw error;
+      acceptancePage = undefined;
+    }
+  }
+  const conflictFindings: NativeFinding[] = [];
+  if (options?.includeConflictFindings !== false) {
+    try {
+      const conflicts = await inspectNativeChangeConflicts(paths, state.name, {
+        tolerateInvalidSiblings: true,
+      });
+      conflictFindings.push(
+        ...conflicts.findingCodes.map((code) => ({
+          code,
+          message: `Native change overlap is visible in the current root: ${code}`,
+        })),
+      );
+    } catch {
+      conflictFindings.push({
+        code: 'native-conflict-inspection-invalid',
+        message: 'Native change overlap could not be recomputed safely',
+      });
+    }
+  }
+  const workspaceFindings: NativeFinding[] = [];
+  try {
+    const identity = await readNativeWorkspaceIdentity(paths, state.name);
+    if (identity) {
+      if (identity.schema === 'comet.native.workspace.v3') {
+        const workspace = await inspectNativeWorkspaceBinding({ paths, identity });
+        if (workspace.state === 'drifted' && workspace.code) {
+          workspaceFindings.push({
+            code: workspace.code,
+            message: workspace.message ?? 'Native workspace binding is no longer valid',
+          });
+        }
+      } else {
+        const workspace = await inspectNativeWorkspaceAdvisory({ paths, identity });
+        workspaceFindings.push(
+          ...workspace.findingCodes.map((code) => ({
+            code,
+            message: `Native workspace advisory changed: ${code} (${workspace.driftComponents.join(', ') || 'no-component'})`,
+          })),
+        );
+      }
+    }
+  } catch {
+    workspaceFindings.push({
+      code: 'workspace-binding-invalid',
+      message: 'Native workspace binding could not be read or validated safely',
+    });
+  }
+  const verifyScopeFindings: NativeFinding[] = [];
+  let verifyEvidenceRetreat = false;
+  if (state.phase === 'verify') {
+    const freshness = await inspectNativeImplementationScopeFreshness({ paths, state });
+    verifyEvidenceRetreat = freshness.freshness !== 'fresh';
+    verifyScopeFindings.push(
+      ...freshness.findingCodes.map((code) => ({
+        code,
+        message: `Native Verify implementation scope is not current: ${code}`,
+      })),
+    );
   }
   let archivePreflight: Awaited<ReturnType<typeof inspectNativeArchivePreflight>> | null = null;
   const archiveFindings: NativeFinding[] = [];
@@ -419,9 +470,13 @@ export async function inspectNativeStatus(
       ));
   const mutationBlocked = findings.some(
     (finding) =>
-      finding.code === 'trajectory-tail-incomplete' || finding.code === 'trajectory-invalid',
+      finding.code === 'trajectory-tail-incomplete' ||
+      finding.code === 'trajectory-invalid' ||
+      finding.requiredAction === 'return-to-bound-working-directory' ||
+      finding.requiredAction === 'repair-workspace-binding',
   );
-  const repairBlocked = repair !== null;
+  const repairBlocked =
+    repair?.disposition === 'manual-stop' || repair?.disposition === 'hard-stop';
   const firstErrorFinding = findings.find((finding) => finding.severity === 'error');
   return {
     name: state.name,
@@ -434,13 +489,19 @@ export async function inspectNativeStatus(
     nextCommand:
       mutationBlocked || repairBlocked
         ? null
-        : nativeNextCommand(state, archiveReady, evidenceRetreat),
+        : nativeNextCommand(state, archiveReady, evidenceRetreat, options?.clarificationMode),
     archiveReady,
     inspection: resume.inspection,
     findingSummary: summarizeNativeFindings(findings),
     detailsCommand: `comet native status ${state.name} --details`,
     checkpoint: resume.checkpoint,
-    continuation: nativeContinuation({ state, findings, archiveReady, evidenceRetreat }),
+    continuation: nativeContinuation({
+      state,
+      findings,
+      archiveReady,
+      evidenceRetreat,
+      clarificationMode: options?.clarificationMode,
+    }),
     repair,
     ...(options?.details
       ? {
@@ -464,7 +525,7 @@ export async function inspectNativeStatus(
   };
 }
 
-async function boundedNativeChangeNames(paths: NativeProjectPaths): Promise<string[]> {
+export async function listNativeChangeNames(paths: NativeProjectPaths): Promise<string[]> {
   let guard: Awaited<ReturnType<typeof captureNativeProtectedDirectoryGuard>>;
   try {
     guard = await captureNativeProtectedDirectoryGuard({
@@ -531,9 +592,13 @@ function nativeStatusOffset(options: {
 
 export async function listNativeStatusPage(
   paths: NativeProjectPaths,
-  options?: { cursor?: string | null },
+  options?: {
+    cursor?: string | null;
+    clarificationMode?: NativeClarificationMode;
+    maxVerifyFailures?: number;
+  },
 ): Promise<NativeStatusPageProjection> {
-  const names = await boundedNativeChangeNames(paths);
+  const names = await listNativeChangeNames(paths);
   const namesHash = canonicalHash('comet.native.status-names.v1', names);
   const offset = nativeStatusOffset({
     namesHash,
@@ -541,9 +606,13 @@ export async function listNativeStatusPage(
     cursor: options?.cursor,
   });
   const candidates = await Promise.all(
-    names
-      .slice(offset, offset + NATIVE_STATUS_PAGE_LIMITS.maxItems)
-      .map((name) => inspectNativeStatus(paths, name)),
+    names.slice(offset, offset + NATIVE_STATUS_PAGE_LIMITS.maxItems).map((name) =>
+      inspectNativeStatus(paths, name, {
+        includeConflictFindings: false,
+        clarificationMode: options?.clarificationMode,
+        maxVerifyFailures: options?.maxVerifyFailures,
+      }),
+    ),
   );
   const items: NativeStatusProjection[] = [];
   for (const candidate of candidates) {
@@ -582,8 +651,14 @@ export async function listNativeStatusPage(
 /** Compatibility projection for in-process callers; CLI consumers receive the resumable page. */
 export async function listNativeStatus(
   paths: NativeProjectPaths,
+  options?: { clarificationMode?: NativeClarificationMode; maxVerifyFailures?: number },
 ): Promise<NativeStatusProjection[]> {
-  return (await listNativeStatusPage(paths)).items;
+  return (
+    await listNativeStatusPage(paths, {
+      clarificationMode: options?.clarificationMode,
+      maxVerifyFailures: options?.maxVerifyFailures,
+    })
+  ).items;
 }
 
 export async function inspectNativeArtifactFindings(

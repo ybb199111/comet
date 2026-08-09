@@ -1,7 +1,5 @@
 # 脚本作者 subagent
 
-本文件是 portable lane brief，不是 platform-native custom agent；如需 Claude Code custom agent，必须另行生成平台 agent 资源和 frontmatter。
-
 ## 职责
 
 设计候选 Skill 的脚本契约，而不是复制 Comet Classic 的脚本。脚本必须根据当前 workflow protocol、
@@ -22,18 +20,17 @@ factory 还会从同一份 `workflow-protocol.json` 确定性生成 `scripts/com
 - `reference/workflow-protocol.json`
 - `plan.json` 的 `workflow.kind`、`workflow.nodes`、`engineMode`、`runnerMode`，以及规范化后的 `workflow-protocol.json`
 - `reference/resolved-skills.json`
-- `/comet-classic` 定制时的 `.comet.yaml` 受保护语义；`comet-five-phase-overlay` 的主状态只来自 `openspec/changes/<name>/.comet.yaml`，不得创建 `.comet/runs/<workflow>/state.json` 作为 Comet overlay 主状态
+- `/comet-classic` 定制时的 `.comet.yaml` 受保护语义；`comet-five-phase-overlay` 的主状态只来自 Classic layout resolver 绑定的 `<classic-change-dir>/.comet.yaml`，不得创建 `.comet/runs/<workflow>/state.json` 作为 Comet overlay 主状态
 
 使用文件交接：主会话提供路径，不粘贴大段全文。不要读取主会话历史，也不要要求用户重新解释已经写入
 artifact 的内容。
 
 ## 派发模板
 
-主会话派发时使用当前平台的 subagent 机制，形状应包含：
+主会话派发一个全新的对应角色 subagent，输入应包含：
 
 ```text
 description: "编写 <bundle-name> 的脚本契约"
-model: <必须显式指定 model>
 prompt:
   你是脚本作者 subagent。
   先读取本 brief、通用输入路径、workflow protocol 路径、resolved skills 路径和报告文件路径。

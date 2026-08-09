@@ -2,7 +2,7 @@ import { promises as fs } from 'fs';
 import { spawnSync } from 'child_process';
 import os from 'os';
 import path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   COMET_RESUME_PROBE_SCHEMA_VERSION,
@@ -79,6 +79,21 @@ async function createClassic(projectRoot: string, name: string): Promise<void> {
   await writeFile(path.join(changeDir, 'tasks.md'), '- [ ] finish\n');
 }
 
+async function writeClassicProjectConfig(projectRoot: string): Promise<void> {
+  await writeFile(
+    path.join(projectRoot, '.comet', 'config.yaml'),
+    [
+      'schema: comet.project.v1',
+      'default_workflow: classic',
+      'workflows: [classic]',
+      'classic:',
+      '  artifact_layout: legacy',
+      '  language: zh-CN',
+      '',
+    ].join('\n'),
+  );
+}
+
 function input(utterance: string, nonTrivialWork = true) {
   return {
     schema_version: COMET_RESUME_PROBE_SCHEMA_VERSION,
@@ -139,7 +154,7 @@ describe('Comet entry resume probe v2', () => {
     });
   });
 
-  it('routes configured Classic and legacy projects through the permanent Classic entry', async () => {
+  it('routes configured Classic through its permanent entry and rejects missing config', async () => {
     await writeProjectConfig(projectRoot, {
       ...defaultProjectConfig('.'),
       default_workflow: 'classic',
@@ -161,13 +176,17 @@ describe('Comet entry resume probe v2', () => {
     });
 
     await fs.rm(path.join(projectRoot, '.comet', 'config.yaml'));
-    const legacy = await resolveCometEntryResumeProbe(projectRoot, input('继续 classic-change'));
-    expect(legacy).toMatchObject({
-      workflow: 'classic',
-      skill: 'comet-classic',
-      entrySource: 'legacy-fallback',
-      action: 'auto_resume',
-      nextCommand: '/comet-classic',
+    const missingConfig = await resolveCometEntryResumeProbe(
+      projectRoot,
+      input('继续 classic-change'),
+    );
+    expect(missingConfig).toMatchObject({
+      workflow: null,
+      skill: null,
+      entrySource: null,
+      action: 'ask_user',
+      reasonCode: 'project-config-invalid',
+      nextCommand: null,
     });
   });
 
@@ -196,6 +215,7 @@ describe('Comet entry resume probe v2', () => {
   );
 
   it('preserves the Classic dirty-worktree confirmation rule behind the v2 facade', async () => {
+    await writeClassicProjectConfig(projectRoot);
     await createClassic(projectRoot, 'classic-dirty');
     const initialized = spawnSync('git', ['init'], { cwd: projectRoot, encoding: 'utf8' });
     expect(initialized.status, initialized.stderr).toBe(0);
@@ -204,7 +224,7 @@ describe('Comet entry resume probe v2', () => {
       resolveCometEntryResumeProbe(projectRoot, input('继续 classic-dirty')),
     ).resolves.toMatchObject({
       workflow: 'classic',
-      entrySource: 'legacy-fallback',
+      entrySource: 'project-config',
       action: 'ask_user',
       reasonCode: 'classic-ask-user',
       changeName: 'classic-dirty',
@@ -213,6 +233,7 @@ describe('Comet entry resume probe v2', () => {
   });
 
   it('fails closed with structured Classic output when legacy change state is malformed', async () => {
+    await writeClassicProjectConfig(projectRoot);
     await writeFile(
       path.join(projectRoot, 'openspec', 'changes', 'broken-classic', '.comet.yaml'),
       'workflow: [broken\n',
@@ -224,7 +245,7 @@ describe('Comet entry resume probe v2', () => {
       schema_version: 'comet.resume_probe.v2',
       workflow: 'classic',
       skill: 'comet-classic',
-      entrySource: 'legacy-fallback',
+      entrySource: 'project-config',
       action: 'ask_user',
       confidence: 'low',
       reasonCode: 'classic-state-invalid',
@@ -255,6 +276,29 @@ describe('Comet entry resume probe v2', () => {
 
   it('returns none when the configured Native workflow has no active changes', async () => {
     await writeProjectConfig(projectRoot, defaultProjectConfig('.'));
+
+    await expect(resolveCometEntryResumeProbe(projectRoot, input('继续'))).resolves.toMatchObject({
+      workflow: 'native',
+      skill: 'comet-native',
+      action: 'none',
+      reasonCode: 'no-active-native-changes',
+      changeName: null,
+      nextCommand: null,
+    });
+  });
+
+  it('returns none when a stale Native selection has no active replacement', async () => {
+    await writeProjectConfig(projectRoot, defaultProjectConfig('.'));
+    const paths = await nativeProjectPaths(projectRoot, '.');
+    await writeFile(
+      nativeSelectionFile(paths),
+      JSON.stringify({
+        schema: 'comet.selection.v2',
+        workflow: 'native',
+        change: 'missing-change',
+        branch: null,
+      }),
+    );
 
     await expect(resolveCometEntryResumeProbe(projectRoot, input('继续'))).resolves.toMatchObject({
       workflow: 'native',
@@ -297,6 +341,41 @@ describe('Comet entry resume probe v2', () => {
       changeName: 'cache-controls',
       nextCommand: '/comet-native',
     });
+  });
+
+  it('does not inspect Runtime artifacts for non-target Native changes', async () => {
+    await writeProjectConfig(projectRoot, defaultProjectConfig('.'));
+    await createNative(projectRoot, 'cache-controls');
+    await createNative(projectRoot, 'login-flow');
+    const paths = await nativeProjectPaths(projectRoot, '.');
+    await selectNativeChange(paths, 'login-flow');
+    const nonTargetRuntime = path.join(nativeChangeDir(paths, 'cache-controls'), 'runtime');
+    const openedNonTargetRuntimePaths: string[] = [];
+    const originalOpen = fs.open.bind(fs);
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((...args) => {
+      const openedPath = String(args[0]);
+      if (
+        openedPath === nonTargetRuntime ||
+        openedPath.startsWith(`${nonTargetRuntime}${path.sep}`)
+      ) {
+        openedNonTargetRuntimePaths.push(openedPath);
+      }
+      return originalOpen(...args);
+    });
+
+    try {
+      await expect(resolveCometEntryResumeProbe(projectRoot, input('继续'))).resolves.toMatchObject(
+        {
+          action: 'auto_resume',
+          changeName: 'login-flow',
+          nextCommand: '/comet-native',
+        },
+      );
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(openedNonTargetRuntimePaths).toEqual([]);
   });
 
   it('falls back from a stale selection only when one active Native change is unambiguous', async () => {
@@ -353,7 +432,7 @@ describe('Comet entry resume probe v2', () => {
         const advanced = await advanceNativeChange({
           paths,
           name: 'phase-routing',
-          evidence: { summary: 'Shape is complete.' },
+          evidence: { summary: 'Shape is complete.', confirmed: true },
         });
         expect(advanced.findings).toEqual([]);
       } else if (phase === 'build') {

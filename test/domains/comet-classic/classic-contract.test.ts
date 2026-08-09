@@ -116,6 +116,29 @@ async function copyScripts(source: string, destination: string, names: string[])
   );
 }
 
+async function configureActiveClassicLegacyLayout(
+  root: string,
+  sourceScripts: string,
+): Promise<void> {
+  if (sourceScripts !== activeScripts) return;
+  await fs.mkdir(path.join(root, '.comet'), { recursive: true });
+  await fs.mkdir(path.join(root, 'openspec', 'changes', 'archive'), { recursive: true });
+  await fs.mkdir(path.join(root, 'openspec', 'specs'), { recursive: true });
+  await fs.writeFile(
+    path.join(root, '.comet', 'config.yaml'),
+    [
+      'schema: comet.project.v1',
+      'default_workflow: classic',
+      'workflows: [classic]',
+      'classic:',
+      '  artifact_layout: legacy',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  await fs.writeFile(path.join(root, 'openspec', 'config.yaml'), 'schema: spec-driven\n', 'utf8');
+}
+
 function runScript(
   cwd: string,
   scripts: string,
@@ -151,6 +174,13 @@ function normalizeOutput(value: string, root: string): string {
   const normalizedValue = value
     .replaceAll(root, '<ROOT>')
     .replaceAll(toBashPath(root), '<ROOT>')
+    // Normalize Windows backslash path separators so the differential contract
+    // is stable across platforms (the frozen 0.3.9 reference uses POSIX paths).
+    .replaceAll('\\', '/')
+    // The active runtime records an absolute handoff_context while the frozen
+    // launcher recorded the project-relative path. Both point to the same
+    // handoff artifact, so compare the path form used by the frozen contract.
+    .replaceAll('handoff_context=<ROOT>/', 'handoff_context=')
     // The active runtime may list transition events added after the frozen
     // 0.3.9 baseline (e.g. preset-escalate) in the "Valid values:" error line.
     // These are intentional enhancements; strip them so the differential
@@ -164,7 +194,8 @@ function normalizeOutput(value: string, root: string): string {
     const nextLine = lines[index + 1] ?? '';
     if (
       /\[FAIL\] (?:proposal\.md|design\.md|tasks\.md) matches configured language/u.test(line) &&
-      /ENOENT: no such file or directory, open /u.test(nextLine)
+      (/ENOENT: no such file or directory, open /u.test(nextLine) ||
+        /Classic language-check artifact .* does not exist/u.test(nextLine))
     ) {
       index += 1;
       continue;
@@ -226,6 +257,7 @@ async function observeState(
   temporaryRoots.push(root);
   const scripts = path.join(root, 'scripts');
   await copyScripts(sourceScripts, scripts, variant.names);
+  await configureActiveClassicLegacyLayout(root, sourceScripts);
 
   const name = `${profile}-change`;
   const init = runScript(
@@ -275,6 +307,7 @@ async function observeGuard(
   temporaryRoots.push(root);
   const scripts = path.join(root, 'scripts');
   await copyScripts(sourceScripts, scripts, variant.names);
+  await configureActiveClassicLegacyLayout(root, sourceScripts);
 
   const name = `${profile}-guard`;
   const init = runScript(
@@ -324,6 +357,7 @@ async function observeHandoff(
   temporaryRoots.push(root);
   const scripts = path.join(root, 'scripts');
   await copyScripts(sourceScripts, scripts, variant.names);
+  await configureActiveClassicLegacyLayout(root, sourceScripts);
 
   const name = `${profile}-handoff`;
   runScript(root, scripts, variant.state, ['init', name, profile], undefined, variant.executor);
@@ -369,6 +403,7 @@ async function observeHook(sourceScripts: string): Promise<GuardObservation> {
   temporaryRoots.push(root);
   const scripts = path.join(root, 'scripts');
   await copyScripts(sourceScripts, scripts, variant.names);
+  await configureActiveClassicLegacyLayout(root, sourceScripts);
 
   const name = 'full-hook';
   runScript(root, scripts, variant.state, ['init', name, 'full'], undefined, variant.executor);

@@ -2,7 +2,7 @@
 
 Canonical path: `comet/reference/comet-yaml-fields.md`
 
-This file is the field reference for each change-level `.comet.yaml` state file under `openspec/changes/<name>/`.
+This file is the field reference for each change-level `.comet.yaml` state file under `<classic-change-dir>/`. `<classic-change-dir>` comes from the resolver binding in `comet/reference/classic-layout.md`.
 Consult on demand; not loaded inline with skills. Project defaults live in `.comet/config.yaml`, global defaults live in `~/.comet/config.yaml`, and project values take precedence.
 
 ## Example
@@ -45,7 +45,7 @@ archived: false
 | `base_ref` | Git commit SHA recorded at init for scale assessment. Used as baseline for changed-file counting when no plan exists |
 | `build_mode` | Selected execution mode; may be empty. Values: `subagent-driven-development` (isolated background subagents implement and review each task), `executing-plans` (main session executes sequentially by plan), `direct` (main session codes directly; allowed by default only for hotfix/tweak, full workflow requires `direct_override: true`) |
 | `build_pause` | Build phase internal pause point. `null` = no pause, `plan-ready` = plan generated, paused for user model switch |
-| `subagent_dispatch` | `null` or `confirmed`. Only when the platform's real background subagent/Task/multi-agent dispatch capability is confirmed may `build_mode: subagent-driven-development` be written and used to leave the build phase |
+| `subagent_dispatch` | `null` or `confirmed`. `confirmed` records that the user selected `subagent-driven-development`; this mode may leave build only with that record |
 | `tdd_mode` | `tdd` or `direct`. Full workflow must select before leaving build. `tdd` forces write-failing-test-first per task; `direct` skips per-task TDD but still requires relevant tests and bug-regression evidence. hotfix/tweak default to `direct` |
 | `review_mode` | `off`, `standard`, or `thorough`. Full workflow must select before leaving build; hotfix/tweak default to `off` |
 | `isolation` | `current`, `branch`, or `worktree`. Full init may be `null`, but before leaving build the user must explicitly select `current`, create/select a real `branch`, or create/select a real `worktree`; hotfix/tweak may also truthfully use all three modes after the entry user decision point, and must not claim branch isolation before creating one |
@@ -55,10 +55,10 @@ archived: false
 | `verify_result` | `pending`, `pass`, or `fail` |
 | `verify_failures` | Machine-owned consecutive verification failure count. `verify-fail` increments it; `verify-pass` or `archive-reopen` resets it to `0`. At `3`, the next failure requires the retry-limit strategy decision |
 | `verification_report` | Verification report file path; must point to an existing file before verify passes |
-| `branch_status` | `pending` or `handled`; keep pending through verify/archive, then set handled after the archive commit and selected branch handling complete |
+| `branch_status` | `pending` or `handled`; keep `pending` through verify. After the user confirms immediate remote delivery before archive, set `handled` when archive finishes and include it in the only archive commit. `handled` means only that the delivery method is confirmed, not that push or PR creation succeeded; clear current selection and report workflow completion only after remote operations succeed |
 | `created_at` | Change creation date (auto-written at init), format `YYYY-MM-DD` |
 | `verified_at` | Verification pass timestamp; may be empty |
-| `archive_confirmation` | `null`, `pending`, or `confirmed`. `verify-pass` writes `pending` when entering the archive phase; after the user selects "Confirm archive" in `/comet-archive`, the `archive-confirm` transition writes `confirmed`; `archive-reopen` clears the field so an earlier confirmation cannot be reused |
+| `archive_confirmation` | `null`, `pending`, or `confirmed`. `verify-pass` writes `pending` when entering the archive phase; after the user selects either "confirm archive and deliver remotely now" choice in `/comet-archive`, the `archive-confirm` transition writes `confirmed`; `archive-reopen` clears the field so an earlier confirmation cannot be reused |
 | `archived` | Whether the change has been archived |
 
 ## Optional Fields

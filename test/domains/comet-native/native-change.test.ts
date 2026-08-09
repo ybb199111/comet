@@ -5,6 +5,11 @@ import path from 'path';
 import { stringify } from 'yaml';
 
 import {
+  DEFAULT_NATIVE_SNAPSHOT_CONFIG,
+  defaultProjectConfig,
+  writeProjectConfig,
+} from '../../../domains/comet-native/native-config.js';
+import {
   compareAndSwapNativeChange,
   createNativeChange,
   listNativeChanges,
@@ -46,6 +51,7 @@ describe('Native change store', () => {
       schema: NATIVE_CHANGE_SCHEMA,
       minimum_runtime_version: NATIVE_RUNTIME_PROTOCOL_VERSION,
       revision: 1,
+      verification_protocol: 'legacy-v1',
       phase: 'shape',
       approval: null,
       approved_contract_hash: null,
@@ -73,13 +79,21 @@ describe('Native change store', () => {
   });
 
   it('fails at change creation when the baseline snapshot is incomplete', async () => {
+    const config = defaultProjectConfig('.');
+    config.native.snapshot.max_total_bytes = 5 * 1024 * 1024;
+    await writeProjectConfig(projectRoot, config);
     await fs.writeFile(
       path.join(projectRoot, 'oversized-baseline.bin'),
       Buffer.alloc(5 * 1024 * 1024 + 1, 0x61),
     );
 
     await expect(
-      createNativeChange({ paths, name: 'incomplete-baseline', language: 'en' }),
+      createNativeChange({
+        paths,
+        name: 'incomplete-baseline',
+        language: 'en',
+        verificationProtocol: 'legacy-v1',
+      }),
     ).rejects.toMatchObject({
       name: 'NativeBaselineIncompleteError',
       code: 'native-baseline-incomplete',
@@ -92,21 +106,107 @@ describe('Native change store', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('creates a complete baseline for a file larger than the legacy per-file limit', async () => {
+    await writeProjectConfig(projectRoot, defaultProjectConfig('.'));
+    await fs.writeFile(
+      path.join(projectRoot, 'large-baseline.bin'),
+      Buffer.alloc(5 * 1024 * 1024 + 1, 0x61),
+    );
+
+    const state = await createNativeChange({
+      paths,
+      name: 'large-baseline',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
+
+    expect(await readNativeBaselineManifest(paths, state.name)).toMatchObject({
+      complete: true,
+      policy: {
+        schema: 'comet.native.snapshot-policy.v1',
+        include: ['**/*'],
+        exclude: DEFAULT_NATIVE_SNAPSHOT_CONFIG.exclude,
+      },
+      entries: [
+        expect.objectContaining({
+          path: 'large-baseline.bin',
+          size: 5 * 1024 * 1024 + 1,
+        }),
+      ],
+    });
+  });
+
+  it('creates a complete baseline after the project raises the total snapshot budget', async () => {
+    const config = defaultProjectConfig('.');
+    config.native.snapshot.max_total_bytes = 1024;
+    await writeProjectConfig(projectRoot, config);
+    await fs.writeFile(path.join(projectRoot, 'dataset.bin'), Buffer.alloc(1025, 0x61));
+
+    await expect(
+      createNativeChange({
+        paths,
+        name: 'budget-too-small',
+        language: 'en',
+        verificationProtocol: 'legacy-v1',
+      }),
+    ).rejects.toMatchObject({
+      name: 'NativeBaselineIncompleteError',
+      effectiveLimits: expect.objectContaining({
+        maxFileBytes: 1024,
+        maxTotalBytes: 1024,
+      }),
+    });
+
+    config.native.snapshot.max_total_bytes = 2048;
+    await writeProjectConfig(projectRoot, config);
+    const state = await createNativeChange({
+      paths,
+      name: 'budget-raised',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
+
+    expect(await readNativeBaselineManifest(paths, state.name)).toMatchObject({
+      complete: true,
+      limits: {
+        maxFiles: 10_000,
+        maxFileBytes: 2048,
+        maxTotalBytes: 2048,
+        maxManifestBytes: expect.any(Number),
+        maxDurationMs: 60_000,
+      },
+      entries: [expect.objectContaining({ path: 'dataset.bin', size: 1025 })],
+    });
+  });
+
   it('reads older v3 state without an approval hash and canonicalizes it to null', async () => {
-    const state = await createNativeChange({ paths, name: 'legacy-v3-state', language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name: 'legacy-v3-state',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     const file = path.join(paths.changesDir, state.name, 'comet-state.yaml');
     const legacy = { ...state } as Record<string, unknown>;
     delete legacy.approved_contract_hash;
+    delete legacy.verification_protocol;
     await fs.writeFile(file, stringify(legacy));
 
     const parsed = await readNativeChange(paths, state.name);
     expect(parsed.approved_contract_hash).toBeNull();
+    expect(parsed.verification_protocol).toBe('legacy-v1');
     await writeNativeChange(paths, parsed);
     expect(await fs.readFile(file, 'utf8')).toContain('approved_contract_hash: null');
+    expect(await fs.readFile(file, 'utf8')).toContain('verification_protocol: legacy-v1');
   });
 
   it('round-trips create, replace, and remove spec operations', async () => {
-    const state = await createNativeChange({ paths, name: 'update-auth', language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name: 'update-auth',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     state.spec_changes = [
       {
         capability: 'new-auth',
@@ -128,7 +228,12 @@ describe('Native change store', () => {
   });
 
   it('fails closed before parsing an oversized change document', async () => {
-    const state = await createNativeChange({ paths, name: 'oversized-change', language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name: 'oversized-change',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     await fs.writeFile(
       path.join(paths.changesDir, state.name, 'comet-state.yaml'),
       'x'.repeat(NATIVE_CHANGE_DOCUMENT_MAX_BYTES + 1),
@@ -140,7 +245,12 @@ describe('Native change store', () => {
   });
 
   it('rejects a stale change write instead of silently overwriting a newer revision', async () => {
-    const created = await createNativeChange({ paths, name: 'revision-conflict', language: 'en' });
+    const created = await createNativeChange({
+      paths,
+      name: 'revision-conflict',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     const first = structuredClone(created);
     const stale = structuredClone(created);
     first.approval = 'implicit';
@@ -158,7 +268,12 @@ describe('Native change store', () => {
   });
 
   it('allows only one competing writer to advance the same revision', async () => {
-    const created = await createNativeChange({ paths, name: 'concurrent-cas', language: 'en' });
+    const created = await createNativeChange({
+      paths,
+      name: 'concurrent-cas',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     const left = { ...structuredClone(created), approval: 'implicit' as const };
     const right = { ...structuredClone(created), approval: 'confirmed' as const };
     const results = await Promise.allSettled([
@@ -172,8 +287,18 @@ describe('Native change store', () => {
   });
 
   it('lists multiple active changes in name order', async () => {
-    await createNativeChange({ paths, name: 'zeta-change', language: 'en' });
-    await createNativeChange({ paths, name: 'alpha-change', language: 'en' });
+    await createNativeChange({
+      paths,
+      name: 'zeta-change',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
+    await createNativeChange({
+      paths,
+      name: 'alpha-change',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     expect((await listNativeChanges(paths)).map((state) => state.name)).toEqual([
       'alpha-change',
       'zeta-change',
@@ -186,7 +311,12 @@ describe('Native change store', () => {
     ['bad date', { created_at: '2026-02-31' }],
     ['bad name', { name: '../escape' }],
   ])('rejects %s', async (_label, patch) => {
-    const state = await createNativeChange({ paths, name: 'strict-change', language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name: 'strict-change',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     const file = path.join(paths.changesDir, state.name, 'comet-state.yaml');
     const value = { ...state, ...patch };
     await fs.writeFile(file, stringify(value));
@@ -194,7 +324,12 @@ describe('Native change store', () => {
   });
 
   it('requires field-specific change-relative content-addressed evidence refs', async () => {
-    const state = await createNativeChange({ paths, name: 'strict-evidence', language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name: 'strict-evidence',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     const file = path.join(paths.changesDir, state.name, 'comet-state.yaml');
     const hash = 'a'.repeat(64);
     await fs.writeFile(
@@ -233,7 +368,12 @@ describe('Native change store', () => {
   });
 
   it('rejects duplicate capabilities and path traversal sources', async () => {
-    const state = await createNativeChange({ paths, name: 'strict-specs', language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name: 'strict-specs',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     const file = path.join(paths.changesDir, state.name, 'comet-state.yaml');
     await fs.writeFile(
       file,

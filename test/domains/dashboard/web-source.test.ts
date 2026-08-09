@@ -6,15 +6,48 @@ async function readDashboardSource(): Promise<string> {
   return fs.readFile(path.resolve('domains', 'dashboard', 'web', 'src', 'main.jsx'), 'utf8');
 }
 
+async function readDashboardStyles(): Promise<string> {
+  return fs.readFile(path.resolve('domains', 'dashboard', 'web', 'src', 'styles.css'), 'utf8');
+}
+
+async function readWorkspaceLayoutSource(): Promise<string> {
+  return fs.readFile(
+    path.resolve('domains', 'dashboard', 'web', 'src', 'workspace-layout.jsx'),
+    'utf8',
+  );
+}
+
 describe('dashboard web source contracts', () => {
   it('keeps the change workspace grid responsive inside the left navigation rail', async () => {
-    const source = await readDashboardSource();
+    const [source, layout, styles] = await Promise.all([
+      readDashboardSource(),
+      readWorkspaceLayoutSource(),
+      readDashboardStyles(),
+    ]);
 
-    expect(source).toContain(
+    expect(source).toContain("from './workspace-layout.jsx'");
+    expect(source).toContain('classic-changes-explorer');
+    expect(styles).toContain('.classic-changes-explorer');
+    expect(layout).toContain(
       'xl:grid-cols-[minmax(260px,320px)_minmax(0,1fr)] 2xl:grid-cols-[minmax(260px,320px)_minmax(0,1fr)_minmax(260px,320px)]',
     );
-    expect(source).toContain('xl:col-start-2 2xl:col-start-auto');
+    expect(layout).toContain('xl:col-start-2 2xl:col-start-auto');
+    expect(layout).toContain('leftClassName');
     expect(source).not.toContain('xl:grid-cols-[320px_minmax(620px,940px)_320px]');
+  });
+
+  it('uses the change-detail width to switch between stacked and two-column panels', async () => {
+    const [source, styles] = await Promise.all([readDashboardSource(), readDashboardStyles()]);
+
+    expect(source).toContain('className="change-detail min-w-0"');
+    expect(source).toContain('className="change-detail-panels grid min-w-0 gap-4"');
+    expect(source).not.toContain('md:grid-cols-[minmax(0,1fr)_minmax(0,340px)]');
+    expect(source).toMatch(
+      /function TaskProgress\(\{ change \}\) \{[\s\S]*?<article className="min-w-0 rounded-xl border border-border-soft bg-bg px-5 py-4">/,
+    );
+    expect(styles).toContain('container-type: inline-size;');
+    expect(styles).toContain('@container (min-width: 700px)');
+    expect(styles).toContain('grid-template-columns: minmax(0, 1fr) minmax(0, 340px);');
   });
 
   it('preserves page scroll position while the artifact preview drawer is open', async () => {
@@ -76,6 +109,49 @@ describe('dashboard web source contracts', () => {
     expect(source).not.toContain('已归档完成，后续无需再进入 Verify');
     expect(source).not.toContain(
       "const nextPhase = change.phase === 'verify' ? '归档' : 'Verify';",
+    );
+  });
+
+  it('shows Classic collection failures instead of an empty workspace', async () => {
+    const source = await readDashboardSource();
+
+    expect(source).toContain('snapshot.classicError && !hasClassicChanges');
+    expect(source).toContain('<ClassicErrorState error={snapshot.classicError} />');
+    expect(source).toContain('Classic 数据读取失败');
+    expect(source).toContain('{error.message}');
+  });
+
+  it('keeps available Classic data visible while warning about partial collection failures', async () => {
+    const source = await readDashboardSource();
+
+    expect(source).toContain('snapshot.classicError && hasClassicChanges');
+    expect(source).toContain('<ClassicWarning error={snapshot.classicError} />');
+    expect(source).toContain('function ClassicWarning({ error })');
+  });
+
+  it('uses the Native-aligned informative treatment for an empty Classic workspace', async () => {
+    const source = await readDashboardSource();
+
+    expect(source).toContain('当前没有 Classic change');
+    expect(source).toContain('Classic 变更出现后会在这里展示。');
+    expect(source).not.toContain('当前无 Comet 迭代。');
+  });
+
+  it('loads change rows in pages and fetches full details on selection', async () => {
+    const source = await readDashboardSource();
+
+    expect(source).toContain('fetchDashboardOverview');
+    expect(source).toContain('fetchDashboardChangePage');
+    expect(source).toContain('fetchDashboardNativeChangePage');
+    expect(source).toContain('/native-changes?');
+    expect(source).toContain("const params = new URLSearchParams({ status, limit: '5' });");
+    expect(source).toContain('fetchDashboardChangeDetail');
+    expect(source).toContain('onScroll={handleScroll}');
+    expect(source).toContain('正在加载变更详情');
+    expect(source).not.toContain('async function fetchSnapshot');
+
+    expect(await readDashboardStyles()).toContain(
+      'max-height: max(180px, calc(var(--dashboard-center-height, 26rem) - 8rem));',
     );
   });
 });

@@ -11,18 +11,18 @@ import type {
 import { readNativeBoundedTextFile } from './native-bounded-file.js';
 import { nativeChangeDir } from './native-change.js';
 import type { NativeCheckReceipt } from './native-check-receipt.js';
-import { readNativeCheckReceipt } from './native-check-receipt-storage.js';
 import type { NativeContractSnapshot } from './native-contract.js';
 import { collectNativeContractFiles } from './native-contract-files.js';
 import {
   readNativeImplementationScopeBundle,
   readNativePartialAllowance,
   readNativeVerificationEvidence,
+  readNativeVerificationReceipt,
   nativeEvidenceRef,
   writeNativeVerificationReportSnapshot,
   writeNativeVerificationEvidence,
 } from './native-evidence-storage.js';
-import { createNativeContentSnapshot } from './native-snapshot.js';
+import { createNativeCurrentContentSnapshot } from './native-snapshot.js';
 import type {
   NativeChangeState,
   NativeContentSnapshotManifest,
@@ -38,6 +38,15 @@ import {
   buildNativeVerificationEvidenceEnvelope,
   type NativeVerificationEvidenceEnvelope,
 } from './native-verification-evidence.js';
+import {
+  compareNativeReceiptBindings,
+  validateNativeStaticReceiptDependency,
+} from './native-verification-receipt-runtime.js';
+import {
+  nativeArtifactBindingHash,
+  type NativeVerificationReceipt,
+  type NativeVerificationReceiptBindings,
+} from './native-verification-receipt.js';
 
 export type NativeVerificationFreshnessFindingCode =
   | 'verification-contract-stale'
@@ -46,6 +55,8 @@ export type NativeVerificationFreshnessFindingCode =
   | 'verification-receipt-stale'
   | 'verification-receipt-invalid'
   | 'verification-receipt-outcome-mismatch'
+  | 'verification-receipt-binding-mismatch'
+  | 'verification-protocol-legacy'
   | 'verification-state-mismatch'
   | 'verification-evidence-missing'
   | 'verification-evidence-invalid';
@@ -56,6 +67,58 @@ export interface NativeVerificationPreparation {
   envelope: NativeVerificationEvidenceEnvelope | null;
   evidenceRef: string | null;
   reportSnapshot: { hash: string; text: string } | null;
+  /** Parsed report and acceptance trace reused after required-check execution. */
+  preflight?: NativeVerificationPreflight;
+  /** True when the preparation was used only to validate input before required-check execution. */
+  preflightOnly?: boolean;
+  /**
+   * Per-receipt diagnostics populated when {@link findingCodes} includes
+   * `verification-receipt-binding-mismatch`. Lets an Agent see exactly which
+   * receipts/acceptances diverged and recover via `receipt refresh` when the
+   * mismatch is limited to sourceRevision; other binding changes require fresh evidence.
+   */
+  receiptBindingFailures?: NativeReceiptBindingFailureDetail[];
+}
+
+export interface NativeVerificationPreflight {
+  report: Awaited<ReturnType<typeof reportEvidence>>;
+  trace: ReturnType<typeof buildNativeAcceptanceEvidenceTrace>;
+}
+
+/**
+ * A single receipt that failed binding/role/coverage validation, with the
+ * precise per-field diagnostics an Agent needs to recover without user help.
+ */
+export interface NativeReceiptBindingFailureDetail {
+  ref: string;
+  role: 'required-check' | 'acceptance-evidence';
+  acceptanceId?: string;
+  /** Per-field mismatches like "sourceRevision: expected 6, got 5". */
+  mismatches: string[];
+}
+
+/**
+ * Aggregated receipt-graph validation failure. Carries every offending receipt
+ * at once (rather than the first one) so a single `next` attempt surfaces the
+ * full set of stale receipts to the Agent.
+ */
+export class NativeVerificationReceiptBindingError extends Error {
+  readonly details: NativeReceiptBindingFailureDetail[];
+
+  constructor(details: NativeReceiptBindingFailureDetail[]) {
+    const summary =
+      details.length === 0
+        ? 'Native verification receipt binding is invalid'
+        : `Native verification receipt binding is invalid (${details.length} receipt(s)): ${details
+            .map(
+              (d) =>
+                `${d.ref}${d.acceptanceId ? `[${d.acceptanceId}]` : ''} -> ${d.mismatches.join('; ')}`,
+            )
+            .join(' | ')}`;
+    super(summary);
+    this.name = 'NativeVerificationReceiptBindingError';
+    this.details = details;
+  }
 }
 
 export interface NativeVerificationFreshnessInspection {
@@ -69,9 +132,11 @@ function projectionManifest(projection: NativeSnapshotProjection): NativeContent
   return {
     schema: 'comet.native.content-snapshot.v1',
     origin: projection.origin,
+    ...(projection.capture ? { capture: projection.capture } : {}),
     createdAt: '1970-01-01T00:00:00.000Z',
     complete: projection.complete,
     limits: projection.limits,
+    ...(projection.policy ? { policy: projection.policy } : {}),
     entries: projection.entries,
     omitted: projection.omitted,
     omittedCount: projection.omittedCount,
@@ -92,12 +157,13 @@ async function currentProjectionHash(options: {
   bundle: NativeImplementationScopeBundle;
   now?: Date;
 }): Promise<string> {
-  const current = await createNativeContentSnapshot(options.paths, {
+  const baseline = projectionManifest(options.bundle.baseline);
+  const current = await createNativeCurrentContentSnapshot(options.paths, baseline, {
     origin: 'explicit',
     now: options.now,
   });
   return buildNativeImplementationScopeBundle({
-    baseline: projectionManifest(options.bundle.baseline),
+    baseline,
     current,
     contractHash: options.bundle.scope.contractHash,
     declaredArtifacts: options.bundle.scope.declaredArtifacts,
@@ -237,12 +303,168 @@ function checkReceiptBindingCodes(options: {
   return codes;
 }
 
+function verificationReceiptBindings(options: {
+  state: NativeChangeState;
+  contractHash: string;
+  implementationScope: NativeImplementationScopeBundle;
+  sourceRevision?: number;
+}): NativeVerificationReceiptBindings {
+  return {
+    change: options.state.name,
+    sourceRevision: options.sourceRevision ?? options.state.revision,
+    contractHash: options.contractHash,
+    scopeHash: options.implementationScope.scope.scopeHash,
+    snapshotHash: options.implementationScope.scope.currentProjectionHash,
+    artifactHash: nativeArtifactBindingHash(options.implementationScope.scope.declaredArtifacts),
+  };
+}
+
+async function validateTypedReceipt(options: {
+  paths: NativeProjectPaths;
+  state: NativeChangeState;
+  ref: string;
+  expectedBindings: NativeVerificationReceiptBindings;
+  acceptanceId?: string;
+  role: NativeVerificationReceipt['role'];
+  contractHash: string;
+  implementationScope: NativeImplementationScopeBundle;
+  result: 'pass' | 'fail';
+}): Promise<NativeVerificationReceipt> {
+  const receipt = await readNativeVerificationReceipt(
+    options.paths,
+    options.state.name,
+    options.ref,
+  );
+  // Collect every reason this receipt is invalid before failing, so the caller
+  // can aggregate across the whole receipt graph and surface the full picture
+  // (which receipts, which fields, which acceptance) in one diagnostic pass.
+  const mismatches: string[] = [];
+  if (receipt.role !== options.role) {
+    mismatches.push(`role: expected ${options.role}, got ${receipt.role}`);
+  }
+  const bindingComparison = compareNativeReceiptBindings(receipt, options.expectedBindings);
+  mismatches.push(...bindingComparison.mismatches);
+  if (options.acceptanceId !== undefined && !receipt.acceptanceIds.includes(options.acceptanceId)) {
+    mismatches.push(
+      `acceptanceId: expected ${options.acceptanceId} in [${receipt.acceptanceIds.join(', ')}]`,
+    );
+  }
+  if (mismatches.length > 0) {
+    throw new NativeVerificationReceiptBindingError([
+      {
+        ref: options.ref,
+        role: options.role,
+        ...(options.acceptanceId !== undefined ? { acceptanceId: options.acceptanceId } : {}),
+        mismatches,
+      },
+    ]);
+  }
+  if (options.result === 'pass' && receipt.status !== 'passed') {
+    throw new Error(`Native verification receipt is ${receipt.status}`);
+  }
+  const check = await validateNativeStaticReceiptDependency({
+    paths: options.paths,
+    state: options.state,
+    receipt,
+  });
+  if (check) {
+    const codes = checkReceiptBindingCodes({
+      receipt: check,
+      sourceRevision: options.expectedBindings.sourceRevision,
+      result: options.result,
+      contractHash: options.contractHash,
+      implementationScope: options.implementationScope,
+    });
+    if (codes.length > 0) {
+      throw new Error(`Native static receipt dependency is invalid: ${codes.join(', ')}`);
+    }
+  }
+  return receipt;
+}
+
+async function validateCurrentReceiptGraph(options: {
+  paths: NativeProjectPaths;
+  state: NativeChangeState;
+  result: 'pass' | 'fail';
+  trace: ReturnType<typeof buildNativeAcceptanceEvidenceTrace>;
+  requiredReceiptRefs: readonly string[];
+  contractHash: string;
+  implementationScope: NativeImplementationScopeBundle;
+  sourceRevision?: number;
+}): Promise<void> {
+  const expectedBindings = verificationReceiptBindings({
+    state: options.state,
+    contractHash: options.contractHash,
+    implementationScope: options.implementationScope,
+    sourceRevision: options.sourceRevision,
+  });
+  // Accumulate every binding/role/coverage failure across the whole graph so a
+  // single `next` attempt reports all stale receipts at once, rather than
+  // failing on the first and hiding the rest. Non-binding errors (wrong kind,
+  // failed-evidence-passed-receipt) still throw immediately because they are a
+  // different class of problem that masking would obscure.
+  const collectedFailures: NativeReceiptBindingFailureDetail[] = [];
+  for (const ref of options.requiredReceiptRefs) {
+    const receipt = await validateTypedReceipt({
+      ...options,
+      ref,
+      expectedBindings,
+      role: 'required-check',
+    }).catch((error: unknown) => {
+      if (error instanceof NativeVerificationReceiptBindingError) {
+        collectedFailures.push(...error.details);
+        return null;
+      }
+      throw error;
+    });
+    if (receipt === null) continue;
+    if (receipt.kind !== 'static-inspection') {
+      throw new Error('Native required-check evidence must be a static-inspection receipt');
+    }
+  }
+  for (const entry of options.trace.entries) {
+    if (entry.status === 'missing') continue;
+    for (const ref of entry.evidenceRefs) {
+      const receipt = await validateTypedReceipt({
+        ...options,
+        result: entry.status === 'passed' ? 'pass' : 'fail',
+        ref,
+        expectedBindings,
+        acceptanceId: entry.acceptanceId,
+        role: 'acceptance-evidence',
+      }).catch((error: unknown) => {
+        if (error instanceof NativeVerificationReceiptBindingError) {
+          collectedFailures.push(...error.details);
+          return null;
+        }
+        throw error;
+      });
+      if (receipt === null) continue;
+      if (receipt.kind !== 'automated-check' && receipt.kind !== 'manual-evidence') {
+        throw new Error('Native acceptance evidence must be automated-check or manual-evidence');
+      }
+      if (entry.status === 'failed' && receipt.status === 'passed') {
+        throw new Error('Native failed acceptance evidence must reference a non-passing receipt');
+      }
+    }
+  }
+  if (collectedFailures.length > 0) {
+    throw new NativeVerificationReceiptBindingError(collectedFailures);
+  }
+}
+
 export interface NativeVerificationEvidenceOptions {
   paths: NativeProjectPaths;
   state: NativeChangeState;
   result: 'pass' | 'fail';
   reportRef: string;
   receiptRef?: string | null;
+  /** Internal transition option used to validate the report before running the required check. */
+  requireReceipt?: boolean;
+  /** Do not construct a durable pass envelope until the required receipt exists. */
+  preflightOnly?: boolean;
+  /** Reuse the parsed report and acceptance trace across the preflight and final inspection. */
+  preflight?: NativeVerificationPreflight;
   now?: Date;
 }
 
@@ -253,6 +475,9 @@ export async function inspectNativeVerificationEvidence(
   if (options.state.phase !== 'verify') {
     throw new Error(`Native verification evidence requires Verify, got ${options.state.phase}`);
   }
+  // Always refresh scope facts for the final inspection: the workspace may
+  // change between preflight and required-check execution. The preflight
+  // cache only skips re-reading the immutable report and acceptance trace.
   const facts = await inspectCurrentScopeFacts(options);
   if (facts.findingCodes.length > 0) {
     return {
@@ -263,29 +488,51 @@ export async function inspectNativeVerificationEvidence(
       reportSnapshot: null,
     };
   }
-  const report = await reportEvidence(options);
-  let receiptRef: string | null = null;
-  if (options.receiptRef) {
-    const receipt = await readNativeCheckReceipt(
-      options.paths,
-      options.state.name,
-      options.receiptRef,
+  const report = options.preflight?.report ?? (await reportEvidence(options));
+  if (options.result === 'pass' && !options.receiptRef && options.requireReceipt !== false) {
+    throw new Error('Native passing verification requires a typed required-check receipt');
+  }
+  const requiredReceiptRefs = options.receiptRef ? [options.receiptRef] : [];
+  const trace =
+    options.preflight?.trace ??
+    buildNativeAcceptanceEvidenceTrace(facts.contract.acceptance, report.entries, {
+      nativeRootRef: nativeRootRef(options.paths),
+      allowMissing: options.result === 'fail',
+    });
+  if (
+    options.result === 'pass' &&
+    trace.entries.some((entry) => entry.status === 'failed' || entry.status === 'missing')
+  ) {
+    throw new Error(
+      'Native passing verification cannot include failed or missing acceptance criteria',
     );
-    const receiptCodes = checkReceiptBindingCodes({
-      receipt,
-      sourceRevision: options.state.revision,
+  }
+  try {
+    await validateCurrentReceiptGraph({
+      paths: options.paths,
+      state: options.state,
       result: options.result,
+      trace,
+      requiredReceiptRefs,
       contractHash: facts.contractHash,
       implementationScope: facts.bundle,
     });
-    if (receiptCodes.length > 0) {
-      throw new Error(`Native verification receipt is not admissible: ${receiptCodes.join(', ')}`);
+  } catch (error: unknown) {
+    // Surface receipt binding failures as structured findings so the Agent gets
+    // machine-readable diagnostics and a recovery path (refresh-verification-
+    // receipts) instead of an opaque exit-65 throw that forces user triage.
+    if (error instanceof NativeVerificationReceiptBindingError) {
+      return {
+        ready: false,
+        findingCodes: ['verification-receipt-binding-mismatch'],
+        envelope: null,
+        evidenceRef: null,
+        reportSnapshot: null,
+        ...(error.details.length > 0 ? { receiptBindingFailures: error.details } : {}),
+      };
     }
-    receiptRef = options.receiptRef;
+    throw error;
   }
-  const trace = buildNativeAcceptanceEvidenceTrace(facts.contract.acceptance, report.entries, {
-    nativeRootRef: nativeRootRef(options.paths),
-  });
   const allowance = options.state.partial_allowance
     ? await readNativePartialAllowance(
         options.paths,
@@ -293,6 +540,20 @@ export async function inspectNativeVerificationEvidence(
         options.state.partial_allowance,
       )
     : null;
+  if (options.preflightOnly) {
+    return {
+      ready: true,
+      findingCodes: [],
+      envelope: null,
+      evidenceRef: null,
+      reportSnapshot: { hash: report.hash, text: report.text },
+      preflight: {
+        report,
+        trace,
+      },
+      preflightOnly: true,
+    };
+  }
   const envelope = buildNativeVerificationEvidenceEnvelope({
     change: options.state.name,
     sourceRevision: options.state.revision,
@@ -305,7 +566,7 @@ export async function inspectNativeVerificationEvidence(
     },
     reportRef: report.ref,
     reportHash: report.hash,
-    receiptRef,
+    requiredReceiptRefs,
     acceptanceTrace: trace,
     partialAllowance:
       options.state.partial_allowance && allowance
@@ -320,6 +581,10 @@ export async function inspectNativeVerificationEvidence(
     envelope,
     evidenceRef,
     reportSnapshot: { hash: report.hash, text: report.text },
+    preflight: {
+      report,
+      trace,
+    },
   };
 }
 
@@ -330,6 +595,7 @@ export async function persistNativeVerificationEvidence(options: {
 }): Promise<void> {
   if (
     !options.preparation.ready ||
+    options.preparation.preflightOnly ||
     options.preparation.envelope === null ||
     options.preparation.evidenceRef === null ||
     options.preparation.reportSnapshot === null
@@ -402,19 +668,27 @@ export async function inspectNativeVerificationFreshness(options: {
     };
   }
   try {
-    const [facts, envelope, report] = await Promise.all([
+    const [facts, envelope] = await Promise.all([
       inspectCurrentScopeFacts(options),
       readNativeVerificationEvidence(
         options.paths,
         options.state.name,
         options.state.verification_evidence,
       ),
-      reportEvidence({
-        paths: options.paths,
-        state: options.state,
-        reportRef: options.state.verification_report,
-      }),
     ]);
+    if (envelope.schema !== 'comet.native.verification-evidence.v2') {
+      return {
+        freshness: 'stale',
+        findingCodes: ['verification-protocol-legacy'],
+        evidence: emptyEvidence(options.state.verification_result, 'stale'),
+        envelope: null,
+      };
+    }
+    const report = await reportEvidence({
+      paths: options.paths,
+      state: options.state,
+      reportRef: options.state.verification_report,
+    });
     const findingCodes = [...facts.findingCodes];
     if (report.hash !== envelope.reportHash || report.ref !== envelope.reportRef) {
       findingCodes.push('verification-report-stale');
@@ -429,25 +703,19 @@ export async function inspectNativeVerificationFreshness(options: {
     ) {
       findingCodes.push('verification-state-mismatch');
     }
-    if (envelope.receiptRef) {
-      try {
-        const receipt = await readNativeCheckReceipt(
-          options.paths,
-          options.state.name,
-          envelope.receiptRef,
-        );
-        findingCodes.push(
-          ...checkReceiptBindingCodes({
-            receipt,
-            sourceRevision: envelope.sourceRevision,
-            result: envelope.result,
-            contractHash: envelope.contractHash,
-            implementationScope: facts.bundle,
-          }),
-        );
-      } catch {
-        findingCodes.push('verification-receipt-invalid');
-      }
+    try {
+      await validateCurrentReceiptGraph({
+        paths: options.paths,
+        state: options.state,
+        result: envelope.result,
+        trace: envelope.acceptanceTrace,
+        requiredReceiptRefs: envelope.requiredReceiptRefs,
+        contractHash: envelope.contractHash,
+        implementationScope: facts.bundle,
+        sourceRevision: envelope.sourceRevision,
+      });
+    } catch {
+      findingCodes.push('verification-receipt-invalid');
     }
     const uniqueCodes = [...new Set(findingCodes)].sort();
     const freshness: NativeVerificationFreshness =

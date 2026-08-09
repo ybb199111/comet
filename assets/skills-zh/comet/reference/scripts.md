@@ -1,12 +1,16 @@
-# 稳定 CLI 与内部脚本兼容说明
+# 稳定公开 CLI 协议
 
 规范路径：`comet/reference/scripts.md`
 
-本文件是 Comet 公开 CLI 与内部脚本兼容方式的单一事实来源。公开工作流必须优先使用稳定命令面：`comet state`、`comet guard`、`comet handoff`、`comet archive`。
+本文件是 Classic Skill 调用 Comet Runtime 的单一事实来源。Skill 只使用 PATH 中的公开 `comet` CLI；随包发布的 `comet/scripts/*.mjs` 属于内部安装与 Runtime 资产，不由 Skill 搜索或直接调用。
+
+## CLI 引导
+
+进入 workflow 时直接运行下方所需的公开 `comet` 命令。若命令返回 `command not found`、`executable not found` 或 `ENOENT`，停止并说明 Comet CLI 安装不完整；不得搜索 Skill 文件、枚举平台目录或直接调用内部 bundle。CLI 已启动但返回非零时，报告原错误，不得通过内部脚本重试。
 
 ## 公开工作流协议
 
-正常安装和日常工作流直接使用 `comet` CLI，不需要定位 launcher，也不要向用户暴露内部 `classic` 命名：
+日常工作流统一调用公开 CLI：
 
 ```bash
 comet state select <change-name>
@@ -16,47 +20,13 @@ comet state check <change-name> <phase>
 comet guard <change-name> <phase> --apply
 comet handoff <change-name>
 comet archive <change-name>
+comet resume-probe . --stdin --json
+comet classic intent route --stdin
 ```
 
 当多个 active change 共存时，进入明确的 change 后先运行 `comet state select <change-name>`。普通源码写入只受该选择管辖；尚未选择时 hook 会阻塞并要求选择。单 active change 可继续自动归属。切换 branch/worktree 或选择失效后必须重新运行 `select`。
 
 guard 的 `--apply` 在检查通过后推进状态。需要直接表达状态事件时使用 `comet state transition`；阶段推进后使用 `comet state next` 解析是否自动调用下一 Skill。
-
-## 兼容、恢复与内部命令引导
-
-以下脚本定位只用于旧版兼容、CLI 不可用时的恢复，以及 `/comet-classic` 内部入口命令。正常公开工作流不得优先采用此方式。Comet 脚本随 Skill 包分发在 `comet/scripts/` 下；需要恢复时不要硬编码路径，而应定位一次并缓存环境变量：
-
-```bash
-COMET_ENV="${COMET_ENV:-$(find . "$HOME"/.*/skills "$HOME/.config" "$HOME/.gemini" -path '*/comet/scripts/comet-env.mjs' -type f -print -quit 2>/dev/null)}"
-if [ -z "$COMET_ENV" ]; then
-  echo "ERROR: comet-env.mjs not found. Ensure the comet skill is installed." >&2
-  return 1
-fi
-COMET_SCRIPTS_DIR="$(node "$COMET_ENV")"
-COMET_STATE="$COMET_SCRIPTS_DIR/comet-state.mjs"
-COMET_GUARD="$COMET_SCRIPTS_DIR/comet-guard.mjs"
-COMET_HANDOFF="$COMET_SCRIPTS_DIR/comet-handoff.mjs"
-COMET_ARCHIVE="$COMET_SCRIPTS_DIR/comet-archive.mjs"
-COMET_INTENT="$COMET_SCRIPTS_DIR/comet-intent.mjs"
-COMET_RESUME_PROBE="$COMET_SCRIPTS_DIR/comet-resume-probe.mjs"
-
-# 脚本定位失败时停止流程
-if [ -z "$COMET_SCRIPTS_DIR" ]; then
-  echo "ERROR: Comet scripts not found. Ensure the comet skill is installed." >&2
-  return 1
-fi
-```
-
-只有进入上述兼容、恢复或内部命令路径时，Agent 才执行这些变量赋值。`COMET_INTENT` 和 `COMET_RESUME_PROBE` 仍是内部入口引导所需变量，不应全局移除。
-
-| 变量 | 用途 |
-|------|------|
-| `COMET_STATE` | `.comet.yaml` 状态读写、phase 检查和恢复上下文 |
-| `COMET_GUARD` | 阶段退出守卫和 `--apply` 状态推进 |
-| `COMET_HANDOFF` | Design/Build handoff 上下文包生成 |
-| `COMET_ARCHIVE` | 一键归档和主 spec 同步 |
-| `COMET_INTENT` | `/comet-classic` 入口意图识别和路由评分 |
-| `COMET_RESUME_PROBE` | 只读 Ambient Resume 探针，判断是否应恢复 active Comet workflow |
 
 ## 自动状态更新
 

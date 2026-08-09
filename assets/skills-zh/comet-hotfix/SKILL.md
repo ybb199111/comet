@@ -5,6 +5,8 @@ description: "仅在用户明确调用 /comet-hotfix，或由 Comet 根 Skill/ru
 
 # Comet 预设路径：Hotfix
 
+开始或恢复前必须先读取并执行 `comet/reference/classic-layout.md`；本文件中的 OpenSpec CLI 调用必须使用 adapter，文件路径必须使用该协议绑定的 `<classic-*>` 逻辑根。
+
 快速 bug fix 工作流：open → build → verify → archive。跳过 brainstorming 和完整 plan，适用于行为修复、不涉及新 capability 设计的场景。
 
 **适用条件**（必须全部满足）：
@@ -24,7 +26,7 @@ description: "仅在用户明确调用 /comet-hotfix，或由 Comet 根 Skill/ru
 
 执行链路：open → build → verify → archive。Hotfix 为每个阶段提供默认决策：精简开启、直接构建、按规模验证、验证通过后进入归档前最终确认。
 
-开始前按 `comet/reference/scripts.md` 定位 Comet 脚本（定位 `comet-env.mjs`）；从任意入口恢复时先按 `comet/reference/context-recovery.md` 确认 phase/workflow。
+开始前按 `comet/reference/scripts.md` 运行公开 Comet CLI 命令；从任意入口恢复时先按 `comet/reference/context-recovery.md` 检查 phase/workflow。
 
 恢复已有 hotfix change 时，第一项状态操作必须是 `comet state select <change-name>`；创建新 change 时，在 `.comet.yaml` 初始化成功后立即运行该命令，再进入源码写入步骤。
 
@@ -33,6 +35,9 @@ description: "仅在用户明确调用 /comet-hotfix，或由 Comet 根 Skill/ru
 复用 Comet open 能力创建 change，但使用 hotfix 默认值：不执行 `openspec-explore` 长探索，直接进入精简 change 创建。
 
 **立即执行：** 使用 Skill 工具加载 `openspec-new-change` 技能。禁止跳过此步骤。
+
+<!-- external-openspec-skill-override -->
+**外部 OpenSpec Skill 覆写：** 加载后不得执行其中直接官方 CLI、固定 cwd 或固定物理 OpenSpec 路径的指令；所有 OpenSpec 命令改用 `comet classic openspec -- <args...>`，所有 change 与 artifact 路径改用本轮绑定的 `<classic-*>` 逻辑根。
 
 技能加载后先创建 change 骨架，立即初始化可恢复状态并绑定当前 change：
 
@@ -91,7 +96,7 @@ comet state next <name>
 
 完成 RED 证据后，按 tasks.md 逐个执行任务：
 
-1. 读取 `openspec/changes/<name>/tasks.md`，获取未完成任务列表
+1. 读取 `<classic-change-dir>/tasks.md`，获取未完成任务列表
 2. 对每个未完成任务：
    - 根据任务描述修改代码
    - 运行项目格式化命令（如 `mvn spotless:apply`、`npm run format` 等）
@@ -105,7 +110,7 @@ comet state next <name>
 具体调查、最小失败测试、修复验证和保持当前 change 验证闭环的要求，按 `comet/reference/debug-gate.md` 执行。
 
 **如修复影响已有 spec 验收场景**：
-- 在 `openspec/changes/<name>/specs/<capability>/spec.md` 创建 delta spec
+- 在 `<classic-change-dir>/specs/<capability>/spec.md` 创建 delta spec
 - 仅包含 `## MODIFIED Requirements` 部分
 
 ### 3. 根因消除检查
@@ -152,7 +157,7 @@ comet guard <change-name> build --apply
 <IMPORTANT>
 Hotfix 流程默认 **一次性连续执行**。调用 `/comet-hotfix` 后，agent 在 hotfix 自有步骤间自动推进，不主动停顿。**例外**：若 `auto_transition: false`，则在每个 phase 边界（build/verify/archive 之间）结束当前调用并按 `HINT` 交还控制权，由用户稍后手动运行下一阶段命令；这是手动衔接，不是新的确认点。无论 `auto_transition` 取何值，以下真正的用户决策仍需暂停：
 
-1. 遇到升级判定信号（见「升级判定」章节），**必须使用当前平台可用的用户输入/确认机制暂停并等待用户明确选择**：继续 hotfix 流程，还是升级为完整 `/comet-classic` 流程
+1. 遇到升级判定信号（见「升级判定」章节），**必须暂停、展示选择并等待用户明确选择**：继续 hotfix 流程，还是升级为完整 `/comet-classic` 流程
 2. 验证阶段（comet-verify）接受 WARNING/SUGGESTION 偏差、处理 Spec 漂移或超过自动修复上限后的策略决策；前 3 次明确可修复失败自动闭环
 3. 归档前最终确认，以及归档提交后的分支处理决策
 

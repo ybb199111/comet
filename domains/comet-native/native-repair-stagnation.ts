@@ -4,9 +4,8 @@ export const NATIVE_REPAIR_SIGNATURE_SCHEMA = 'comet.native.repair-signature.v1'
 export const NATIVE_REPAIR_STAGNATION_LIMITS = {
   warningAtConsecutiveFailures: 2,
   manualStopAtConsecutiveFailures: 3,
-  maxRepairIterations: 12,
   maxHistoryRecords: 64,
-  maxCategories: 16,
+  maxFailedAcceptanceIds: 1_024,
   maxFailedCheckIds: 128,
   maxOverrideSummaryCharacters: 2_000,
 } as const;
@@ -20,16 +19,14 @@ export interface NativeRepairFailureFacts {
   contractHash: string;
   implementationScopeHash: string;
   artifactSnapshotHash: string;
-  categories: readonly string[];
+  failedAcceptanceIds: readonly string[];
   failedCheckIds: readonly string[];
 }
 
 export interface NativeRepairSignature {
   schema: typeof NATIVE_REPAIR_SIGNATURE_SCHEMA;
   contractHash: string;
-  implementationScopeHash: string;
-  artifactSnapshotHash: string;
-  categories: string[];
+  failedAcceptanceIds: string[];
   failedCheckIds: string[];
   signatureHash: string;
 }
@@ -39,6 +36,8 @@ export interface NativeRepairFailureRecord {
   revision: number;
   iteration: number;
   signatureHash: string;
+  failedAcceptanceIds?: string[];
+  failedCheckIds?: string[];
 }
 
 export interface NativeRepairOverrideRecord {
@@ -110,42 +109,28 @@ function normalizedTokens(
   return [...new Set(tokens)].sort(compareText);
 }
 
-export function normalizeNativeRepairFailureTokens(options: {
-  categories?: readonly string[];
-  failedCheckIds?: readonly string[];
-}): { categories: string[]; failedCheckIds: string[] } {
-  const categories =
-    options.categories && options.categories.length > 0
-      ? options.categories
-      : ['verification-failed'];
-  return {
-    categories: normalizedTokens(
-      categories,
-      'Native repair categories',
-      NATIVE_REPAIR_STAGNATION_LIMITS.maxCategories,
-      false,
-    ),
-    failedCheckIds: normalizedTokens(
-      options.failedCheckIds ?? [],
-      'Native repair failed check IDs',
-      NATIVE_REPAIR_STAGNATION_LIMITS.maxFailedCheckIds,
-      true,
-    ),
-  };
+export function normalizeNativeRepairFailedCheckIds(values: readonly string[] = []): string[] {
+  return normalizedTokens(
+    values,
+    'Native repair failed check IDs',
+    NATIVE_REPAIR_STAGNATION_LIMITS.maxFailedCheckIds,
+    true,
+  );
 }
 
 export function buildNativeRepairSignature(facts: NativeRepairFailureFacts): NativeRepairSignature {
-  const tokens = normalizeNativeRepairFailureTokens(facts);
+  const failedCheckIds = normalizeNativeRepairFailedCheckIds(facts.failedCheckIds);
+  const failedAcceptanceIds = normalizedTokens(
+    facts.failedAcceptanceIds,
+    'Native repair failed acceptance IDs',
+    NATIVE_REPAIR_STAGNATION_LIMITS.maxFailedAcceptanceIds,
+    true,
+  );
   const content = {
     schema: NATIVE_REPAIR_SIGNATURE_SCHEMA,
     contractHash: hash(facts.contractHash, 'Native repair contract hash'),
-    implementationScopeHash: hash(
-      facts.implementationScopeHash,
-      'Native repair implementation scope hash',
-    ),
-    artifactSnapshotHash: hash(facts.artifactSnapshotHash, 'Native repair artifact snapshot hash'),
-    categories: tokens.categories,
-    failedCheckIds: tokens.failedCheckIds,
+    failedAcceptanceIds,
+    failedCheckIds,
   };
   return {
     ...content,
@@ -170,7 +155,16 @@ function normalizeHistory(
     }
     const expectedKeys =
       record.kind === 'failure'
-        ? ['iteration', 'kind', 'revision', 'signatureHash']
+        ? record.failedAcceptanceIds === undefined && record.failedCheckIds === undefined
+          ? ['iteration', 'kind', 'revision', 'signatureHash']
+          : [
+              'failedAcceptanceIds',
+              'failedCheckIds',
+              'iteration',
+              'kind',
+              'revision',
+              'signatureHash',
+            ]
         : ['iteration', 'kind', 'revision', 'signatureHash', 'summaryHash'];
     const keys = Object.keys(record).sort(compareText);
     if (
@@ -194,7 +188,29 @@ function normalizeHistory(
     previousIteration = iteration;
     previousRevision = revision;
     const signatureHash = hash(record.signatureHash, `Native repair history ${index} signature`);
-    if (record.kind === 'failure') return { kind: 'failure', iteration, revision, signatureHash };
+    if (record.kind === 'failure') {
+      if (record.failedAcceptanceIds === undefined && record.failedCheckIds === undefined) {
+        return { kind: 'failure', iteration, revision, signatureHash };
+      }
+      return {
+        kind: 'failure',
+        iteration,
+        revision,
+        signatureHash,
+        failedAcceptanceIds: normalizedTokens(
+          record.failedAcceptanceIds ?? [],
+          `Native repair history ${index} failed acceptance IDs`,
+          NATIVE_REPAIR_STAGNATION_LIMITS.maxFailedAcceptanceIds,
+          true,
+        ),
+        failedCheckIds: normalizedTokens(
+          record.failedCheckIds ?? [],
+          `Native repair history ${index} failed check IDs`,
+          NATIVE_REPAIR_STAGNATION_LIMITS.maxFailedCheckIds,
+          true,
+        ),
+      };
+    }
     return {
       kind: 'override',
       iteration,
@@ -203,6 +219,55 @@ function normalizeHistory(
       summaryHash: hash(record.summaryHash, `Native repair history ${index} summary`),
     };
   });
+}
+
+function isSubset(values: readonly string[], other: readonly string[]): boolean {
+  const available = new Set(other);
+  return values.every((value) => available.has(value));
+}
+
+function semanticProgress(
+  current: Pick<
+    NativeRepairFailureRecord,
+    'signatureHash' | 'failedAcceptanceIds' | 'failedCheckIds'
+  >,
+  previous: Pick<
+    NativeRepairFailureRecord,
+    'signatureHash' | 'failedAcceptanceIds' | 'failedCheckIds'
+  >,
+): boolean {
+  if (
+    current.failedAcceptanceIds === undefined ||
+    current.failedCheckIds === undefined ||
+    previous.failedAcceptanceIds === undefined ||
+    previous.failedCheckIds === undefined
+  ) {
+    return current.signatureHash !== previous.signatureHash;
+  }
+  return (
+    isSubset(current.failedAcceptanceIds, previous.failedAcceptanceIds) &&
+    isSubset(current.failedCheckIds, previous.failedCheckIds) &&
+    (current.failedAcceptanceIds.length < previous.failedAcceptanceIds.length ||
+      current.failedCheckIds.length < previous.failedCheckIds.length)
+  );
+}
+
+export function nativeRepairConsecutiveFailures(
+  current: Pick<
+    NativeRepairFailureRecord,
+    'signatureHash' | 'failedAcceptanceIds' | 'failedCheckIds'
+  >,
+  failures: readonly NativeRepairFailureRecord[],
+): number {
+  let consecutive = 1;
+  let later = current;
+  for (let index = failures.length - 1; index >= 0; index -= 1) {
+    const previous = failures[index];
+    if (semanticProgress(later, previous)) break;
+    consecutive += 1;
+    later = previous;
+  }
+  return consecutive;
 }
 
 function overrideSummary(value: string): string {
@@ -232,6 +297,7 @@ export function decideNativeRepairOverride(options: {
   facts: NativeRepairFailureFacts;
   history: readonly NativeRepairHistoryRecord[];
   override: NativeRepairOverrideRequest;
+  maxVerifyFailures: number;
 }): NativeRepairStagnationDecision {
   const signature = buildNativeRepairSignature(options.facts);
   const history = normalizeHistory(options.history);
@@ -239,16 +305,23 @@ export function decideNativeRepairOverride(options: {
     (record): record is NativeRepairFailureRecord => record.kind === 'failure',
   );
   const totalRepairFailures = failures.length;
-  const remainingIterations = Math.max(
-    0,
-    NATIVE_REPAIR_STAGNATION_LIMITS.maxRepairIterations - totalRepairFailures,
+  const maxVerifyFailures = positiveInteger(
+    options.maxVerifyFailures,
+    'Native maximum Verify failures',
   );
-  let consecutiveFailures = 0;
-  for (let index = failures.length - 1; index >= 0; index -= 1) {
-    if (failures[index].signatureHash !== signature.signatureHash) break;
-    consecutiveFailures += 1;
-  }
-  if (totalRepairFailures >= NATIVE_REPAIR_STAGNATION_LIMITS.maxRepairIterations) {
+  const remainingIterations = Math.max(0, maxVerifyFailures - totalRepairFailures);
+  const consecutiveFailures =
+    failures.length === 0
+      ? 0
+      : nativeRepairConsecutiveFailures(
+          {
+            signatureHash: signature.signatureHash,
+            failedAcceptanceIds: signature.failedAcceptanceIds,
+            failedCheckIds: signature.failedCheckIds,
+          },
+          failures.slice(0, -1),
+        );
+  if (totalRepairFailures >= maxVerifyFailures) {
     return {
       disposition: 'hard-stop',
       reasonCode: 'repair-iteration-limit',
@@ -296,6 +369,7 @@ export function decideNativeRepairOverride(options: {
 export function decideNativeRepairStagnation(options: {
   facts: NativeRepairFailureFacts;
   history: readonly NativeRepairHistoryRecord[];
+  maxVerifyFailures: number;
   override?: NativeRepairOverrideRequest | null;
 }): NativeRepairStagnationDecision {
   const signature = buildNativeRepairSignature(options.facts);
@@ -304,16 +378,20 @@ export function decideNativeRepairStagnation(options: {
     (record): record is NativeRepairFailureRecord => record.kind === 'failure',
   );
   const totalRepairFailures = failures.length + 1;
-  const remainingIterations = Math.max(
-    0,
-    NATIVE_REPAIR_STAGNATION_LIMITS.maxRepairIterations - totalRepairFailures,
+  const maxVerifyFailures = positiveInteger(
+    options.maxVerifyFailures,
+    'Native maximum Verify failures',
   );
-  let consecutiveFailures = 1;
-  for (let index = failures.length - 1; index >= 0; index -= 1) {
-    if (failures[index].signatureHash !== signature.signatureHash) break;
-    consecutiveFailures += 1;
-  }
-  if (totalRepairFailures >= NATIVE_REPAIR_STAGNATION_LIMITS.maxRepairIterations) {
+  const remainingIterations = Math.max(0, maxVerifyFailures - totalRepairFailures);
+  const consecutiveFailures = nativeRepairConsecutiveFailures(
+    {
+      signatureHash: signature.signatureHash,
+      failedAcceptanceIds: signature.failedAcceptanceIds,
+      failedCheckIds: signature.failedCheckIds,
+    },
+    failures,
+  );
+  if (totalRepairFailures >= maxVerifyFailures) {
     return {
       disposition: 'hard-stop',
       reasonCode: 'repair-iteration-limit',

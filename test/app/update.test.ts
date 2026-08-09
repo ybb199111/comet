@@ -5,8 +5,11 @@ import os from 'os';
 import { EventEmitter } from 'events';
 import { spawn } from 'child_process';
 import { select } from '@inquirer/prompts';
+import { parse } from 'yaml';
 import { getLatestVersion } from '../../platform/version/version.js';
 import { PLATFORMS, type Platform } from '../../platform/install/platforms.js';
+import { installOpenSpec } from '../../domains/integrations/openspec.js';
+import { installSuperpowersForPlatforms } from '../../domains/integrations/superpowers.js';
 import {
   buildNpmUpdateArgs,
   detectCometPackageScope,
@@ -25,6 +28,8 @@ import {
   defaultProjectConfig,
   writeProjectConfig,
 } from '../../domains/comet-native/native-config.js';
+import { assertClassicLayoutReadable } from '../../domains/comet-classic/classic-layout.js';
+import { DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG } from '../../domains/workflow-contract/project-config.js';
 
 // Mock the interactive select prompt so tests don't hang on CI (no TTY).
 vi.mock('@inquirer/prompts', () => ({
@@ -53,9 +58,22 @@ vi.mock('../../platform/version/version.js', () => ({
   })),
 }));
 
+vi.mock('../../domains/integrations/openspec.js', () => ({
+  installOpenSpec: vi.fn(async () => 'installed'),
+  isProjectMutationGuardError: vi.fn(
+    (error: unknown) => (error as Error | undefined)?.name === 'ProjectMutationGuardError',
+  ),
+}));
+
+vi.mock('../../domains/integrations/superpowers.js', () => ({
+  installSuperpowersForPlatforms: vi.fn(async () => 'installed'),
+}));
+
 const mockedSelect = vi.mocked(select);
 const mockedSpawn = vi.mocked(spawn);
 const mockedGetLatestVersion = vi.mocked(getLatestVersion);
+const mockedInstallOpenSpec = vi.mocked(installOpenSpec);
+const mockedInstallSuperpowers = vi.mocked(installSuperpowersForPlatforms);
 
 const claudePlatform: Platform = {
   id: 'claude',
@@ -63,6 +81,12 @@ const claudePlatform: Platform = {
   skillsDir: '.claude',
   openspecToolId: 'claude',
 };
+
+const manifestPath = path.resolve('assets', 'manifest.json');
+
+async function readManifest() {
+  return JSON.parse(await fs.readFile(manifestPath, 'utf-8')) as { skills: string[] };
+}
 
 type ComponentFailure = 'Skill' | 'Rule' | 'Hook';
 
@@ -73,6 +97,56 @@ async function writeFakeCometPackage(packageRoot: string, version: string): Prom
     JSON.stringify({ name: '@rpamis/comet', version, bin: { comet: 'bin/comet.js' } }),
   );
   await fs.writeFile(path.join(packageRoot, 'bin', 'comet.js'), '#!/usr/bin/env node\n');
+}
+
+async function arrangeClassicDocsOpenSpecUpdate(projectPath: string): Promise<void> {
+  await fs.mkdir(path.join(projectPath, '.comet'), { recursive: true });
+  await fs.writeFile(
+    path.join(projectPath, '.comet', 'config.yaml'),
+    [
+      'schema: comet.project.v1',
+      'default_workflow: classic',
+      'workflows:',
+      '  - classic',
+      'ambient_resume: true',
+      'classic:',
+      '  artifact_layout: docs',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  await fs.mkdir(path.join(projectPath, 'docs', 'openspec'), { recursive: true });
+  await fs.mkdir(path.join(projectPath, '.claude', 'skills', 'comet'), { recursive: true });
+  await fs.writeFile(
+    path.join(projectPath, '.claude', 'skills', 'comet', 'SKILL.md'),
+    '# Comet\n',
+    'utf8',
+  );
+  await fs.mkdir(path.join(projectPath, '.claude', 'skills', 'openspec-propose'), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(projectPath, '.claude', 'skills', 'openspec-propose', 'SKILL.md'),
+    '# OpenSpec\n',
+    'utf8',
+  );
+}
+
+async function writeMockOpenSpecProject(
+  projectPath: string,
+  artifactLayout: 'legacy' | 'docs',
+  config: 'healthy' | 'missing' | 'corrupt' = 'healthy',
+): Promise<void> {
+  const openSpecRoot =
+    artifactLayout === 'docs'
+      ? path.join(projectPath, 'docs', 'openspec')
+      : path.join(projectPath, 'openspec');
+  await fs.mkdir(path.join(openSpecRoot, 'changes', 'archive'), { recursive: true });
+  if (config === 'healthy') {
+    await fs.writeFile(path.join(openSpecRoot, 'config.yaml'), 'schema: spec-driven\n', 'utf8');
+  } else if (config === 'corrupt') {
+    await fs.writeFile(path.join(openSpecRoot, 'config.yaml'), 'schema: [broken\n', 'utf8');
+  }
 }
 
 async function arrangeComponentFailure(
@@ -149,6 +223,24 @@ describe('update command helpers', () => {
     mockedSelect.mockClear();
     mockedSpawn.mockClear();
     mockedGetLatestVersion.mockClear();
+    mockedInstallOpenSpec.mockReset();
+    mockedInstallOpenSpec.mockImplementation(
+      async (
+        projectPath,
+        _toolIds,
+        scope,
+        _shouldInstallCli,
+        _mirrorOpenCodePlatformIds,
+        artifactLayout,
+      ) => {
+        if (scope === 'project') {
+          await writeMockOpenSpecProject(projectPath, artifactLayout);
+        }
+        return 'installed';
+      },
+    );
+    mockedInstallSuperpowers.mockReset();
+    mockedInstallSuperpowers.mockResolvedValue('installed');
     mockedSpawn.mockImplementation((_command, args, options) => {
       const child = new EventEmitter() as EventEmitter & {
         stdout: EventEmitter;
@@ -508,6 +600,46 @@ describe('update command helpers', () => {
     await expect(
       fs.access(path.join(tmpDir, '.agents', 'settings.local.json')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('removes the historical global Router when project update installs the replacement', async () => {
+    const fakeHome = path.join(tmpDir, 'global-hook-migration-home');
+    const globalHooksPath = path.join(fakeHome, '.codex', 'hooks.json');
+    const userHook = { type: 'command', command: 'node user-hook.mjs' };
+    const globalRouter = {
+      type: 'command',
+      command: `node "${path.join(
+        fakeHome,
+        '.agents',
+        'skills',
+        'comet',
+        'scripts',
+        'comet-hook-router.mjs',
+      )}" --platform codex`,
+    };
+    await fs.mkdir(path.join(tmpDir, '.agents', 'skills', 'comet'), { recursive: true });
+    await fs.mkdir(path.join(tmpDir, '.codex'), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, '.agents', 'skills', 'comet', 'SKILL.md'), '# Comet\n');
+    await fs.mkdir(path.dirname(globalHooksPath), { recursive: true });
+    await fs.writeFile(
+      globalHooksPath,
+      JSON.stringify({
+        hooks: { PreToolUse: [{ matcher: 'Write|Edit', hooks: [userHook, globalRouter] }] },
+      }),
+      'utf8',
+    );
+    const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(tmpDir, { skipNpm: true, scope: 'project', platform: 'codex' });
+    } finally {
+      log.mockRestore();
+      homedirSpy.mockRestore();
+    }
+
+    const globalHooks = JSON.parse(await fs.readFile(globalHooksPath, 'utf8'));
+    expect(globalHooks.hooks.PreToolUse[0].hooks).toEqual([userHook]);
+    await expect(fs.access(path.join(tmpDir, '.codex', 'hooks.json'))).resolves.toBeUndefined();
   });
 
   it('does not update Codex hooks when the managed Hook script cannot be copied', async () => {
@@ -1279,6 +1411,7 @@ describe('update command helpers', () => {
     const config = defaultProjectConfig('.');
     config.workflows = ['classic'];
     config.default_workflow = 'classic';
+    await fs.mkdir(projectDir, { recursive: true });
     await writeProjectConfig(projectDir, config);
     await fs.mkdir(path.join(projectDir, '.claude', 'skills', 'comet'), { recursive: true });
     await fs.writeFile(path.join(projectDir, '.claude', 'skills', 'comet', 'SKILL.md'), '# Comet');
@@ -1561,7 +1694,7 @@ describe('update command helpers', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     let json: string;
     try {
-      await updateCommand(projectA, { json: true, allProjects: true });
+      await updateCommand(projectA, { json: true, allProjects: true, selfUpdate: true });
       json = log.mock.calls.map((call) => call.join(' ')).join('\n');
     } finally {
       log.mockRestore();
@@ -1728,6 +1861,55 @@ describe('update command helpers', () => {
     expect(mockedSpawn).not.toHaveBeenCalled();
   });
 
+  it('does not update global targets when the interactive scope selects current project', async () => {
+    const fakeHome = path.join(tmpDir, 'fake-home-interactive-current-project');
+    const projectSkill = path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md');
+    const globalSkill = path.join(fakeHome, '.claude', 'skills', 'comet', 'SKILL.md');
+    await fs.mkdir(path.dirname(projectSkill), { recursive: true });
+    await fs.mkdir(path.dirname(globalSkill), { recursive: true });
+    await fs.writeFile(projectSkill, '# Stale project Comet\n', 'utf8');
+    await fs.writeFile(globalSkill, '# Stale global Comet\n', 'utf8');
+    await upsertProjectInstallation(tmpDir, [{ platform: 'claude', language: 'en' }], 'init', {
+      homeDir: fakeHome,
+    });
+
+    const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    mockedSelect.mockResolvedValueOnce('current-project' as never);
+    try {
+      await updateCommand(tmpDir, { skipNpm: true, installMode: 'copy' });
+    } finally {
+      log.mockRestore();
+      homedirSpy.mockRestore();
+    }
+
+    await expect(fs.readFile(projectSkill, 'utf8')).resolves.toContain(
+      'comet workflow resolve . --activate --json',
+    );
+    await expect(fs.readFile(globalSkill, 'utf8')).resolves.toBe('# Stale global Comet\n');
+  });
+
+  it('does not fall back to global targets when bare update has no indexed projects', async () => {
+    const fakeHome = path.join(tmpDir, 'fake-home-no-indexed-projects');
+    const globalSkill = path.join(fakeHome, '.claude', 'skills', 'comet', 'SKILL.md');
+    await fs.mkdir(path.dirname(globalSkill), { recursive: true });
+    await fs.writeFile(globalSkill, '# Stale global Comet\n', 'utf8');
+
+    const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let output: string;
+    try {
+      await updateCommand(tmpDir, { skipNpm: true, installMode: 'copy' });
+      output = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homedirSpy.mockRestore();
+    }
+
+    await expect(fs.readFile(globalSkill, 'utf8')).resolves.toBe('# Stale global Comet\n');
+    expect(output!).toContain('No indexed Comet projects found');
+  });
+
   it('refreshes the project registry after a successful current-project update', async () => {
     const fakeHome = path.join(tmpDir, 'fake-home-current-refresh');
     const projectA = path.join(tmpDir, 'project-current-refresh');
@@ -1757,7 +1939,796 @@ describe('update command helpers', () => {
     expect(registry.projects[0].lastSource).toBe('update');
   });
 
-  it('returns stable JSON summary when no installed targets are found', async () => {
+  it('updates only the explicit native platform target', async () => {
+    const fakeHome = path.join(tmpDir, 'explicit-native-home');
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'),
+      '# Stale Claude Comet\n',
+      'utf8',
+    );
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        json: true,
+        skipNpm: true,
+        platform: 'codex',
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    const result = JSON.parse(json);
+    expect(result.skills.targets).toEqual([
+      expect.objectContaining({ scope: 'project', platform: 'codex' }),
+    ]);
+    await expect(
+      fs.readFile(path.join(tmpDir, '.agents', 'skills', 'comet', 'SKILL.md'), 'utf8'),
+    ).resolves.toContain('comet workflow resolve . --activate --json');
+    await expect(
+      fs.readFile(path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'), 'utf8'),
+    ).resolves.toBe('# Stale Claude Comet\n');
+  });
+
+  it('updates project-scoped custom platform workflow assets', async () => {
+    const fakeHome = path.join(tmpDir, 'explicit-custom-home');
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        json: true,
+        skipNpm: true,
+        platform: 'test',
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    const result = JSON.parse(json);
+    expect(result.skills.targets).toEqual([
+      expect.objectContaining({ scope: 'project', platform: 'test' }),
+    ]);
+    await expect(
+      fs.access(path.join(tmpDir, '.test', 'skills', 'comet', 'SKILL.md')),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(tmpDir, '.test', 'skills', 'comet', 'scripts', 'comet-hook-router.mjs')),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(tmpDir, '.test', 'rules', 'comet-workflow-guard.md')),
+    ).resolves.toBeUndefined();
+    const settings = JSON.parse(
+      await fs.readFile(path.join(tmpDir, '.test', 'settings.local.json'), 'utf8'),
+    ) as { hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> } };
+    expect(JSON.stringify(settings.hooks)).toContain('comet-hook-router.mjs');
+  });
+
+  it('applies the project workflow selection to an explicit custom update target', async () => {
+    const fakeHome = path.join(tmpDir, 'explicit-custom-both-home');
+    const config = defaultProjectConfig('docs');
+    config.workflows = ['native', 'classic'];
+    config.default_workflow = 'native';
+    await writeProjectConfig(tmpDir, config);
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        json: true,
+        skipNpm: true,
+        platform: 'test',
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    const result = JSON.parse(json);
+    expect(result.skills.targets).toEqual([
+      expect.objectContaining({ scope: 'project', platform: 'test' }),
+    ]);
+    const manifest = await readManifest();
+    for (const skillPath of manifest.skills) {
+      await expect(
+        fs.access(path.join(tmpDir, '.test', 'skills', skillPath)),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  it('updates installed OpenSpec platform assets against the configured docs artifact root', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-docs-update-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        json: true,
+        selfUpdate: true,
+      });
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(mockedInstallOpenSpec).toHaveBeenCalledWith(
+      tmpDir,
+      ['claude'],
+      'project',
+      true,
+      [],
+      'docs',
+      expect.any(Function),
+    );
+    await expect(fs.access(path.join(tmpDir, 'openspec'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('does not update Classic dependencies during a regular Comet update', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-dependencies-regular-update-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'brainstorming'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.claude', 'skills', 'brainstorming', 'SKILL.md'),
+      '# Brainstorming\n',
+      'utf8',
+    );
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        json: true,
+        skipNpm: true,
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(mockedInstallOpenSpec).not.toHaveBeenCalled();
+    expect(mockedInstallSuperpowers).not.toHaveBeenCalled();
+    expect(JSON.parse(json)).toMatchObject({
+      status: 'complete',
+      openspec: { status: 'skipped' },
+      superpowers: { status: 'skipped' },
+    });
+  });
+
+  it('updates installed Classic dependencies with explicit self-update', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-dependencies-self-update-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'brainstorming'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.claude', 'skills', 'brainstorming', 'SKILL.md'),
+      '# Brainstorming\n',
+      'utf8',
+    );
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        json: true,
+        selfUpdate: true,
+      });
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(mockedInstallOpenSpec).toHaveBeenCalledWith(
+      tmpDir,
+      ['claude'],
+      'project',
+      true,
+      [],
+      'docs',
+      expect.any(Function),
+    );
+    expect(mockedInstallSuperpowers).toHaveBeenCalledWith(tmpDir, 'project', ['claude'], true);
+  });
+
+  it.each(['missing', 'corrupt'] as const)(
+    'leaves project config unchanged when OpenSpec reports installed with a %s config',
+    async (openSpecConfig) => {
+      const fakeHome = path.join(tmpDir, `classic-docs-${openSpecConfig}-home`);
+      await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+      const configPath = path.join(tmpDir, '.comet', 'config.yaml');
+      const configBefore = await fs.readFile(configPath, 'utf8');
+      mockedInstallOpenSpec.mockImplementationOnce(
+        async (
+          projectPath,
+          _toolIds,
+          scope,
+          _shouldInstallCli,
+          _mirrorOpenCodePlatformIds,
+          artifactLayout,
+        ) => {
+          if (scope === 'project') {
+            await writeMockOpenSpecProject(projectPath, artifactLayout, openSpecConfig);
+          }
+          return 'installed';
+        },
+      );
+
+      const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+      let json: string;
+      try {
+        await updateCommand(tmpDir, {
+          currentProject: true,
+          installMode: 'copy',
+          language: 'zh',
+          json: true,
+          selfUpdate: true,
+        });
+        json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+      } finally {
+        log.mockRestore();
+        homeSpy.mockRestore();
+      }
+
+      expect(JSON.parse(json)).toMatchObject({
+        status: 'incomplete',
+        openspec: {
+          status: 'failed',
+          reason: expect.stringMatching(/OpenSpec root is unhealthy/iu),
+        },
+      });
+      await expect(fs.readFile(configPath, 'utf8')).resolves.toBe(configBefore);
+    },
+  );
+
+  it('upgrades a legacy partial Native and Classic project config without moving its root', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-legacy-partial-home');
+    await fs.mkdir(path.join(tmpDir, '.comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.comet', 'config.yaml'),
+      [
+        'default_workflow: native',
+        'native:',
+        '  artifact_root: docs',
+        '  language: en',
+        'language: zh-CN',
+        'context_compression: beta',
+        'review_mode: thorough',
+        'auto_transition: false',
+        'custom_top: keep',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await fs.mkdir(path.join(tmpDir, 'openspec'), { recursive: true });
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n',
+      'utf8',
+    );
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'openspec-propose'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(tmpDir, '.claude', 'skills', 'openspec-propose', 'SKILL.md'),
+      '# OpenSpec\n',
+      'utf8',
+    );
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        language: 'zh',
+        json: true,
+        selfUpdate: true,
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(JSON.parse(json)).toMatchObject({ status: 'complete' });
+    const config = parse(await fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf8'));
+    expect(config).toMatchObject({
+      schema: 'comet.project.v1',
+      default_workflow: 'native',
+      workflows: ['native', 'classic'],
+      native: {
+        artifact_root: 'docs',
+        language: 'en',
+      },
+      classic: {
+        artifact_layout: 'legacy',
+        language: 'zh-CN',
+        context_compression: 'beta',
+        review_mode: 'thorough',
+        auto_transition: false,
+      },
+      custom_top: 'keep',
+    });
+    await expect(assertClassicLayoutReadable(tmpDir)).resolves.toMatchObject({
+      artifactLayout: 'legacy',
+      openSpecRoot: path.join(tmpDir, 'openspec'),
+    });
+    expect(mockedInstallOpenSpec).toHaveBeenCalledWith(
+      tmpDir,
+      ['claude'],
+      'project',
+      true,
+      [],
+      'legacy',
+      expect.any(Function),
+    );
+    await expect(fs.access(path.join(tmpDir, 'docs', 'openspec'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('backfills every managed Native and Classic default with the docs layout', async () => {
+    const fakeHome = path.join(tmpDir, 'partial-config-defaults-home');
+    await fs.mkdir(path.join(tmpDir, '.comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.comet', 'config.yaml'),
+      ['default_workflow: native', 'native:', '  custom_native: keep', 'custom_top: keep', ''].join(
+        '\n',
+      ),
+      'utf8',
+    );
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n',
+      'utf8',
+    );
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'openspec-propose'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(tmpDir, '.claude', 'skills', 'openspec-propose', 'SKILL.md'),
+      '# OpenSpec\n',
+      'utf8',
+    );
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        language: 'en',
+        json: true,
+        selfUpdate: true,
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(JSON.parse(json)).toMatchObject({ status: 'complete' });
+    const config = parse(await fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf8'));
+    expect(config).toMatchObject({
+      schema: 'comet.project.v1',
+      default_workflow: 'native',
+      workflows: ['native', 'classic'],
+      ambient_resume: true,
+      native: {
+        artifact_root: 'docs',
+        language: 'en',
+        clarification_mode: 'sequential',
+        archive_confirmation: 'automatic',
+        max_verify_failures: 5,
+        snapshot: {
+          include: ['**/*'],
+          exclude: DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG.exclude,
+          max_files: 10_000,
+          max_total_bytes: 256 * 1024 * 1024,
+          max_duration_ms: 60_000,
+        },
+      },
+      classic: {
+        artifact_layout: 'docs',
+        language: 'en',
+        context_compression: 'off',
+        review_mode: 'standard',
+        auto_transition: true,
+      },
+      custom_top: 'keep',
+    });
+    await expect(assertClassicLayoutReadable(tmpDir)).resolves.toMatchObject({
+      artifactLayout: 'docs',
+      openSpecRoot: path.join(tmpDir, 'docs', 'openspec'),
+    });
+    expect(mockedInstallOpenSpec).toHaveBeenCalledWith(
+      tmpDir,
+      ['claude'],
+      'project',
+      true,
+      [],
+      'docs',
+      expect.any(Function),
+    );
+  });
+
+  it('updates the configured Classic root when both roots exist', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-dual-root-update-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    await fs.mkdir(path.join(tmpDir, 'openspec'), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, 'openspec', 'legacy-marker.txt'), 'legacy\n', 'utf8');
+    await fs.writeFile(path.join(tmpDir, 'docs', 'openspec', 'docs-marker.txt'), 'docs\n', 'utf8');
+    const configPath = path.join(tmpDir, '.comet', 'config.yaml');
+    const managedSkillPath = path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md');
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        json: true,
+        selfUpdate: true,
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(JSON.parse(json)).toMatchObject({
+      status: 'complete',
+      openspec: { status: 'installed' },
+      failures: [],
+    });
+    expect(mockedInstallOpenSpec).toHaveBeenCalledWith(
+      tmpDir,
+      ['claude'],
+      'project',
+      true,
+      [],
+      'docs',
+      expect.any(Function),
+    );
+    await expect(
+      fs.readFile(path.join(tmpDir, 'openspec', 'legacy-marker.txt'), 'utf8'),
+    ).resolves.toBe('legacy\n');
+    await expect(
+      fs.readFile(path.join(tmpDir, 'docs', 'openspec', 'docs-marker.txt'), 'utf8'),
+    ).resolves.toBe('docs\n');
+    expect(parse(await fs.readFile(configPath, 'utf8'))).toMatchObject({
+      classic: { artifact_layout: 'docs' },
+    });
+    await expect(fs.readFile(managedSkillPath, 'utf8')).resolves.toContain('# Comet');
+  });
+
+  it('rejects a project .comet junction without touching the external config or OpenSpec', async () => {
+    const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-update-config-outside-'));
+    const source = [
+      'schema: comet.project.v1',
+      'default_workflow: classic',
+      'workflows: [classic]',
+      'classic:',
+      '  artifact_layout: docs',
+      '',
+    ].join('\n');
+    try {
+      await fs.writeFile(path.join(outsideRoot, 'config.yaml'), source, 'utf8');
+      await fs.writeFile(path.join(outsideRoot, 'marker.txt'), 'keep\n', 'utf8');
+      try {
+        await fs.symlink(
+          outsideRoot,
+          path.join(tmpDir, '.comet'),
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+        throw error;
+      }
+
+      await expect(
+        updateCommand(tmpDir, {
+          currentProject: true,
+          installMode: 'copy',
+          json: true,
+          skipNpm: true,
+        }),
+      ).rejects.toThrow(/symbolic link or junction/iu);
+      expect(mockedInstallOpenSpec).not.toHaveBeenCalled();
+      await expect(fs.readFile(path.join(outsideRoot, 'config.yaml'), 'utf8')).resolves.toBe(
+        source,
+      );
+      await expect(fs.readFile(path.join(outsideRoot, 'marker.txt'), 'utf8')).resolves.toBe(
+        'keep\n',
+      );
+    } finally {
+      await fs.rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a project config symlink without touching its external target or OpenSpec', async () => {
+    const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-update-file-outside-'));
+    const outsideConfig = path.join(outsideRoot, 'config.yaml');
+    const source = [
+      'schema: comet.project.v1',
+      'default_workflow: classic',
+      'workflows: [classic]',
+      'classic:',
+      '  artifact_layout: docs',
+      '',
+    ].join('\n');
+    try {
+      await fs.mkdir(path.join(tmpDir, '.comet'), { recursive: true });
+      await fs.writeFile(outsideConfig, source, 'utf8');
+      try {
+        await fs.symlink(outsideConfig, path.join(tmpDir, '.comet', 'config.yaml'), 'file');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+        throw error;
+      }
+
+      await expect(
+        updateCommand(tmpDir, {
+          currentProject: true,
+          installMode: 'copy',
+          json: true,
+          skipNpm: true,
+        }),
+      ).rejects.toThrow(/symbolic link or junction/iu);
+      expect(mockedInstallOpenSpec).not.toHaveBeenCalled();
+      await expect(fs.readFile(outsideConfig, 'utf8')).resolves.toBe(source);
+    } finally {
+      await fs.rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes only the Classic artifact root when no OpenSpec tool assets are installed', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-docs-no-openspec-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    await fs.rm(path.join(tmpDir, '.claude', 'skills', 'openspec-propose'), {
+      recursive: true,
+      force: true,
+    });
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        json: true,
+        selfUpdate: true,
+      });
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(mockedInstallOpenSpec).toHaveBeenCalledWith(
+      tmpDir,
+      [],
+      'project',
+      true,
+      [],
+      'docs',
+      expect.any(Function),
+    );
+  });
+
+  it('keeps config unchanged when an artifact-only OpenSpec refresh cannot run', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-docs-artifact-only-missing-cli-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    await fs.rm(path.join(tmpDir, '.claude', 'skills', 'openspec-propose'), {
+      recursive: true,
+      force: true,
+    });
+    const configPath = path.join(tmpDir, '.comet', 'config.yaml');
+    const configBefore = await fs.readFile(configPath);
+    mockedInstallOpenSpec.mockResolvedValue('skipped');
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        language: 'zh',
+        json: true,
+        selfUpdate: true,
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(JSON.parse(json)).toMatchObject({
+      status: 'incomplete',
+      openspec: {
+        status: 'failed',
+        reason: expect.stringContaining('CLI'),
+      },
+    });
+    expect(mockedInstallOpenSpec).toHaveBeenCalledWith(
+      tmpDir,
+      [],
+      'project',
+      true,
+      [],
+      'docs',
+      expect.any(Function),
+    );
+    await expect(fs.readFile(configPath)).resolves.toEqual(configBefore);
+  });
+
+  it('fails closed when installed OpenSpec assets cannot be refreshed because the CLI is missing', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-docs-missing-openspec-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    mockedInstallOpenSpec.mockResolvedValue('skipped');
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        json: true,
+        selfUpdate: true,
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(JSON.parse(json)).toMatchObject({
+      status: 'incomplete',
+      openspec: {
+        status: 'failed',
+        reason: expect.stringContaining('CLI'),
+      },
+      failures: [expect.objectContaining({ component: 'OpenSpec' })],
+    });
+  });
+
+  it('reports an OpenSpec integration failure as an incomplete update', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-docs-failed-openspec-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    mockedInstallOpenSpec.mockResolvedValue('failed');
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        json: true,
+        selfUpdate: true,
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(JSON.parse(json)).toMatchObject({
+      status: 'incomplete',
+      openspec: { status: 'failed' },
+      failures: [expect.objectContaining({ component: 'OpenSpec' })],
+    });
+  });
+
+  it('reports a thrown OpenSpec adapter error without falling back to the legacy root', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-docs-throwing-openspec-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    mockedInstallOpenSpec.mockRejectedValue(new Error('adapter exploded'));
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        json: true,
+        selfUpdate: true,
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(JSON.parse(json)).toMatchObject({
+      status: 'incomplete',
+      openspec: {
+        status: 'failed',
+        reason: expect.stringContaining('adapter exploded'),
+      },
+      failures: [expect.objectContaining({ component: 'OpenSpec' })],
+    });
+    await expect(fs.access(path.join(tmpDir, 'openspec'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('updates installed OpenSpec assets at global scope without initializing a project root', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-global-openspec-home');
+    await fs.mkdir(path.join(fakeHome, '.claude', 'skills', 'openspec-propose'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(fakeHome, '.claude', 'skills', 'openspec-propose', 'SKILL.md'),
+      '# OpenSpec\n',
+      'utf8',
+    );
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(tmpDir, {
+        scope: 'global',
+        platform: 'claude',
+        json: true,
+        selfUpdate: true,
+      });
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(mockedInstallOpenSpec).toHaveBeenCalledWith(
+      tmpDir,
+      ['claude'],
+      'global',
+      true,
+      [],
+      'legacy',
+      undefined,
+    );
+    await expect(fs.access(path.join(tmpDir, 'openspec'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('rejects custom platform targets for global update', async () => {
+    await expect(
+      updateCommand(tmpDir, {
+        json: true,
+        skipNpm: true,
+        scope: 'global',
+        platform: 'test',
+      }),
+    ).rejects.toThrow('custom --platform targets are only supported with project scope');
+  });
+
+  it('reports no indexed projects in JSON when no project installation is found', async () => {
     const fakeHome = path.join(tmpDir, 'fake-home-instructions');
     const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -1772,25 +2743,52 @@ describe('update command helpers', () => {
 
     const result = JSON.parse(json);
     expect(result).toMatchObject({
-      npm: {
-        scope: 'skipped',
-        status: 'skipped',
+      mode: 'all-projects',
+      status: 'complete',
+      registry: {
+        projectsFound: 0,
+        staleRemoved: 0,
       },
-      skills: {
-        totalCopied: 0,
-        targets: [],
-      },
-      rules: {
-        totalCopied: 0,
-      },
-      hooks: {
-        totalInstalled: 0,
-      },
-      projectInstructions: {
-        updated: 0,
-      },
-      codegraph: 'skipped',
+      projects: [],
+      reason: 'no indexed Comet projects found',
     });
+  });
+
+  it('does not backfill an unindexed project config through a global-only installation', async () => {
+    const fakeHome = path.join(tmpDir, 'global-config-refresh-home');
+    await fs.mkdir(path.join(fakeHome, '.claude', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(fakeHome, '.claude', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n',
+      'utf8',
+    );
+    await fs.mkdir(path.join(tmpDir, '.comet'), { recursive: true });
+    const originalConfig = [
+      'default_workflow: classic',
+      'language: zh-CN',
+      'context_compression: beta',
+      '',
+    ].join('\n');
+    await fs.writeFile(path.join(tmpDir, '.comet', 'config.yaml'), originalConfig, 'utf8');
+    await fs.mkdir(path.join(tmpDir, 'openspec'), { recursive: true });
+    await fs.mkdir(path.join(tmpDir, 'docs', 'openspec'), { recursive: true });
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(tmpDir, { installMode: 'copy', skipNpm: true });
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(mockedSelect).not.toHaveBeenCalled();
+    await expect(fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf8')).resolves.toBe(
+      originalConfig,
+    );
+    await expect(
+      fs.readFile(path.join(fakeHome, '.claude', 'skills', 'comet', 'SKILL.md'), 'utf8'),
+    ).resolves.toBe('# Comet\n');
   });
 
   it('does not create or update root project instructions when only global targets are updated', async () => {
@@ -1893,7 +2891,7 @@ describe('update command helpers', () => {
 
     await expect(
       fs.readFile(path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'), 'utf8'),
-    ).resolves.toContain('comet workflow resolve . --json');
+    ).resolves.toContain('comet workflow resolve . --activate --json');
     await expect(
       fs.readFile(path.join(tmpDir, '.claude', 'skills', 'comet-native', 'SKILL.md'), 'utf8'),
     ).resolves.toContain('name: comet-native');
@@ -1917,10 +2915,8 @@ describe('update command helpers', () => {
     expect(updatedConfig).toContain('keep: true');
     expect(updatedConfig).toContain('artifact_root: docs');
     expect(updatedConfig).toContain('clarification_mode: sequential');
-    expect(updatedConfig).toContain('classic:');
-    expect(updatedConfig).not.toMatch(
-      /^(language|context_compression|review_mode|auto_transition):/mu,
-    );
+    expect(updatedConfig).not.toContain('classic:');
+    expect(updatedConfig).toContain('language: legacy');
     await expect(
       fs.readFile(path.join(tmpDir, 'docs', 'superpowers', 'keep.md'), 'utf8'),
     ).resolves.toBe('keep classic working files\n');
@@ -1991,6 +2987,45 @@ describe('update command helpers', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('keeps Classic v1 selection when historical global Hook cleanup fails', async () => {
+    const fakeHome = path.join(tmpDir, 'classic-hook-cleanup-failure-home');
+    const config = defaultProjectConfig('.');
+    config.workflows = ['classic'];
+    config.default_workflow = 'classic';
+    await writeProjectConfig(tmpDir, config);
+    await fs.mkdir(path.join(tmpDir, '.agents', 'skills', 'comet'), { recursive: true });
+    await fs.mkdir(path.join(tmpDir, '.codex'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.agents', 'skills', 'comet', 'SKILL.md'),
+      '# Stale Comet\n',
+    );
+    const selectionPath = path.join(tmpDir, '.comet', 'current-change.json');
+    const legacySelection = `${JSON.stringify({ version: 1, change: 'legacy-change', branch: null })}\n`;
+    await fs.writeFile(selectionPath, legacySelection, 'utf8');
+    const globalLegacyPath = path.join(fakeHome, '.codex', 'settings.local.json');
+    await fs.mkdir(path.dirname(globalLegacyPath), { recursive: true });
+    await fs.writeFile(globalLegacyPath, '{not-json', 'utf8');
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let result;
+    try {
+      result = await updateCommand(tmpDir, {
+        skipNpm: true,
+        scope: 'project',
+        platform: 'codex',
+      });
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(result!.status).toBe('incomplete');
+    await expect(fs.readFile(selectionPath, 'utf8')).resolves.toBe(legacySelection);
+    await expect(fs.readFile(globalLegacyPath, 'utf8')).resolves.toBe('{not-json');
+    await expect(fs.access(path.join(tmpDir, '.codex', 'hooks.json'))).resolves.toBeUndefined();
+  });
+
   it('migrates manifest-managed legacy Codex Skills for Native without touching unrelated state', async () => {
     const fakeHome = path.join(tmpDir, 'native-codex-migration-home');
     await fs.mkdir(path.join(tmpDir, '.comet'), { recursive: true });
@@ -2038,7 +3073,7 @@ describe('update command helpers', () => {
 
     await expect(
       fs.readFile(path.join(tmpDir, '.agents', 'skills', 'comet', 'SKILL.md'), 'utf8'),
-    ).resolves.toContain('comet workflow resolve . --json');
+    ).resolves.toContain('comet workflow resolve . --activate --json');
     await expect(fs.access(legacyComet)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(fs.readFile(path.join(legacyPersonal, 'SKILL.md'), 'utf8')).resolves.toBe(
       '# Personal\n',
@@ -2118,7 +3153,7 @@ describe('update command helpers', () => {
       expect((await fs.lstat(path.join(platformSkills, 'comet'))).isSymbolicLink()).toBe(false);
       await expect(
         fs.readFile(path.join(platformSkills, 'comet', 'SKILL.md'), 'utf8'),
-      ).resolves.toContain('comet workflow resolve . --json');
+      ).resolves.toContain('comet workflow resolve . --activate --json');
       await expect(fs.readFile(path.join(centralComet, 'SKILL.md'), 'utf8')).resolves.toBe(
         '# Central stale Comet\n',
       );
@@ -2279,6 +3314,20 @@ describe('update command helpers', () => {
   });
 
   it('installs ambient resume instructions and preserves existing user AGENTS/CLAUDE rules', async () => {
+    await fs.mkdir(path.join(tmpDir, '.comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.comet', 'config.yaml'),
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows: [native]',
+        'ambient_resume: true',
+        'native:',
+        '  artifact_root: docs',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
     await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'comet'), { recursive: true });
     await fs.writeFile(
       path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'),
@@ -2309,6 +3358,55 @@ describe('update command helpers', () => {
     expect(claude).toContain('# User\n\nAlso keep this.');
     expect(agents).toContain('<comet-ambient-resume>');
     expect(claude).toContain('<comet-ambient-resume>');
+  });
+
+  it('removes ambient resume instructions when the project disables the probe', async () => {
+    await fs.mkdir(path.join(tmpDir, '.comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.comet', 'config.yaml'),
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows:',
+        '  - native',
+        'ambient_resume: false',
+        'native:',
+        '  artifact_root: docs',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n\nUse this skill.',
+      'utf8',
+    );
+    await fs.writeFile(path.join(tmpDir, 'AGENTS.md'), '# User\n\nKeep this.\n', 'utf8');
+    await fs.writeFile(path.join(tmpDir, 'CLAUDE.md'), '# User\n\nKeep this too.\n', 'utf8');
+    const instructions = await import('../../domains/skill/project-instructions.js');
+    await instructions.installCometProjectInstructions(tmpDir, 'en');
+
+    const fakeHome = path.join(tmpDir, 'fake-home-disabled-instructions');
+    const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, { json: true, skipNpm: true });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homedirSpy.mockRestore();
+    }
+
+    const result = JSON.parse(json);
+    expect(result.projectInstructions.updated).toBe(2);
+    await expect(fs.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf8')).resolves.toBe(
+      '# User\n\nKeep this.\n',
+    );
+    await expect(fs.readFile(path.join(tmpDir, 'CLAUDE.md'), 'utf8')).resolves.toBe(
+      '# User\n\nKeep this too.\n',
+    );
   });
 
   it('does not prompt to install CodeGraph when the project already has an index', async () => {
@@ -2364,6 +3462,209 @@ describe('update command helpers', () => {
     const config = await fs.readFile(path.join(fakeHome, '.comet', 'config.yaml'), 'utf-8');
     expect(config).toContain('language: zh-CN');
     await expect(fs.stat(path.join(fakeHome, 'docs', 'superpowers'))).rejects.toThrow();
+  });
+
+  it('syncs Native Skills during a global update of a Native+Classic install', async () => {
+    // Regression for #262: global scope used to hardcode the Skill
+    // workflowSelection to 'classic', which filtered out comet-native/* and
+    // left global Native installs frozen at their first-install version. With
+    // both comet-native and comet-classic on disk the selection is 'both', so
+    // Native Skills stay current.
+    const fakeHome = path.join(tmpDir, 'fake-home-global-native-sync');
+    await fs.mkdir(path.join(fakeHome, '.codex', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(fakeHome, '.codex', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n',
+      'utf-8',
+    );
+    // Seed a both-workflow install: stale comet-native plus comet-classic so
+    // the derived selection is 'both', and prove the stale Native Skill is
+    // overwritten rather than merely created.
+    await fs.mkdir(path.join(fakeHome, '.agents', 'skills', 'comet-native'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(fakeHome, '.agents', 'skills', 'comet-native', 'SKILL.md'),
+      '---\nname: comet-native\n---\n# STALE\n',
+      'utf-8',
+    );
+    await fs.mkdir(path.join(fakeHome, '.agents', 'skills', 'comet-classic'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(fakeHome, '.agents', 'skills', 'comet-classic', 'SKILL.md'),
+      '# stale classic\n',
+      'utf-8',
+    );
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    // Silence update progress logging; this test only asserts file contents.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string | undefined;
+
+    try {
+      await updateCommand(tmpDir, {
+        json: true,
+        skipNpm: true,
+        scope: 'global',
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    // Native Skills must be copied alongside Classic ones for global installs.
+    // Codex installs land in the canonical `.agents/skills/` directory, and a
+    // previously stale Native Skill must be replaced with the current asset.
+    const nativeSkill = await fs.readFile(
+      path.join(fakeHome, '.agents', 'skills', 'comet-native', 'SKILL.md'),
+      'utf8',
+    );
+    expect(nativeSkill).toContain('name: comet-native');
+    expect(nativeSkill).not.toContain('# STALE');
+    await expect(
+      fs.readFile(path.join(fakeHome, '.agents', 'skills', 'comet', 'SKILL.md'), 'utf8'),
+    ).resolves.toContain('comet workflow resolve');
+
+    // With 'both' selected, no manifest entries are filtered out, so the
+    // Codex target reports zero skipped Skills.
+    const result = json ? JSON.parse(json) : {};
+    const codexSkills = (result.skills?.targets ?? []).find(
+      (t: { platform: string }) => t.platform === 'codex',
+    );
+    expect(codexSkills?.skipped).toBe(0);
+  });
+
+  it('does not add Native Skills to a Classic-only global install during update', async () => {
+    // A global install created with `comet init --scope global --workflow
+    // classic` must not gain comet-native after `comet update --scope global`.
+    const fakeHome = path.join(tmpDir, 'fake-home-global-classic-only');
+    await fs.mkdir(path.join(fakeHome, '.codex', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(fakeHome, '.codex', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n',
+      'utf-8',
+    );
+    // No comet-native directory: this is a Classic-only install.
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string | undefined;
+
+    try {
+      await updateCommand(tmpDir, {
+        json: true,
+        skipNpm: true,
+        scope: 'global',
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    // Classic Skills update, but comet-native must NOT be introduced.
+    await expect(
+      fs.readFile(path.join(fakeHome, '.agents', 'skills', 'comet', 'SKILL.md'), 'utf8'),
+    ).resolves.toContain('comet workflow resolve');
+    await expect(
+      fs.access(path.join(fakeHome, '.agents', 'skills', 'comet-native', 'SKILL.md')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // The Native manifest entries filtered out by the Classic selection are
+    // reported as skipped rather than hidden.
+    const result = json ? JSON.parse(json) : {};
+    const codexSkills = (result.skills?.targets ?? []).find(
+      (t: { platform: string }) => t.platform === 'codex',
+    );
+    expect(codexSkills?.skipped).toBeGreaterThan(0);
+  });
+
+  it('does not add Classic Skills to a Native-only global install during update', async () => {
+    // A global install created with `comet init --scope global --workflow
+    // native` must not gain comet-classic after `comet update --scope global`.
+    const fakeHome = path.join(tmpDir, 'fake-home-global-native-only');
+    await fs.mkdir(path.join(fakeHome, '.codex', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(fakeHome, '.codex', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n',
+      'utf-8',
+    );
+    // Native-only install: comet-native present, comet-classic absent.
+    await fs.mkdir(path.join(fakeHome, '.agents', 'skills', 'comet-native'), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(fakeHome, '.agents', 'skills', 'comet-native', 'SKILL.md'),
+      '---\nname: comet-native\n---\n# STALE\n',
+      'utf-8',
+    );
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string | undefined;
+
+    try {
+      await updateCommand(tmpDir, {
+        json: true,
+        skipNpm: true,
+        scope: 'global',
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    // Native Skills update, but comet-classic must NOT be introduced.
+    const nativeSkill = await fs.readFile(
+      path.join(fakeHome, '.agents', 'skills', 'comet-native', 'SKILL.md'),
+      'utf8',
+    );
+    expect(nativeSkill).toContain('name: comet-native');
+    expect(nativeSkill).not.toContain('# STALE');
+    await expect(
+      fs.access(path.join(fakeHome, '.agents', 'skills', 'comet-classic', 'SKILL.md')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // The Classic manifest entries filtered out by the Native selection are
+    // reported as skipped rather than hidden.
+    const result = json ? JSON.parse(json) : {};
+    const codexSkills = (result.skills?.targets ?? []).find(
+      (t: { platform: string }) => t.platform === 'codex',
+    );
+    expect(codexSkills?.skipped).toBeGreaterThan(0);
+  });
+
+  it('preserves installed language for an explicit global platform update', async () => {
+    const fakeHome = path.join(tmpDir, 'fake-home-explicit-global-language');
+    await fs.mkdir(path.join(fakeHome, '.codex', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(fakeHome, '.codex', 'skills', 'comet', 'SKILL.md'),
+      '# Comet\n\n当用户提出需求时使用这个技能。',
+      'utf-8',
+    );
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+
+    try {
+      await updateCommand(tmpDir, {
+        json: true,
+        skipNpm: true,
+        scope: 'global',
+        platform: 'codex',
+      });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    const result = JSON.parse(json);
+    expect(result.skills.targets).toEqual([
+      expect.objectContaining({ scope: 'global', platform: 'codex', language: 'zh' }),
+    ]);
+    const config = await fs.readFile(path.join(fakeHome, '.comet', 'config.yaml'), 'utf-8');
+    expect(config).toContain('language: zh-CN');
   });
 
   it('re-persists an explicitly requested language even when the config already has a different one', async () => {

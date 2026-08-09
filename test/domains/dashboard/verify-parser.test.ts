@@ -142,4 +142,28 @@ describe('resolveVerify', () => {
     expect(result.reportExists).toBe(true);
     expect(result.summary).toContain('FAILED');
   });
+
+  it('can resolve report state without reading the report summary', async () => {
+    const reportPath = path.join(tmpDir, '.comet', 'verify-result.md');
+    await fs.mkdir(path.dirname(reportPath), { recursive: true });
+    await fs.writeFile(reportPath, 'This report body is only needed by the detail view.');
+
+    const result = await resolveVerify({
+      changeDir: tmpDir,
+      yaml: {},
+      includeSummary: false,
+    });
+
+    expect(result).toEqual({ result: 'fail', reportExists: true });
+  });
+
+  it('keeps report existence when the detail view cannot read an oversized report', async () => {
+    const reportPath = path.join(tmpDir, '.comet', 'verify-result.md');
+    await fs.mkdir(path.dirname(reportPath), { recursive: true });
+    await fs.writeFile(reportPath, 'x'.repeat(2 * 1024 * 1024 + 1));
+
+    const result = await resolveVerify({ changeDir: tmpDir, yaml: {} });
+
+    expect(result).toEqual({ result: 'fail', reportExists: true });
+  });
 });

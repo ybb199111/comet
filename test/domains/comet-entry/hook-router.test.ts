@@ -30,6 +30,112 @@ describe('Comet Hook Router', () => {
     await writeProjectConfig(root, config);
   }
 
+  it('stays neutral for an unknown write target without reading Comet state', async () => {
+    const listNative = vi.fn(async () => {
+      throw new Error('Native state must not be read');
+    });
+    const listClassic = vi.fn(async () => {
+      throw new Error('Classic state must not be read');
+    });
+    const inspectNative = vi.fn();
+    const inspectClassic = vi.fn();
+
+    const decision = await inspectCometHook(
+      root,
+      { intent: 'unknown', targets: [], toolName: 'FutureWriteTool' },
+      { listNative, listClassic, inspectNative, inspectClassic },
+    );
+
+    expect(decision).toMatchObject({ allowed: true });
+    expect(listNative).not.toHaveBeenCalled();
+    expect(listClassic).not.toHaveBeenCalled();
+    expect(inspectNative).not.toHaveBeenCalled();
+    expect(inspectClassic).not.toHaveBeenCalled();
+  });
+
+  it('stays neutral for project-external targets without reading Comet state', async () => {
+    const externalTarget = path.join(os.tmpdir(), `comet-memory-${path.basename(root)}.md`);
+    const listNative = vi.fn(async () => {
+      throw new Error('Native state must not be read');
+    });
+    const listClassic = vi.fn(async () => {
+      throw new Error('Classic state must not be read');
+    });
+    const inspectNative = vi.fn();
+    const inspectClassic = vi.fn();
+
+    const decision = await inspectCometHook(
+      root,
+      { intent: 'write', targets: [externalTarget], toolName: 'Write' },
+      { listNative, listClassic, inspectNative, inspectClassic },
+    );
+
+    expect(decision).toMatchObject({ allowed: true });
+    expect(listNative).not.toHaveBeenCalled();
+    expect(listClassic).not.toHaveBeenCalled();
+    expect(inspectNative).not.toHaveBeenCalled();
+    expect(inspectClassic).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the scope of an explicit write target cannot be determined', async () => {
+    const scopeTargets = vi.fn(async () => {
+      throw new Error('project root is unreadable');
+    });
+
+    const decision = await inspectCometHook(
+      root,
+      { intent: 'write', targets: ['src/app.ts'], toolName: 'Write' },
+      {
+        listNative: vi.fn(async () => []),
+        listClassic: vi.fn(async () => []),
+        inspectNative: vi.fn(),
+        inspectClassic: vi.fn(),
+        scopeTargets,
+      },
+    );
+
+    expect(decision).toMatchObject({ allowed: false });
+    expect(decision.reason).toContain('scope could not be determined safely');
+  });
+
+  it('filters external targets before delegating a mixed write to the owning Guard', async () => {
+    await configureBoth();
+    await writeCometCurrentSelection(root, {
+      schema: 'comet.selection.v2',
+      workflow: 'native',
+      change: 'native-change',
+      branch: null,
+    });
+    const externalTarget = path.join(os.tmpdir(), `comet-memory-${path.basename(root)}.md`);
+    const inspectNative = vi.fn(async () => ({ allowed: true, reason: 'native' }));
+    const inspectClassic = vi.fn(async () => ({ allowed: true, reason: 'classic' }));
+
+    const decision = await inspectCometHook(
+      root,
+      {
+        intent: 'write',
+        targets: [externalTarget, 'src/app.ts'],
+        toolName: 'Edit',
+      },
+      {
+        listNative: async () => [
+          { workflow: 'native', name: 'native-change', phase: 'build' as const },
+        ],
+        listClassic: async () => [],
+        inspectNative,
+        inspectClassic,
+      },
+    );
+
+    expect(decision).toEqual({ allowed: true, reason: 'native' });
+    expect(inspectNative).toHaveBeenCalledWith(
+      root,
+      { intent: 'write', targets: ['src/app.ts'], toolName: 'Edit' },
+      'native-change',
+    );
+    expect(inspectClassic).not.toHaveBeenCalled();
+  });
+
   it('routes one event to only the selected Native Guard', async () => {
     await configureBoth();
     await writeCometCurrentSelection(root, {
@@ -85,6 +191,16 @@ describe('Comet Hook Router', () => {
       owner: { workflow: 'native', name: 'native-change', phase: 'build' },
     });
     expect(listClassic).not.toHaveBeenCalled();
+  });
+
+  it('ignores the standalone root when default owner enumeration checks Classic', async () => {
+    await configureBoth();
+    await fs.mkdir(path.join(root, 'openspec', 'changes', 'legacy'), { recursive: true });
+    await fs.mkdir(path.join(root, 'docs', 'openspec', 'changes', 'docs'), { recursive: true });
+
+    const resolution = await resolveHookWorkflowOwner(root);
+
+    expect(resolution).toEqual({ status: 'none' });
   });
 
   it('routes one event to only the selected Classic Guard', async () => {
@@ -228,7 +344,7 @@ describe('Comet Hook Router', () => {
     expect(inspectClassic).not.toHaveBeenCalled();
   });
 
-  it('fails closed when a selection points to a missing change', async () => {
+  it('allows ordinary development when a stale selection has no active replacement', async () => {
     await configureBoth();
     await writeCometCurrentSelection(root, {
       schema: 'comet.selection.v2',
@@ -250,15 +366,12 @@ describe('Comet Hook Router', () => {
       },
     );
 
-    expect(decision).toMatchObject({
-      allowed: false,
-      reason: expect.stringContaining('missing or archived'),
-    });
+    expect(decision).toEqual({ allowed: true, reason: 'No active Comet change' });
     expect(inspectNative).not.toHaveBeenCalled();
     expect(inspectClassic).not.toHaveBeenCalled();
   });
 
-  it('classifies a missing selected change for deterministic repair', async () => {
+  it('classifies a stale selection with zero active changes as none', async () => {
     await configureBoth();
     await writeCometCurrentSelection(root, {
       schema: 'comet.selection.v2',
@@ -273,9 +386,64 @@ describe('Comet Hook Router', () => {
         listClassic: async () => [],
       }),
     ).resolves.toEqual({
-      status: 'stale',
-      code: 'target-missing',
-      reason: "selected native change 'missing-change' is missing or archived",
+      status: 'none',
+      staleSelection: {
+        code: 'target-missing',
+        reason: "selected native change 'missing-change' is missing or archived",
+      },
+    });
+  });
+
+  it('infers the sole active change after ignoring a stale selection', async () => {
+    await configureBoth();
+    await writeCometCurrentSelection(root, {
+      schema: 'comet.selection.v2',
+      workflow: 'native',
+      change: 'missing-change',
+      branch: null,
+    });
+
+    await expect(
+      resolveHookWorkflowOwner(root, {
+        listNative: async () => [
+          { workflow: 'native', name: 'only-active', phase: 'build' as const },
+        ],
+        listClassic: async () => [],
+      }),
+    ).resolves.toEqual({
+      status: 'inferred',
+      owner: { workflow: 'native', name: 'only-active', phase: 'build' },
+      staleSelection: {
+        code: 'target-missing',
+        reason: "selected native change 'missing-change' is missing or archived",
+      },
+    });
+  });
+
+  it('requires selection when a stale selection leaves multiple active changes', async () => {
+    await configureBoth();
+    await writeCometCurrentSelection(root, {
+      schema: 'comet.selection.v2',
+      workflow: 'native',
+      change: 'missing-change',
+      branch: null,
+    });
+
+    await expect(
+      resolveHookWorkflowOwner(root, {
+        listNative: async () => [{ workflow: 'native', name: 'first', phase: 'build' as const }],
+        listClassic: async () => [{ workflow: 'classic', name: 'second', phase: 'build' as const }],
+      }),
+    ).resolves.toEqual({
+      status: 'ambiguous',
+      candidates: [
+        { workflow: 'native', name: 'first', phase: 'build' },
+        { workflow: 'classic', name: 'second', phase: 'build' },
+      ],
+      staleSelection: {
+        code: 'target-missing',
+        reason: "selected native change 'missing-change' is missing or archived",
+      },
     });
   });
 
@@ -315,6 +483,18 @@ describe('Comet Hook Router', () => {
     ).resolves.toEqual({ allowed: true, reason: 'No active Comet change' });
     expect(inspectNative).not.toHaveBeenCalled();
     expect(inspectClassic).not.toHaveBeenCalled();
+  });
+
+  it('allows ordinary development when configured workflow roots have not been created', async () => {
+    await configureBoth();
+
+    await expect(
+      inspectCometHook(root, {
+        intent: 'write',
+        targets: ['src/app.ts'],
+        toolName: 'Write',
+      }),
+    ).resolves.toEqual({ allowed: true, reason: 'No active Comet change' });
   });
 
   it('infers the only active change without writing selection', async () => {

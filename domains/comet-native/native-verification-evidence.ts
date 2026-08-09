@@ -14,12 +14,13 @@ import {
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const MISSING_ACCEPTANCE_DETAIL_LIMIT = 8;
-const ACCEPTANCE_TRACE_HASH_TAG = 'comet.native.acceptance-trace.v1';
+const ACCEPTANCE_TRACE_HASH_TAG = 'comet.native.acceptance-trace.v2';
 const PARTIAL_ALLOWANCE_HASH_TAG = 'comet.native.partial-allowance.v1';
-const VERIFICATION_ENVELOPE_HASH_TAG = 'comet.native.verification-evidence.v1';
+const VERIFICATION_ENVELOPE_HASH_TAG = 'comet.native.verification-evidence.v2';
 
 export interface NativeAcceptanceTraceEntry {
   acceptanceId: string;
+  status: 'passed' | 'failed' | 'missing';
   kind: NativeAcceptanceCriterion['kind'];
   source: string;
   evidenceRefs: string[];
@@ -27,7 +28,7 @@ export interface NativeAcceptanceTraceEntry {
 }
 
 export interface NativeAcceptanceEvidenceTrace {
-  schema: 'comet.native.acceptance-trace.v1';
+  schema: 'comet.native.acceptance-trace.v2';
   nativeRootRef: string;
   criteriaHash: string;
   total: number;
@@ -50,7 +51,7 @@ export interface NativePartialAllowance {
 }
 
 export interface NativeVerificationEvidenceEnvelope {
-  schema: 'comet.native.verification-evidence.v1';
+  schema: 'comet.native.verification-evidence.v2';
   change: string;
   sourceRevision: number;
   result: 'pass' | 'fail';
@@ -64,10 +65,13 @@ export interface NativeVerificationEvidenceEnvelope {
   acceptanceTrace: NativeAcceptanceEvidenceTrace;
   partialAllowanceRef: string | null;
   partialAllowanceHash: string | null;
-  receiptRef: string | null;
+  requiredReceiptRefs: string[];
+  receiptRefs: string[];
   createdAt: string;
   envelopeHash: string;
 }
+
+export type NativeReadableVerificationEvidenceEnvelope = NativeVerificationEvidenceEnvelope;
 
 function hash(value: string, label: string): string {
   if (!HASH_PATTERN.test(value)) throw new Error(`${label} must be a SHA-256 hash`);
@@ -120,6 +124,11 @@ function portableRef(value: string, label: string): string {
 
 function portableEvidenceRef(value: string, label: string, nativeRootRef?: string): string {
   const reference = portableRef(value, label);
+  // A check receipt is a content-addressed Native artifact, not a project source path.
+  // It is the only runtime evidence ref admitted into an acceptance matrix.
+  if (/^runtime\/evidence\/check-receipts\/[a-f0-9]{64}\.json$/u.test(reference)) {
+    return reference;
+  }
   const sensitiveReason = nativeSensitiveRelativePathReason(reference);
   const lowerReference = reference.toLowerCase();
   const lowerNativeRoot = nativeRootRef
@@ -139,10 +148,10 @@ function portableEvidenceRef(value: string, label: string, nativeRootRef?: strin
   return reference;
 }
 
-function checkReceiptRef(value: string): string {
-  const reference = portableRef(value, 'Verification receipt ref');
-  if (!/^runtime\/evidence\/check-receipts\/[a-f0-9]{64}\.json$/u.test(reference)) {
-    throw new Error('Verification receipt ref must identify a Native check receipt');
+function typedReceiptRef(value: string): string {
+  const reference = portableRef(value, 'Verification typed receipt ref');
+  if (!/^runtime\/evidence\/receipts\/[a-f0-9]{64}\.json$/u.test(reference)) {
+    throw new Error('Verification receipt ref must identify a typed v3 receipt');
   }
   return reference;
 }
@@ -170,7 +179,7 @@ function compareText(left: string, right: string): number {
 export function buildNativeAcceptanceEvidenceTrace(
   criteria: readonly NativeAcceptanceCriterion[],
   evidence: readonly NativeAcceptanceEvidenceEntry[],
-  options: { nativeRootRef: string },
+  options: { nativeRootRef: string; allowMissing?: boolean },
 ): NativeAcceptanceEvidenceTrace {
   const nativeRootRef = portableRef(options.nativeRootRef, 'Native root ref');
   const byId = new Map(criteria.map((criterion) => [criterion.id, criterion]));
@@ -187,7 +196,7 @@ export function buildNativeAcceptanceEvidenceTrace(
     evidenceById.set(entry.acceptance_id, entry);
   }
   const missing = [...byId.keys()].filter((id) => !evidenceById.has(id));
-  if (missing.length > 0) {
+  if (missing.length > 0 && options.allowMissing !== true) {
     const shown = missing.slice(0, MISSING_ACCEPTANCE_DETAIL_LIMIT);
     const remainder = missing.length - shown.length;
     throw new Error(
@@ -198,11 +207,20 @@ export function buildNativeAcceptanceEvidenceTrace(
   const entries = [...byId.values()]
     .sort((left, right) => compareText(left.id, right.id))
     .map((criterion): NativeAcceptanceTraceEntry => {
-      const entry = evidenceById.get(criterion.id)!;
+      const entry = evidenceById.get(criterion.id);
+      if (!entry) {
+        return {
+          acceptanceId: criterion.id,
+          status: 'missing',
+          kind: criterion.kind,
+          source: portableRef(criterion.source, `Acceptance source for ${criterion.id}`),
+          evidenceRefs: [],
+          skippedReason: null,
+        };
+      }
+      const status = entry.status;
       const evidenceRefs = [...entry.evidence_refs]
-        .map((reference) =>
-          portableEvidenceRef(reference, `Evidence ref for ${criterion.id}`, nativeRootRef),
-        )
+        .map((reference) => typedReceiptRef(reference))
         .sort();
       if (new Set(evidenceRefs).size !== evidenceRefs.length) {
         throw new Error(`Verification repeats an evidence ref for ${criterion.id}`);
@@ -212,13 +230,15 @@ export function buildNativeAcceptanceEvidenceTrace(
         rawSkippedReason === null
           ? null
           : requiredText(rawSkippedReason, `Skipped reason for ${criterion.id}`);
-      if ((evidenceRefs.length === 0) === (skippedReason === null)) {
-        throw new Error(
-          `Acceptance ${criterion.id} requires exactly one of evidence refs or skipped reason`,
-        );
+      if (
+        (status === 'passed' && (evidenceRefs.length === 0 || skippedReason !== null)) ||
+        (status === 'failed' && evidenceRefs.length === 0 && skippedReason === null)
+      ) {
+        throw new Error(`Acceptance ${criterion.id} has an invalid evidence state`);
       }
       return {
         acceptanceId: criterion.id,
+        status,
         kind: criterion.kind,
         source: portableRef(criterion.source, `Acceptance source for ${criterion.id}`),
         evidenceRefs,
@@ -227,7 +247,7 @@ export function buildNativeAcceptanceEvidenceTrace(
     });
   const criteriaHash = acceptanceCriteriaHash(criteria);
   const content = {
-    schema: 'comet.native.acceptance-trace.v1' as const,
+    schema: 'comet.native.acceptance-trace.v2' as const,
     nativeRootRef,
     criteriaHash,
     total: entries.length,
@@ -293,7 +313,7 @@ export function buildNativeVerificationEvidenceEnvelope(input: {
   reportHash: string;
   acceptanceTrace: NativeAcceptanceEvidenceTrace;
   partialAllowance?: { ref: string; allowance: NativePartialAllowance } | null;
-  receiptRef?: string | null;
+  requiredReceiptRefs: readonly string[];
   now?: Date;
 }): NativeVerificationEvidenceEnvelope {
   if (input.result !== 'pass' && input.result !== 'fail') {
@@ -345,9 +365,18 @@ export function buildNativeVerificationEvidenceEnvelope(input: {
   if (allowance && allowance.allowance.sourceRevision >= input.sourceRevision) {
     throw new Error('Partial allowance must precede the verification evidence revision');
   }
-
+  const traceReceiptRefs = [
+    ...new Set(acceptanceTrace.entries.flatMap((entry) => entry.evidenceRefs)),
+  ].sort(compareText);
+  const requiredReceiptRefs = [...new Set(input.requiredReceiptRefs.map(typedReceiptRef))].sort(
+    compareText,
+  );
+  const receiptRefs = traceReceiptRefs;
+  if (input.result === 'pass' && requiredReceiptRefs.length === 0) {
+    throw new Error('Passing verification requires at least one current required check receipt');
+  }
   const content = {
-    schema: 'comet.native.verification-evidence.v1' as const,
+    schema: 'comet.native.verification-evidence.v2' as const,
     change: changeName(input.change),
     sourceRevision: positiveRevision(input.sourceRevision),
     result: input.result,
@@ -361,7 +390,8 @@ export function buildNativeVerificationEvidenceEnvelope(input: {
     acceptanceTrace,
     partialAllowanceRef: allowance?.ref ?? null,
     partialAllowanceHash: allowance?.allowance.allowanceHash ?? null,
-    receiptRef: input.receiptRef ? checkReceiptRef(input.receiptRef) : null,
+    requiredReceiptRefs,
+    receiptRefs,
     createdAt: timestamp(input.now ?? new Date()),
   };
   return {
@@ -422,7 +452,7 @@ export function parseNativeAcceptanceEvidenceTrace(value: unknown): NativeAccept
     'Native acceptance trace',
   );
   if (
-    root.schema !== 'comet.native.acceptance-trace.v1' ||
+    root.schema !== 'comet.native.acceptance-trace.v2' ||
     typeof root.nativeRootRef !== 'string' ||
     typeof root.criteriaHash !== 'string' ||
     !HASH_PATTERN.test(root.criteriaHash) ||
@@ -438,15 +468,18 @@ export function parseNativeAcceptanceEvidenceTrace(value: unknown): NativeAccept
     const entry = evidenceRecord(value, `Native acceptance trace entry ${index}`);
     exactEvidenceKeys(
       entry,
-      ['acceptanceId', 'kind', 'source', 'evidenceRefs', 'skippedReason'],
+      ['acceptanceId', 'status', 'kind', 'source', 'evidenceRefs', 'skippedReason'],
       `Native acceptance trace entry ${index}`,
     );
     if (
       typeof entry.acceptanceId !== 'string' ||
       !/^acceptance-[a-f0-9]{64}$/u.test(entry.acceptanceId) ||
-      (entry.kind !== 'brief-example' && entry.kind !== 'spec-scenario') ||
+      (entry.kind !== 'brief-example' &&
+        entry.kind !== 'spec-scenario' &&
+        entry.kind !== 'spec-must') ||
       typeof entry.source !== 'string' ||
       !Array.isArray(entry.evidenceRefs) ||
+      (entry.status !== 'passed' && entry.status !== 'failed' && entry.status !== 'missing') ||
       entry.evidenceRefs.some((reference) => typeof reference !== 'string') ||
       (entry.skippedReason !== null &&
         (typeof entry.skippedReason !== 'string' ||
@@ -456,22 +489,22 @@ export function parseNativeAcceptanceEvidenceTrace(value: unknown): NativeAccept
       throw new Error(`Native acceptance trace entry ${index} is invalid`);
     }
     const evidenceRefs = (entry.evidenceRefs as string[]).map((reference) =>
-      portableEvidenceRef(
-        reference,
-        `Native acceptance trace entry ${index} evidence ref`,
-        nativeRootRef,
-      ),
+      typedReceiptRef(reference),
     );
+    const status = entry.status as NativeAcceptanceTraceEntry['status'];
     if (
       JSON.stringify(evidenceRefs) !==
         JSON.stringify([...new Set(evidenceRefs)].sort(compareText)) ||
-      (evidenceRefs.length === 0) === (entry.skippedReason === null)
+      (status === 'passed' && (evidenceRefs.length === 0 || entry.skippedReason !== null)) ||
+      (status === 'failed' && evidenceRefs.length === 0 && entry.skippedReason === null) ||
+      (status === 'missing' && (evidenceRefs.length > 0 || entry.skippedReason !== null))
     ) {
       throw new Error(`Native acceptance trace entry ${index} evidence state is invalid`);
     }
     return {
       acceptanceId: entry.acceptanceId,
-      kind: entry.kind,
+      status,
+      kind: entry.kind as NativeAcceptanceCriterion['kind'],
       source: portableRef(entry.source, `Native acceptance trace entry ${index} source`),
       evidenceRefs,
       skippedReason:
@@ -496,7 +529,7 @@ export function parseNativeAcceptanceEvidenceTrace(value: unknown): NativeAccept
     throw new Error('Native acceptance trace entries are inconsistent');
   }
   const content = {
-    schema: 'comet.native.acceptance-trace.v1' as const,
+    schema: 'comet.native.acceptance-trace.v2' as const,
     nativeRootRef,
     criteriaHash: root.criteriaHash,
     total: root.total,
@@ -508,7 +541,10 @@ export function parseNativeAcceptanceEvidenceTrace(value: unknown): NativeAccept
   if (canonicalHash(ACCEPTANCE_TRACE_HASH_TAG, content) !== traceHash) {
     throw new Error('Native acceptance trace content hash mismatch');
   }
-  return { ...content, traceHash };
+  return {
+    ...content,
+    traceHash,
+  };
 }
 
 export function parseNativePartialAllowance(value: unknown): NativePartialAllowance {
@@ -564,7 +600,7 @@ export function parseNativePartialAllowance(value: unknown): NativePartialAllowa
 
 export function parseNativeVerificationEvidenceEnvelope(
   value: unknown,
-): NativeVerificationEvidenceEnvelope {
+): NativeReadableVerificationEvidenceEnvelope {
   const root = evidenceRecord(value, 'Native verification evidence');
   exactEvidenceKeys(
     root,
@@ -583,20 +619,22 @@ export function parseNativeVerificationEvidenceEnvelope(
       'acceptanceTrace',
       'partialAllowanceRef',
       'partialAllowanceHash',
-      'receiptRef',
+      'requiredReceiptRefs',
+      'receiptRefs',
       'createdAt',
       'envelopeHash',
     ],
     'Native verification evidence',
   );
   if (
-    root.schema !== 'comet.native.verification-evidence.v1' ||
+    root.schema !== 'comet.native.verification-evidence.v2' ||
     typeof root.change !== 'string' ||
     (root.result !== 'pass' && root.result !== 'fail') ||
     (root.freshness !== 'complete' && root.freshness !== 'partial') ||
     typeof root.implementationScopeHash !== 'string' ||
     typeof root.reportRef !== 'string' ||
-    (root.receiptRef !== null && typeof root.receiptRef !== 'string')
+    !Array.isArray(root.requiredReceiptRefs) ||
+    !Array.isArray(root.receiptRefs)
   ) {
     throw new Error('Native verification evidence is invalid');
   }
@@ -624,14 +662,34 @@ export function parseNativeVerificationEvidenceEnvelope(
     root.partialAllowanceHash === null
       ? null
       : hash(root.partialAllowanceHash as string, 'Native verification allowance hash');
-  const result: NativeVerificationEvidenceEnvelope['result'] = root.result;
-  const freshness: NativeVerificationEvidenceEnvelope['freshness'] = root.freshness;
+  const receiptRefs = (root.receiptRefs as unknown[]).map((ref) => typedReceiptRef(ref as string));
+  if (JSON.stringify(receiptRefs) !== JSON.stringify([...new Set(receiptRefs)].sort(compareText))) {
+    throw new Error('Native verification receipt refs must be canonical');
+  }
+  const traceReceiptRefs = [
+    ...new Set(acceptanceTrace.entries.flatMap((entry) => entry.evidenceRefs)),
+  ].sort(compareText);
+  if (JSON.stringify(receiptRefs) !== JSON.stringify(traceReceiptRefs)) {
+    throw new Error('Native verification envelope receipt refs do not match its matrix');
+  }
+  const requiredReceiptRefs = (root.requiredReceiptRefs as unknown[]).map((ref) =>
+    typedReceiptRef(ref as string),
+  );
+  if (
+    JSON.stringify(requiredReceiptRefs) !==
+    JSON.stringify([...new Set(requiredReceiptRefs)].sort(compareText))
+  ) {
+    throw new Error('Native required receipt refs must be canonical');
+  }
+  if (root.result === 'pass' && requiredReceiptRefs.length === 0) {
+    throw new Error('Passing verification has no current static receipt');
+  }
   const content = {
-    schema: 'comet.native.verification-evidence.v1' as const,
+    schema: 'comet.native.verification-evidence.v2' as const,
     change: changeName(root.change),
     sourceRevision: positiveRevision(root.sourceRevision as number),
-    result,
-    freshness,
+    result: root.result as 'pass' | 'fail',
+    freshness: root.freshness as 'complete' | 'partial',
     contractHash: hash(root.contractHash as string, 'Native verification contract hash'),
     acceptanceCriteriaHash,
     implementationScopeRef: evidenceDocumentRef(
@@ -648,7 +706,8 @@ export function parseNativeVerificationEvidenceEnvelope(
         ? null
         : evidenceDocumentRef(root.partialAllowanceRef, 'allowances', partialAllowanceHash),
     partialAllowanceHash,
-    receiptRef: root.receiptRef === null ? null : checkReceiptRef(root.receiptRef),
+    requiredReceiptRefs,
+    receiptRefs,
     createdAt: canonicalTimestamp(root.createdAt, 'Native verification timestamp'),
   };
   const envelopeHash = hash(root.envelopeHash as string, 'Native verification envelope hash');

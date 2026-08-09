@@ -16,12 +16,12 @@ import {
 import { nativeContinuation } from '../../../domains/comet-native/native-continuation.js';
 import { nativeProjectPaths } from '../../../domains/comet-native/native-paths.js';
 import { selectNativeChange } from '../../../domains/comet-native/native-selection.js';
-import { advanceNativeChange } from '../../../domains/comet-native/native-transitions.js';
 import type {
   NativeChangeState,
   NativeProjectPaths,
 } from '../../../domains/comet-native/native-types.js';
 import { nativeVerificationFixtureReport } from '../../helpers/native-verification.js';
+import { advanceNativeChange } from '../../helpers/native-confirmed-transition.js';
 
 const brief = `# Outcome
 Ship a focused outcome.
@@ -104,12 +104,111 @@ describe('Native status diagnostics', () => {
     });
   });
 
+  it('blocks status when a workspace binding cannot be parsed safely', async () => {
+    const state = await createNativeChange({
+      paths,
+      name: 'invalid-workspace',
+      language: 'en',
+      workspaceBinding: { isolation: 'current', changeBranch: null, targetBranch: null },
+    });
+    await fs.writeFile(
+      path.join(nativeChangeDir(paths, state.name), 'runtime', 'workspace.json'),
+      '{"schema":"comet.native.workspace.v3","isolation":"invalid"}\n',
+    );
+
+    await expect(inspectNativeStatus(paths, state.name)).resolves.toMatchObject({
+      name: state.name,
+      phase: 'shape',
+      nextCommand: null,
+      findingSummary: {
+        errors: expect.any(Number),
+        codes: expect.arrayContaining(['workspace-binding-invalid']),
+      },
+      continuation: {
+        disposition: 'blocked',
+        action: 'none',
+        requiredInputs: expect.arrayContaining(['repair-workspace-binding']),
+      },
+    });
+  });
+
+  it('does not route an Archive binding failure to receipt refresh', () => {
+    const continuation = nativeContinuation({
+      state: {
+        name: 'archived-change',
+        phase: 'archive',
+        revision: 4,
+      } as NativeChangeState,
+      findings: [
+        {
+          code: 'verification-receipt-binding-mismatch',
+          message: 'A verification receipt is stale.',
+          severity: 'error',
+          path: null,
+          requiredAction: 'refresh-verification-receipts',
+          retryCommand: null,
+          repairCommand: null,
+          requiresUserDecision: false,
+        },
+      ],
+    });
+
+    expect(continuation).toMatchObject({
+      disposition: 'blocked',
+      action: 'none',
+      command: null,
+    });
+  });
+
+  it('returns policy-aware continuation after a ready Archive preview', () => {
+    const state = {
+      name: 'ready-change',
+      phase: 'archive',
+      revision: 4,
+    } as NativeChangeState;
+    const preflightHash = 'a'.repeat(64);
+
+    expect(
+      nativeContinuation({
+        state,
+        archiveReady: true,
+        archiveConfirmation: 'automatic',
+        archivePreflightHash: preflightHash,
+      }),
+    ).toMatchObject({
+      disposition: 'continue',
+      action: 'archive',
+      command: `comet native archive ready-change --expect-preflight ${preflightHash}`,
+      requiresUserDecision: false,
+      requiredInputs: [],
+    });
+    expect(
+      nativeContinuation({
+        state,
+        archiveReady: true,
+        archiveConfirmation: 'required',
+        archivePreflightHash: preflightHash,
+      }),
+    ).toMatchObject({
+      disposition: 'await-user',
+      action: 'archive',
+      command: null,
+      requiresUserDecision: true,
+      requiredInputs: ['archive-confirmation'],
+    });
+  });
+
   afterEach(async () => {
     await fs.rm(projectRoot, { recursive: true, force: true });
   });
 
   async function validChange(name: string): Promise<void> {
-    const state = await createNativeChange({ paths, name, language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name,
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     await fs.writeFile(path.join(nativeChangeDir(paths, name), state.brief), brief);
   }
 
@@ -127,7 +226,7 @@ describe('Native status diagnostics', () => {
     expect(statuses[0]).toMatchObject({
       phase: 'shape',
       selected: false,
-      nextCommand: 'comet native next alpha-change --summary "<summary>"',
+      nextCommand: 'comet native next alpha-change --summary "<summary>" --confirmed',
     });
     expect(statuses[1]).toMatchObject({ selected: true });
     expect(JSON.stringify(statuses)).not.toMatch(/openspec|superpowers|comet classic/iu);
@@ -201,6 +300,14 @@ describe('Native status diagnostics', () => {
     ).rejects.toThrow(/cursor (?:is stale|integrity check failed)/u);
   });
 
+  it('does not hide a malformed current selection as an unselected status list', async () => {
+    await validChange('healthy-change');
+    await fs.mkdir(path.join(projectRoot, '.comet'), { recursive: true });
+    await fs.writeFile(path.join(projectRoot, '.comet', 'current-change.json'), '{broken');
+
+    await expect(listNativeStatusPage(paths)).rejects.toThrow();
+  });
+
   it('reports malformed change YAML without hiding the other changes', async () => {
     await validChange('healthy-change');
     const broken = path.join(paths.changesDir, 'broken-change');
@@ -214,6 +321,19 @@ describe('Native status diagnostics', () => {
       nextCommand: null,
       archiveReady: false,
     });
+  });
+
+  it('keeps large status pages free of synthetic conflict-inspection failures', async () => {
+    for (let index = 0; index < 33; index += 1) {
+      await validChange(`large-change-${String(index).padStart(2, '0')}`);
+    }
+
+    const first = await listNativeStatusPage(paths);
+
+    expect(first.items).toHaveLength(NATIVE_STATUS_PAGE_LIMITS.maxItems);
+    expect(first.items.flatMap((item) => item.findingSummary.codes)).not.toContain(
+      'native-conflict-inspection-invalid',
+    );
   });
 
   it('only marks Archive ready after brief, spec, and verification checks pass', async () => {

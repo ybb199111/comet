@@ -54,6 +54,7 @@ pnpm test           # 高风险修改或最终交付前需要本地全量验证�
 - `platform/`：文件系统、进程、安装平台、版本、路径等平台适配能力。domain 不应直接散落平台差异逻辑。
 - `scripts/`：构建、发布、benchmark、lint 等仓库自动化脚本。可调用源码模块，但不要成为运行时业务入口。
 - `assets/`：发布资产和内置 Skill 内容。修改 runtime 源码后必须通过构建同步生成资产，不要把业务逻辑只写在生成物里。
+- `eval/scaffold/shell/` 中仅允许 `config/repository-layout.json` 明确列出的隔离评审 sidecar 入口；它们属于 Eval 容器边界，不是产品 Runtime 入口。
 
 测试目录必须跟随被测对象归属：
 
@@ -215,6 +216,8 @@ Changelog写英文
 
 不能够直接修改Superpowers和OpenSpec的原始Skill
 
+除非用户明确同意，否则不得使用 Superpowers 的任何 Skill。
+
 ## github规范
 
 不能未经过同意直接在github上评论或者提交PR
@@ -222,6 +225,10 @@ Changelog写英文
 ## README改动
 
 先写中文，再写英文，当feature更新后，更新README应该保持克制，确定是否是必要的需要列在READMD的内容，这部分要用户阅读友好，必要的亮点特性应该以文档引用的形式存在docs目录下
+
+## Comet Dashboard规范
+
+Comet Dashboard实现时尽量采用使用AntD React组件
 
 <comet-ambient-resume>
 <!-- Managed by Comet. Edits inside this block may be replaced by comet init/update. -->
@@ -231,10 +238,11 @@ Changelog写英文
 
 在这个仓库中，开始处理需要改动或调查的任务前，如果可能存在活跃 Comet workflow，把当前用户请求传入只读探针：`comet resume-probe . --stdin --json`。
 
+- 如果用户通过宿主明确调用任意 Comet Skill（例如 `@comet`、`/comet`、`@comet-native` 或 `/comet-hotfix`），显式调用优先于本恢复协议；不要运行 resume probe，直接进入被调用的 Skill。
 - 只信任返回的 `workflow`、`skill` 和 `entrySource`；它们只由项目配置或无配置兼容回退决定。不得扫描或切换另一套 workflow。
 - 如果 probe 返回 `auto_resume`，简短说明选中的 active change，并进入 `nextCommand` 指向的永久入口。不要把状态命令当作恢复入口直接推进。
 - 如果 probe 返回 `ask_user`，只问一个简短问题并等待用户回复。
-- 如果 probe 返回 `out_of_scope` 或 `none`，不要进入 Comet workflow。
+- 如果当前请求未明确调用 Comet Skill，且 probe 返回 `out_of_scope` 或 `none`，不要进入 Comet workflow。
 - 如果配置或状态无效且没有 `nextCommand`，停止并报告原因；不要猜测另一个 workflow。
 - 不能只因为存在 active change 就把无关任务挂到该 change。Native 的未提交改动由 Native 入口检查，不由探针自动归因。
 </comet-ambient-resume>

@@ -1,6 +1,16 @@
-import { existsSync, promises as fs, readFileSync } from 'fs';
+import { promises as fs, readFileSync } from 'fs';
 import path from 'path';
+import { memoizedHookRead } from '../../platform/process/hook-read-cache.js';
+import {
+  assertClassicLayoutWritable,
+  assertClassicLayoutReadable,
+  classicProjectRelative,
+  type ClassicLayoutPaths,
+} from './classic-layout.js';
+import { inspectClassicActiveChangeDirectory, openSpecChangeNameError } from './classic-paths.js';
+import { inspectClassicProjectTarget } from './classic-protected-path.js';
 import type { CometHookDecision, CometHookRequest } from '../comet-entry/hook-types.js';
+import { scopeCometHookTargets } from '../workflow-contract/hook-target-scope.js';
 import type { ClassicCommandHandler, ClassicCommandResult } from './classic-cli.js';
 import {
   driftStaleReason,
@@ -10,6 +20,10 @@ import {
 import { resolveCurrentChange } from './classic-current-change.js';
 import { readClassicState, readLegacyState } from './classic-store.js';
 import type { ClassicPhase, ClassicState } from './classic-state.js';
+import {
+  inspectClassicPlanReadiness,
+  type ClassicPlanReadiness,
+} from './classic-plan-readiness.js';
 
 function result(exitCode: number, message: string): ClassicCommandResult {
   return { exitCode, stderr: message + '\n' };
@@ -81,7 +95,7 @@ async function physicalPathForPossiblyMissingTarget(target: string): Promise<str
 }
 
 async function projectRelative(target: string, projectRoot: string): Promise<string> {
-  const rawCandidate = path.isAbsolute(target) ? target : path.resolve(process.cwd(), target);
+  const rawCandidate = path.isAbsolute(target) ? target : path.resolve(projectRoot, target);
   let candidate = normalized(rawCandidate);
   const rootRelative = relativeToProjectRoot(rawCandidate, projectRoot);
   if (rootRelative !== null) return rootRelative;
@@ -105,6 +119,7 @@ interface GoverningChange {
   phase: ClassicPhase;
   classic: ClassicState | null;
   archived: boolean;
+  invalidState?: boolean;
   superpowersArtifact?: 'matched' | 'unmatched';
   superpowersSlot?: SuperpowersArtifactSlot;
 }
@@ -129,7 +144,7 @@ async function loadGoverningChange(changeDir: string): Promise<GoverningChange |
       classic: projection.classic,
       archived: projection.classic.archived,
     };
-  } catch {
+  } catch (error) {
     // Legacy/partial state without the required Classic fields: fall back to a
     // direct yaml read so the guard still respects the recorded phase rather
     // than crashing the way master's lenient shell scripts did not.
@@ -140,31 +155,50 @@ async function loadGoverningChange(changeDir: string): Promise<GoverningChange |
       phase: legacy.phase,
       classic: null,
       archived: legacy.archived,
+      invalidState: error instanceof Error && error.message.includes('unknown field'),
     };
   }
 }
 
-async function activeChanges(projectRoot: string): Promise<GoverningChange[]> {
-  const changesDir = path.join(projectRoot, 'openspec', 'changes');
+async function activeChangesImpl(projectRoot: string): Promise<GoverningChange[]> {
+  const changesDir = (await assertClassicLayoutReadable(projectRoot)).changesDir;
   const governingChanges: GoverningChange[] = [];
-  if (!existsSync(changesDir)) return governingChanges;
+  const changesInspection = await inspectClassicProjectTarget(projectRoot, changesDir, {
+    label: 'Classic changes directory',
+    expected: 'directory',
+  });
+  if (!changesInspection.exists) return governingChanges;
   for (const entry of (await fs.readdir(changesDir, { withFileTypes: true })).sort((left, right) =>
     left.name.localeCompare(right.name),
   )) {
-    if (!entry.isDirectory() || entry.name === 'archive') continue;
-    const changeDir = path.join(changesDir, entry.name);
-    if (!existsSync(path.join(changeDir, '.comet.yaml'))) continue;
-    const governing = await loadGoverningChange(changeDir);
+    if (entry.name === 'archive') continue;
+    if (openSpecChangeNameError(entry.name)) continue;
+    const active = await inspectClassicActiveChangeDirectory(entry.name, projectRoot);
+    if (!active.exists || !active.stateExists) continue;
+    const governing = await loadGoverningChange(active.directory);
     if (!governing || governing.archived) continue;
     governingChanges.push(governing);
   }
   return governingChanges;
 }
 
+// `activeChanges` is invoked once by the router's `listActiveClassicHookChanges`
+// and again by `inspectClassicHookGuard`. Within a single Hook decision the
+// changes directory is immutable, so memoize the enumeration to avoid a second
+// readdir + per-change state read. CLI commands bypass this cache.
+const activeChanges = memoizedHookRead('classicActiveChanges', (projectRoot: string) =>
+  activeChangesImpl(projectRoot),
+);
+const hookPlanReadiness = memoizedHookRead('classicPlanReadiness', inspectClassicPlanReadiness);
+
 export interface ActiveClassicHookChange {
   workflow: 'classic';
   name: string;
   phase: ClassicPhase;
+}
+
+export interface ClassicHookGuardDependencies {
+  scopeTargets?: typeof scopeCometHookTargets;
 }
 
 export async function listActiveClassicHookChanges(
@@ -177,8 +211,12 @@ export async function listActiveClassicHookChanges(
   }));
 }
 
-function isSuperpowersArtifactPath(relativePath: string): boolean {
-  return comparisonKey(relativePath).startsWith('docs/superpowers/');
+function superpowersArtifactPrefix(projectRoot: string, layout: ClassicLayoutPaths): string {
+  return `${classicProjectRelative(projectRoot, layout.superpowersRoot)}/`;
+}
+
+function isSuperpowersArtifactPath(relativePath: string, prefix: string): boolean {
+  return comparisonKey(relativePath).startsWith(comparisonKey(prefix));
 }
 
 type SuperpowersArtifactField = 'designDoc' | 'plan' | 'verificationReport';
@@ -190,32 +228,40 @@ interface SuperpowersArtifactSlot {
   phase: 'design' | 'build' | 'verify';
 }
 
-const SUPERPOWERS_ARTIFACT_SLOTS: readonly SuperpowersArtifactSlot[] = [
-  {
-    prefix: 'docs/superpowers/specs/',
-    field: 'designDoc',
-    wireField: 'design_doc',
-    phase: 'design',
-  },
-  {
-    prefix: 'docs/superpowers/plans/',
-    field: 'plan',
-    wireField: 'plan',
-    phase: 'build',
-  },
-  {
-    prefix: 'docs/superpowers/reports/',
-    field: 'verificationReport',
-    wireField: 'verification_report',
-    phase: 'verify',
-  },
-];
+function superpowersArtifactSlots(
+  projectRoot: string,
+  layout: ClassicLayoutPaths,
+): readonly SuperpowersArtifactSlot[] {
+  return [
+    {
+      prefix: `${classicProjectRelative(projectRoot, layout.superpowersSpecsDir)}/`,
+      field: 'designDoc',
+      wireField: 'design_doc',
+      phase: 'design',
+    },
+    {
+      prefix: `${classicProjectRelative(projectRoot, layout.superpowersPlansDir)}/`,
+      field: 'plan',
+      wireField: 'plan',
+      phase: 'build',
+    },
+    {
+      prefix: `${classicProjectRelative(projectRoot, layout.superpowersReportsDir)}/`,
+      field: 'verificationReport',
+      wireField: 'verification_report',
+      phase: 'verify',
+    },
+  ];
+}
 
-function standardSuperpowersArtifactSlot(relativePath: string): SuperpowersArtifactSlot | null {
+function standardSuperpowersArtifactSlot(
+  relativePath: string,
+  slots: readonly SuperpowersArtifactSlot[],
+): SuperpowersArtifactSlot | null {
   const key = comparisonKey(relativePath);
-  const slot = SUPERPOWERS_ARTIFACT_SLOTS.find((candidate) => key.startsWith(candidate.prefix));
+  const slot = slots.find((candidate) => key.startsWith(comparisonKey(candidate.prefix)));
   if (!slot) return null;
-  const fileName = key.slice(slot.prefix.length);
+  const fileName = key.slice(comparisonKey(slot.prefix).length);
   if (!fileName || fileName.includes('/') || !fileName.endsWith('.md')) return null;
   return slot;
 }
@@ -235,6 +281,18 @@ function allowsFirstSuperpowersArtifactWrite(
     governing.classic !== null &&
     governing.phase === slot.phase &&
     !superpowersArtifactValue(governing, slot)
+  );
+}
+
+async function allowsSuperpowersArtifactWrite(
+  projectRoot: string,
+  governing: GoverningChange,
+  slot: SuperpowersArtifactSlot,
+): Promise<boolean> {
+  if (allowsFirstSuperpowersArtifactWrite(governing, slot)) return true;
+  if (slot.field !== 'plan' || governing.phase !== 'build') return false;
+  return (
+    (await hookPlanReadiness(projectRoot, governing.classic?.plan ?? null)).status === 'broken'
   );
 }
 
@@ -385,35 +443,42 @@ async function repoSourceGoverningChange(
 async function governingChange(
   relativePath: string,
   projectRoot: string,
+  layout: ClassicLayoutPaths,
   selectedChangeName?: string,
 ): Promise<GoverningResolution> {
-  const prefix = 'openspec/changes/';
+  const prefix = `${classicProjectRelative(projectRoot, layout.changesDir)}/`;
   if (relativePath.startsWith(prefix)) {
     const rest = relativePath.slice(prefix.length);
     const [name] = rest.split('/');
     if (name && name !== 'archive') {
-      const changeDir = path.join(projectRoot, 'openspec', 'changes', name);
-      const stateFile = path.join(changeDir, '.comet.yaml');
-      if (existsSync(stateFile)) {
-        const governing = await loadGoverningChange(changeDir);
+      const active = await inspectClassicActiveChangeDirectory(name, projectRoot);
+      if (active.stateExists) {
+        const governing = await loadGoverningChange(active.directory);
         if (governing) return governing;
-        return { changeDir, phase: 'open', classic: null, archived: false };
+        return { changeDir: active.directory, phase: 'open', classic: null, archived: false };
       }
-      return { changeDir, phase: 'open', classic: null, archived: false };
+      return { changeDir: active.directory, phase: 'open', classic: null, archived: false };
     }
   }
-  if (isSuperpowersArtifactPath(relativePath)) {
+  if (isSuperpowersArtifactPath(relativePath, superpowersArtifactPrefix(projectRoot, layout))) {
     const superpowers = await superpowersArtifactGoverningChange(relativePath, projectRoot);
     if (superpowers?.match === 'recorded') {
       return { ...superpowers.governing, superpowersArtifact: 'matched' };
     }
 
-    const slot = standardSuperpowersArtifactSlot(relativePath);
+    const slot = standardSuperpowersArtifactSlot(
+      relativePath,
+      superpowersArtifactSlots(projectRoot, layout),
+    );
     if (superpowers) {
       return slot
         ? {
             ...superpowers.governing,
-            superpowersArtifact: allowsFirstSuperpowersArtifactWrite(superpowers.governing, slot)
+            superpowersArtifact: (await allowsSuperpowersArtifactWrite(
+              projectRoot,
+              superpowers.governing,
+              slot,
+            ))
               ? 'matched'
               : 'unmatched',
             superpowersSlot: slot,
@@ -429,7 +494,7 @@ async function governingChange(
       if (!candidate || 'blockedResult' in candidate) return candidate;
       return {
         ...candidate,
-        superpowersArtifact: allowsFirstSuperpowersArtifactWrite(candidate, slot)
+        superpowersArtifact: (await allowsSuperpowersArtifactWrite(projectRoot, candidate, slot))
           ? 'matched'
           : 'unmatched',
         superpowersSlot: slot,
@@ -457,8 +522,12 @@ function isSuperpowersWorkspace(relativePath: string): boolean {
   return relativePath === '.superpowers' || relativePath.startsWith('.superpowers/');
 }
 
-function openSpecAllowed(relativePath: string, phase: ClassicPhase): string | null {
-  if (!relativePath.startsWith('openspec/')) return null;
+function openSpecAllowed(
+  relativePath: string,
+  phase: ClassicPhase,
+  openSpecPrefix: string,
+): string | null {
+  if (!relativePath.startsWith(openSpecPrefix)) return null;
   const stateFile =
     relativePath.endsWith('/.comet.yaml') || relativePath.endsWith('/.openspec.yaml');
   const proposal =
@@ -539,6 +608,79 @@ function blockedMissingDesignDoc(relativePath: string): ClassicCommandResult {
       '  BLOCKED: full workflow source writes require a recorded Design Doc',
       '  This phase does not allow source writes until design_doc is recorded',
       '  NEXT: return to design, create/link the Design Doc, then run guard again',
+      '',
+    ].join('\n'),
+  );
+}
+
+function blockedPlanNotReady(
+  relativePath: string,
+  governing: GoverningChange,
+  planReadiness: Exclude<ClassicPlanReadiness, { status: 'ready' }>,
+  projectRoot: string,
+  layout: ClassicLayoutPaths,
+): ClassicCommandResult {
+  const name = governingChangeName(governing) ?? '<change-name>';
+  const missing = planReadiness.status === 'missing';
+  const errorCode = missing ? 'classic-build-plan-missing' : 'classic-build-plan-broken';
+  const state = missing
+    ? 'plan is not recorded'
+    : 'the recorded plan path does not resolve to a file';
+  const recorded = missing ? [] : [`RECORDED_PLAN: ${planReadiness.recordedPath}`];
+  const changeDirectory = governing.changeDir
+    ? classicProjectRelative(projectRoot, governing.changeDir)
+    : '<classic-change-dir>';
+  const plansDirectory = classicProjectRelative(projectRoot, layout.superpowersPlansDir);
+  const createCommand = missing
+    ? `comet state set ${name} plan <repository-relative-plan-path>`
+    : `comet state set ${name} plan <new-repository-relative-plan-path>`;
+  const repair = missing
+    ? [
+        '2. Load the Superpowers writing-plans Skill.',
+        `3. Read the Design Doc path from "comet state get ${name} design_doc" and read ${changeDirectory}/tasks.md.`,
+        `4. Create the implementation plan under ${plansDirectory}/.`,
+        '5. Record the plan path:',
+        `   ${createCommand}`,
+      ]
+    : [
+        `2. Restore the plan file at ${planReadiness.recordedPath}, or load the Superpowers writing-plans Skill and create a replacement under ${plansDirectory}/.`,
+        '3. When creating a replacement, record its path:',
+        `   ${createCommand}`,
+      ];
+
+  return result(
+    2,
+    [
+      '',
+      '╔══════════════════════════════════════════╗',
+      '║     COMET PHASE GUARD — WRITE BLOCKED    ║',
+      '╚══════════════════════════════════════════╝',
+      '',
+      `ERROR_CODE: ${errorCode}`,
+      `CHANGE: ${name}`,
+      'WORKFLOW: full',
+      'PHASE: build',
+      `TARGET: ${relativePath}`,
+      `STATE: ${state}`,
+      ...recorded,
+      '',
+      'BLOCKED: project source writes require a ready Superpowers implementation plan.',
+      '',
+      'ALLOWED_RECOVERY_WRITES:',
+      `- ${plansDirectory}/<plan-file>.md`,
+      '- Comet state updates performed by the comet CLI',
+      `- ${changeDirectory} artifacts allowed by the build phase`,
+      '',
+      'RECOVERY:',
+      `1. Invoke /comet-build for ${name} and resume Step 1.`,
+      ...repair,
+      `${missing ? '6' : '4'}. Verify recovery:`,
+      `   comet state check ${name} build --recover`,
+      '',
+      'SUCCESS: plan is reported as DONE and recovery advances beyond plan creation.',
+      `RETRY: retry the original Write/Edit for ${relativePath} only after SUCCESS.`,
+      'PROHIBITED: do not treat tasks.md as the implementation plan or write project source before SUCCESS.',
+      'If writing-plans is unavailable, stop and report the missing Skill instead of bypassing this check.',
       '',
     ].join('\n'),
   );
@@ -632,14 +774,36 @@ async function inspectClassicHookTarget(
   projectRoot: string,
   target: string,
   selectedChangeName?: string,
+  scopeTargets: typeof scopeCometHookTargets = scopeCometHookTargets,
 ): Promise<ClassicCommandResult> {
+  try {
+    const scoped = await scopeTargets(projectRoot, [target]);
+    if (scoped.projectTargets.length === 0) {
+      return allowed(`${target} (outside guarded project)`);
+    }
+  } catch (error) {
+    return result(
+      2,
+      [
+        `[COMET-HOOK] blocked: scope could not be determined safely for ${target}.`,
+        `REASON: ${error instanceof Error ? error.message : String(error)}`,
+        'NEXT: verify that the project root is accessible, then retry the write.',
+      ].join('\n'),
+    );
+  }
   const relativePath = await projectRelative(target, projectRoot);
+  let layout: ClassicLayoutPaths;
+  try {
+    layout = await assertClassicLayoutWritable(projectRoot);
+  } catch (error) {
+    return result(
+      2,
+      `[COMET-HOOK] blocked: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   if (isCometConfig(relativePath)) {
     return allowed(`${relativePath} (whitelist: comet config)`);
-  }
-  if (relativePath.startsWith('.claude/')) {
-    return allowed(`${relativePath} (whitelist: claude config)`);
   }
   if (isSuperpowersWorkspace(relativePath)) {
     return allowed(`${relativePath} (whitelist: superpowers workspace)`);
@@ -655,7 +819,7 @@ async function inspectClassicHookTarget(
 
   let governing: GoverningResolution;
   try {
-    governing = await governingChange(relativePath, projectRoot, selectedChangeName);
+    governing = await governingChange(relativePath, projectRoot, layout, selectedChangeName);
   } catch (error) {
     return result(
       2,
@@ -668,9 +832,13 @@ async function inspectClassicHookTarget(
 
   const phase = governing.phase;
 
-  const openSpec = openSpecAllowed(relativePath, phase);
+  const openSpec = openSpecAllowed(
+    relativePath,
+    phase,
+    `${classicProjectRelative(projectRoot, layout.openSpecRoot)}/`,
+  );
   if (openSpec) return allowed(openSpec);
-  if (isSuperpowersArtifactPath(relativePath)) {
+  if (isSuperpowersArtifactPath(relativePath, superpowersArtifactPrefix(projectRoot, layout))) {
     if (governing.superpowersArtifact === 'matched' && allowsSuperpowersArtifacts(governing)) {
       return allowed(`${relativePath} (phase: ${phase}, superpowers)`);
     }
@@ -678,8 +846,20 @@ async function inspectClassicHookTarget(
       return blockedUnmatchedSuperpowersArtifact(relativePath, governing);
     }
   }
+  if (governing.invalidState) {
+    return result(
+      2,
+      `[COMET-HOOK] blocked: active Classic state is invalid; repair .comet.yaml before writing ${relativePath}`,
+    );
+  }
   if (phase === 'build' && governing.classic?.workflow === 'full' && !governing.classic.designDoc) {
     return blockedMissingDesignDoc(relativePath);
+  }
+  if (phase === 'build' && governing.classic?.workflow === 'full') {
+    const planReadiness = await hookPlanReadiness(projectRoot, governing.classic.plan);
+    if (planReadiness.status !== 'ready') {
+      return blockedPlanNotReady(relativePath, governing, planReadiness, projectRoot, layout);
+    }
   }
   if (phase === 'build' || phase === 'verify') {
     return allowed(`${relativePath} (phase: ${phase})`);
@@ -691,8 +871,31 @@ export async function inspectClassicHookGuard(
   projectRoot: string,
   changeName: string,
   request: CometHookRequest,
+  dependencies: ClassicHookGuardDependencies = {},
 ): Promise<CometHookDecision> {
-  const active = await activeChanges(projectRoot);
+  if (request.intent !== 'non-write') {
+    try {
+      await assertClassicLayoutWritable(projectRoot);
+    } catch (error) {
+      return {
+        allowed: false,
+        reason: error instanceof Error ? error.message : String(error),
+        workflow: 'classic',
+        change: changeName,
+      };
+    }
+  }
+  let active: GoverningChange[];
+  try {
+    active = await activeChanges(projectRoot);
+  } catch (error) {
+    return {
+      allowed: false,
+      reason: error instanceof Error ? error.message : String(error),
+      workflow: 'classic',
+      change: changeName,
+    };
+  }
   const selected = active.find((change) => governingChangeName(change) === changeName);
   if (!selected) {
     return {
@@ -706,22 +909,9 @@ export async function inspectClassicHookGuard(
     return { allowed: true, reason: 'Hook event is not a write' };
   }
   if (request.intent === 'unknown' || request.targets.length === 0) {
-    if (
-      selected.phase === 'verify' ||
-      (selected.phase === 'build' &&
-        !(selected.classic?.workflow === 'full' && !selected.classic.designDoc))
-    ) {
-      return {
-        allowed: true,
-        reason: `Classic change is in ${selected.phase}`,
-        workflow: 'classic',
-        change: changeName,
-        phase: selected.phase,
-      };
-    }
     return {
-      allowed: false,
-      reason: `Hook write target could not be determined while Classic change ${changeName} is in ${selected.phase}; resume /comet-classic before retrying`,
+      allowed: true,
+      reason: 'Hook write target was not attributed to the guarded project',
       workflow: 'classic',
       change: changeName,
       phase: selected.phase,
@@ -729,7 +919,12 @@ export async function inspectClassicHookGuard(
   }
 
   for (const target of request.targets) {
-    const inspected = await inspectClassicHookTarget(projectRoot, target, changeName);
+    const inspected = await inspectClassicHookTarget(
+      projectRoot,
+      target,
+      changeName,
+      dependencies.scopeTargets,
+    );
     if (inspected.exitCode !== 0) {
       return {
         allowed: false,

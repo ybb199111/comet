@@ -10,14 +10,19 @@ import {
   createNativeChange,
   nativeChangeDir,
   readNativeChange,
+  writeNativeChange,
 } from '../../../domains/comet-native/native-change.js';
 import { nativeProjectPaths } from '../../../domains/comet-native/native-paths.js';
+import { inspectNativeStatus } from '../../../domains/comet-native/native-diagnostics.js';
 import {
   readNativeBaselineManifest,
   writeNativeBaselineManifest,
 } from '../../../domains/comet-native/native-snapshot.js';
 import { readNativeImplementationScopeBundle } from '../../../domains/comet-native/native-evidence-storage.js';
-import { advanceNativeChange } from '../../../domains/comet-native/native-transitions.js';
+import {
+  advanceNativeChange,
+  formatNativeReceiptBindingMismatchMessage,
+} from '../../../domains/comet-native/native-transitions.js';
 import type { NativeProjectPaths } from '../../../domains/comet-native/native-types.js';
 import { nativeVerificationFixtureReport } from '../../helpers/native-verification.js';
 
@@ -47,13 +52,28 @@ describe('Native guarded transitions', () => {
   beforeEach(async () => {
     projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-native-transitions-'));
     paths = await nativeProjectPaths(projectRoot, '.');
-    const state = await createNativeChange({ paths, name: 'advance-change', language: 'en' });
+    const state = await createNativeChange({
+      paths,
+      name: 'advance-change',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     changeDir = nativeChangeDir(paths, state.name);
     await fs.writeFile(path.join(changeDir, 'brief.md'), brief);
   });
 
   afterEach(async () => {
     await fs.rm(projectRoot, { recursive: true, force: true });
+  });
+
+  it('uses the concrete change name in receipt binding recovery guidance', () => {
+    const message = formatNativeReceiptBindingMismatchMessage({
+      change: 'advance-change',
+      detail: 'verification.json -> sourceRevision: expected 3, got 2',
+    });
+
+    expect(message).toContain('comet native receipt refresh advance-change --apply');
+    expect(message).not.toContain('<change>');
   });
 
   it('does not write Run files when Shape guard fails', async () => {
@@ -115,14 +135,14 @@ describe('Native guarded transitions', () => {
     const first = await advanceNativeChange({
       paths,
       name: 'advance-change',
-      evidence: { summary: 'shape done' },
+      evidence: { summary: 'shape done', confirmed: true },
       runId: () => 'native-run-1',
       now: new Date('2026-07-14T01:00:00Z'),
     });
     expect(first.change).toMatchObject({
       revision: 2,
       phase: 'build',
-      approval: 'implicit',
+      approval: 'confirmed',
       approved_contract_hash: expect.stringMatching(/^[a-f0-9]{64}$/u),
       run_id: 'native-run-1',
     });
@@ -131,7 +151,7 @@ describe('Native guarded transitions', () => {
     const retry = await advanceNativeChange({
       paths,
       name: 'advance-change',
-      evidence: { summary: 'shape done' },
+      evidence: { summary: 'shape done', confirmed: true },
     });
     expect(retry.change.phase).toBe('build');
     expect(retry.change.revision).toBe(2);
@@ -152,11 +172,103 @@ describe('Native guarded transitions', () => {
     expect(build.change.revision).toBe(3);
   });
 
+  it.each(['sequential', 'batch'] as const)(
+    'requires explicit shared-understanding confirmation in %s mode',
+    async (clarificationMode) => {
+      const blocked = await advanceNativeChange({
+        paths,
+        name: 'advance-change',
+        evidence: { summary: 'shape is ready' },
+        clarificationMode,
+      });
+      expect(blocked).toMatchObject({
+        next: 'manual',
+        change: { phase: 'shape', approval: null },
+        findings: [
+          expect.objectContaining({
+            code: 'shape-confirmation-required',
+            requiredAction: 'confirm-shared-understanding',
+            retryCommand: 'comet native next advance-change --summary "<summary>" --confirmed',
+            requiresUserDecision: true,
+          }),
+        ],
+      });
+
+      const confirmed = await advanceNativeChange({
+        paths,
+        name: 'advance-change',
+        evidence: { summary: 'shared understanding confirmed', confirmed: true },
+        clarificationMode,
+      });
+      expect(confirmed.change).toMatchObject({
+        phase: 'build',
+        approval: 'confirmed',
+      });
+    },
+  );
+
+  it('requires a legacy implicit Build state to be confirmed before Verify', async () => {
+    const shaped = await advanceNativeChange({
+      paths,
+      name: 'advance-change',
+      evidence: { summary: 'shared understanding confirmed', confirmed: true },
+      clarificationMode: 'batch',
+    });
+    await writeNativeChange(paths, { ...shaped.change, approval: 'implicit' });
+    expect(await inspectNativeStatus(paths, 'advance-change')).toMatchObject({
+      phase: 'build',
+      nextCommand: 'comet native next advance-change --summary "<summary>" --confirmed',
+      continuation: {
+        command: 'comet native next advance-change --summary "<summary>" --confirmed',
+        requiredInputs: [
+          'summary',
+          'artifact-or-no-code-reason',
+          'shared-understanding-confirmation',
+        ],
+      },
+    });
+    await fs.writeFile(path.join(projectRoot, 'feature.ts'), 'export const feature = true;\n');
+
+    const blocked = await advanceNativeChange({
+      paths,
+      name: 'advance-change',
+      evidence: { summary: 'implemented', artifacts: ['feature.ts'] },
+      clarificationMode: 'batch',
+    });
+    expect(blocked).toMatchObject({
+      next: 'manual',
+      change: { phase: 'build', approval: 'implicit' },
+      findings: [
+        expect.objectContaining({
+          code: 'approval-confirmation-required',
+          requiredAction: 'confirm-shared-understanding',
+          retryCommand: 'comet native next advance-change --summary "<summary>" --confirmed',
+          requiresUserDecision: true,
+        }),
+      ],
+    });
+
+    const confirmed = await advanceNativeChange({
+      paths,
+      name: 'advance-change',
+      evidence: {
+        summary: 'implemented and confirmed',
+        artifacts: ['feature.ts'],
+        confirmed: true,
+      },
+      clarificationMode: 'batch',
+    });
+    expect(confirmed.change).toMatchObject({
+      phase: 'verify',
+      approval: 'confirmed',
+    });
+  });
+
   it('blocks a changed approved contract until Build explicitly re-confirms it', async () => {
     const shaped = await advanceNativeChange({
       paths,
       name: 'advance-change',
-      evidence: { summary: 'shape is approved' },
+      evidence: { summary: 'shape is approved', confirmed: true },
     });
     const approvedHash = shaped.change.approved_contract_hash;
     expect(approvedHash).toMatch(/^[a-f0-9]{64}$/u);
@@ -204,13 +316,13 @@ describe('Native guarded transitions', () => {
     expect(confirmed.change.approved_contract_hash).toBe(scope.scope.contractHash);
   });
 
-  it('records explicit confirmation from Shape or an agile Build decision', async () => {
+  it('records explicit confirmation from Shape and rejects it in Verify', async () => {
     const shaped = await advanceNativeChange({
       paths,
       name: 'advance-change',
-      evidence: { summary: 'shape is ready' },
+      evidence: { summary: 'shape is ready', confirmed: true },
     });
-    expect(shaped.change).toMatchObject({ phase: 'build', approval: 'implicit' });
+    expect(shaped.change).toMatchObject({ phase: 'build', approval: 'confirmed' });
 
     await fs.writeFile(path.join(projectRoot, 'feature.ts'), 'export const feature = true;\n');
     const build = await advanceNativeChange({
@@ -248,7 +360,7 @@ describe('Native guarded transitions', () => {
     await advanceNativeChange({
       paths,
       name: 'advance-change',
-      evidence: { summary: 'shape is ready' },
+      evidence: { summary: 'shape is ready', confirmed: true },
     });
     await fs.writeFile(path.join(projectRoot, 'feature.ts'), 'export const feature = true;\n');
     await advanceNativeChange({
@@ -280,13 +392,26 @@ describe('Native guarded transitions', () => {
       verification_result: 'fail',
       verification_report: 'verification.md',
     });
+
+    await fs.appendFile(path.join(changeDir, 'verification.md'), '\nChanged after transition.\n');
+    const retry = await advanceNativeChange({
+      paths,
+      name: 'advance-change',
+      evidence: {
+        summary: 'verification failed',
+        verificationResult: 'fail',
+        verificationReport: 'verification.md',
+      },
+    });
+    expect(retry.next).toBe('manual');
+    expect(retry.change.revision).toBe(result.change.revision);
   });
 
   it('advances Verify pass to the Native archive command without reasoning fields', async () => {
     await advanceNativeChange({
       paths,
       name: 'advance-change',
-      evidence: { summary: 'shape done' },
+      evidence: { summary: 'shape done', confirmed: true },
     });
     await fs.writeFile(path.join(projectRoot, 'feature.ts'), 'export const feature = true;\n');
     await advanceNativeChange({
@@ -316,5 +441,18 @@ describe('Native guarded transitions', () => {
     const run = (await readRunStateAt(changeDir, NATIVE_RUN_STORAGE))!;
     const source = await fs.readFile(path.join(changeDir, run.trajectoryRef), 'utf8');
     expect(source).not.toMatch(/reasoning|thoughts|chain_of_thought/iu);
+
+    await fs.appendFile(path.join(changeDir, 'verification.md'), '\nChanged after transition.\n');
+    await expect(
+      advanceNativeChange({
+        paths,
+        name: 'advance-change',
+        evidence: {
+          summary: 'verified',
+          verificationResult: 'pass',
+          verificationReport: 'verification.md',
+        },
+      }),
+    ).rejects.toThrow('retreat only accepts a transition summary');
   });
 });

@@ -2,7 +2,7 @@
 
 规范路径：`comet/reference/subagent-dispatch.md`
 
-本文档提供在 Superpowers `subagent-driven-development` 技能**之上**应用的 Comet 专属扩展。Superpowers `subagent-driven-development` 技能提供基础连续派发循环（每个 task 派发全新 implementer，并包含默认 task reviewer 节点）并强制连续执行。本文档添加 Comet 特有的真实后台调度、任务追踪、状态验证、上下文恢复，以及审查/修复预算；Comet 的 `review_mode` 接管 reviewer 阶段，决定哪些任务需要 reviewer、需要几轮修复和最终审查。若 Superpowers 技能与本文档发生冲突时，以本文档中更具体的 Comet 约束为准。
+本文档提供在 Superpowers `subagent-driven-development` 技能**之上**应用的 Comet 专属扩展。Superpowers `subagent-driven-development` 技能提供基础连续派发循环（每个 task 派发全新 implementer，并包含默认 task reviewer 节点）并强制连续执行。本文档添加 Comet 特有的子代理派发、任务追踪、状态验证、上下文恢复，以及审查/修复预算；Comet 的 `review_mode` 接管 reviewer 阶段，决定哪些任务需要 reviewer、需要几轮修复和最终审查。若 Superpowers 技能与本文档发生冲突时，以本文档中更具体的 Comet 约束为准。
 
 > **⚠️ 关键约束 — 任务之间禁止暂停**
 >
@@ -13,7 +13,7 @@
 > - 存在无法从仓库、计划或既有上下文消除的真实歧义
 > - 用户**明确**要求暂停
 >
-> 后台调度能力在执行中失效属于运行停止条件，不自动构成新的用户决策点：退出派发循环并返回 `/comet-build` Step 2 的同一个联合决策，移除 `subagent-driven-development`。若只剩一个合法执行方式，说明原因后直接采用；仍有多个合法方式时才等待用户重新选择。
+> 子代理派发操作失败属于运行停止条件，不自动构成新的用户决策点：将当前任务记录为 `BLOCKED` 并写明失败原因，停止派发循环，按当前 change 的阻塞与恢复流程处理；主会话不得接管实现。
 >
 > 此规则适用于整个派发循环，而非单个任务。
 
@@ -30,12 +30,10 @@
 
 ### 0. 派发强制约束（关键）
 
-主会话**仅负责协调**，禁止直接执行 task。主会话禁止修改源代码。协调者唯一允许的文件修改是 plan、OpenSpec task 和 subagent 进度检查点的持久化更新。不得把多个 task 打包给同一个 agent。每个 task 派发一个全新的后台 implementer agent；当 `review_mode` 需要审查或修复时，task reviewer、修复 agent 和 final reviewer 也必须分别使用全新的后台 agent：
+主会话**仅负责协调**，禁止直接执行 task。主会话禁止修改源代码。协调者唯一允许的文件修改是 plan、OpenSpec task 和 subagent 进度检查点的持久化更新。不得把多个 task 打包给同一个 agent。通过已加载的 Superpowers `subagent-driven-development` 技能，为每个 task 派发一个全新的后台 implementer agent；当 `review_mode` 需要审查或修复时，分别派发全新的 task reviewer、修复 agent 和 final reviewer：
 
-- **Claude Code**：对每个 implementer，以及 `review_mode` 要求的 task reviewer、修复 agent 和 final reviewer 使用 `Agent` 工具并设置 `run_in_background: true`。禁止内联执行 task，禁止错误进入需要预先创建 team 的团队模式。
-- **其他平台**：使用平台等效的后台 agent / Task / 多 agent 派发机制。
 - **禁止**跨 task 或角色复用 implementer、reviewer 或修复 agent。每个 agent 拥有全新的隔离上下文，并且只接收当前角色所需的单个 task 上下文。
-- 若真实后台派发能力在执行中失效，不得继续派发或由主会话代写实现；返回 `/comet-build` Step 2 的同一个联合决策并移除不可用模式。不得另设“是否改用 executing-plans”的停顿点；只剩一个合法模式时直接采用。
+- 若子代理派发操作失败，不得继续派发或由主会话代写实现；将当前任务记录为 `BLOCKED` 并写明失败原因，按当前 change 的阻塞与恢复流程处理。
 
 ### 1. 派发 Prompt 与回报契约
 
@@ -69,13 +67,12 @@ reviewer prompt 必须保持中立：
 - 不得在 reviewer prompt 中预判、压低或禁止报告某个发现。若某个可能发现与 plan 冲突，让 reviewer 先报告，再询问用户以哪个要求为准。
 - 不得把之前 task 的累计历史粘贴进后续派发。只提供当前 task、相关接口/约束，以及已加载的 Superpowers `subagent-driven-development` 技能暴露的交接产物。
 
-**Model 选择（强制）**：每次派发必须显式指定 model，省略会静默继承会话最贵 model，拖慢执行并抬高成本。遵循 Superpowers `subagent-driven-development` 的 Model Selection 规则：
+**Model 选择**：遵循 Superpowers `subagent-driven-development` 的 Model Selection 规则，为不同角色选择合适的 model：
 
 - **implementer / 修复 agent**：用 prose 描述的实现任务至少使用中档；多文件集成、需要模式匹配或调试 → 中档；需要设计判断或广泛理解代码库 → 高档。只有当 plan 文本已含完整待写代码（转写+测试），或只是单文件机械修复时，才用最便宜档。
 - **reviewer（任务级/最终）**：按 diff 大小、复杂度和风险缩放。小机械 diff 不需要最高档；微妙并发改动才上高档。
 - **final whole-branch review**：使用可用的最高档 model，不用会话默认档。
 
-省略 model 等于让它跑会话最贵 model，直接违背本节目标。
 
 ### 2. Implementer 范围限制
 
@@ -93,10 +90,11 @@ implementer 或修复 agent 回报必须提供 **RED 失败命令与失败摘要
 
 ### 4. 持久进度检查点
 
-主会话必须维护 `openspec/changes/<name>/.comet/subagent-progress.md`，并在每次派发、agent 回报、审查结果、修复轮次变化和 task 勾选后立即更新。检查点至少记录：
+主会话必须维护 `<classic-change-dir>/.comet/subagent-progress.md`，并在每次派发、agent 回报、审查结果、修复轮次变化和 task 勾选后立即更新。检查点至少记录：
 
 - 当前 plan task 唯一文本及映射的 OpenSpec task 文本
 - 当前阶段：`implementing | task-review | checkoff | done | blocked | final-review | final-fix`
+- 本次派发使用的 model（可以识别时）
 - 实现提交哈希、变更文件和 RED/GREEN 证据
 - 已选择的 `review_mode`
 - 已通过的审查阶段及尚未解决的 reviewer 反馈
@@ -143,8 +141,8 @@ Comet 不读取、不写入、也不要求任何 Superpowers `subagent-driven-de
 4. 运行定向验证：
 
 ```bash
-comet state task-checkoff <plan-file> <plan-task-text>
-comet state task-checkoff openspec/changes/<name>/tasks.md <openspec-task-text>
+comet state task-checkoff "<plan-file>" "<plan-task-text>"
+comet state task-checkoff "<classic-change-dir>/tasks.md" "<openspec-task-text>"
 ```
 
 仅在对应映射存在时运行第二条。脚本会要求任务文本恰好出现一次且该项已勾选；验证失败时不得进入下一个 task。
@@ -159,7 +157,7 @@ comet state task-checkoff openspec/changes/<name>/tasks.md <openspec-task-text>
 
 ## 上下文恢复
 
-重新加载 Superpowers `subagent-driven-development` 技能并重新阅读本文档。先读取 `openspec/changes/<name>/.comet/subagent-progress.md`，再与第一个未勾选 task 和当前工作树核对：
+重新加载 Superpowers `subagent-driven-development` 技能并重新阅读本文档。先读取 `<classic-change-dir>/.comet/subagent-progress.md`，再与第一个未勾选 task 和当前工作树核对：
 
 - 检查点与未勾选 task 匹配时，从记录的精确阶段恢复，保留实现提交、RED/GREEN 证据、`review_mode`、已通过的审查阶段、未解决反馈和当前审查-修复轮次；不得重置轮次或重复已经通过的阶段。
 - 若已加载的 Superpowers `subagent-driven-development` 技能通过自己的进度记录报告某个 task 已完成，先对照 git 历史和 Comet plan/OpenSpec checkbox 完成恢复判断。若提交和任务身份匹配，更新 Comet 检查点/勾选状态，不得重复派发已完成工作。

@@ -1,7 +1,12 @@
 import path from 'node:path';
 
 import { canonicalHash } from './native-canonical-hash.js';
-import type { NativePhase, NativeSpecOperation } from './native-types.js';
+import type {
+  NativeArchiveConfirmation,
+  NativePhase,
+  NativeSpecOperation,
+} from './native-types.js';
+import type { NativeWorkspaceFinish, NativeWorkspaceIsolation } from './native-workspace.js';
 
 export const NATIVE_ARCHIVE_PREFLIGHT_SCHEMA = 'comet.native.archive-preflight.v1' as const;
 
@@ -35,6 +40,7 @@ export interface NativeArchiveEvidenceFact {
 
 export interface NativeArchivePreflightInput {
   change: string;
+  archiveConfirmation: NativeArchiveConfirmation;
   stateSchema: string;
   revision: number;
   phase: NativePhase;
@@ -44,7 +50,16 @@ export interface NativeArchivePreflightInput {
   targetExists: boolean;
   specs: readonly NativeArchiveSpecFact[];
   evidence: NativeArchiveEvidenceFact;
+  workspace?: NativeArchiveWorkspaceFact | null;
   findingCodes?: readonly string[];
+}
+
+export interface NativeArchiveWorkspaceFact {
+  schema: 'comet.native.workspace.v3';
+  isolation: NativeWorkspaceIsolation;
+  changeBranch: string | null;
+  targetBranch: string | null;
+  finish: NativeWorkspaceFinish | null;
 }
 
 export interface NativeArchiveOperationPreview extends NativeArchiveSpecFact {
@@ -54,12 +69,14 @@ export interface NativeArchiveOperationPreview extends NativeArchiveSpecFact {
 export interface NativeArchivePreflight {
   schema: typeof NATIVE_ARCHIVE_PREFLIGHT_SCHEMA;
   change: string;
+  archiveConfirmation: NativeArchiveConfirmation;
   revision: number;
   targetRef: string;
   ready: boolean;
   evidenceFreshness: NativeVerificationFreshness;
   operationCount: number;
   operations: NativeArchiveOperationPreview[];
+  workspace: NativeArchiveWorkspaceFact | null;
   findingCodes: string[];
   preflightHash: string;
 }
@@ -105,6 +122,57 @@ function positiveRevision(value: number): number {
     throw new Error('Native archive preflight revision must be a positive integer');
   }
   return value;
+}
+
+function normalizeWorkspace(
+  value: NativeArchiveWorkspaceFact | null | undefined,
+): NativeArchiveWorkspaceFact | null {
+  if (value === undefined || value === null) return null;
+  if (value.schema !== 'comet.native.workspace.v3') {
+    throw new Error('Native archive workspace schema is invalid');
+  }
+  if (
+    value.isolation !== 'current' &&
+    value.isolation !== 'branch' &&
+    value.isolation !== 'worktree'
+  ) {
+    throw new Error('Native archive workspace isolation is invalid');
+  }
+  for (const [label, branch] of [
+    ['change', value.changeBranch],
+    ['target', value.targetBranch],
+  ] as const) {
+    if (
+      branch !== null &&
+      (branch.length === 0 ||
+        branch.trim() !== branch ||
+        Array.from(branch).some((character) => {
+          const code = character.codePointAt(0) ?? 0;
+          return code <= 0x1f || code === 0x7f;
+        }))
+    ) {
+      throw new Error(`Native archive workspace ${label} branch is invalid`);
+    }
+  }
+  if (
+    value.finish !== null &&
+    value.finish !== 'merge' &&
+    value.finish !== 'push' &&
+    value.finish !== 'pull-request' &&
+    value.finish !== 'keep'
+  ) {
+    throw new Error('Native archive workspace finish is invalid');
+  }
+  if (
+    (value.isolation === 'branch' || value.isolation === 'worktree') &&
+    (value.changeBranch === null || value.targetBranch === null || value.finish === null)
+  ) {
+    throw new Error('Native isolated archive workspace requires branches and a finish action');
+  }
+  if (value.isolation === 'current' && value.finish !== null) {
+    throw new Error('Native current archive workspace cannot have a finish action');
+  }
+  return { ...value };
 }
 
 function normalizeSpec(value: NativeArchiveSpecFact, index: number): NativeArchiveSpecFact {
@@ -230,6 +298,9 @@ function derivedFindings(input: {
   if (input.evidence.freshness === 'missing') findings.push('verification-evidence-missing');
   if (input.evidence.freshness === 'invalid') findings.push('verification-evidence-invalid');
   if (input.evidence.freshness === 'stale') findings.push('verification-evidence-stale');
+  if (input.evidence.skippedAcceptanceCount > 0) {
+    findings.push('verification-acceptance-skipped');
+  }
   for (const spec of input.specs) {
     if (spec.actualBaseHash !== spec.expectedBaseHash) findings.push('spec-base-conflict');
   }
@@ -258,6 +329,7 @@ export function buildNativeArchivePreflight(
     operationHash: canonicalHash(OPERATION_HASH_TAG, spec),
   }));
   const evidence = normalizeEvidence(input.evidence);
+  const workspace = normalizeWorkspace(input.workspace);
   const findingCodes = [
     ...new Set([
       ...normalizeFindingCodes(input.findingCodes ?? []),
@@ -273,9 +345,13 @@ export function buildNativeArchivePreflight(
   ].sort(compareText);
   const revision = positiveRevision(input.revision);
   const targetRef = normalizedRef(input.targetRef, 'Native archive target');
+  if (input.archiveConfirmation !== 'automatic' && input.archiveConfirmation !== 'required') {
+    throw new Error('Native archive confirmation must be automatic or required');
+  }
   const facts = {
     stateSchema: input.stateSchema,
     change: input.change,
+    archiveConfirmation: input.archiveConfirmation,
     revision,
     phase: input.phase,
     archived: input.archived,
@@ -284,17 +360,20 @@ export function buildNativeArchivePreflight(
     targetExists: input.targetExists,
     operations,
     evidence,
+    workspace,
     findingCodes,
   };
   return {
     schema: NATIVE_ARCHIVE_PREFLIGHT_SCHEMA,
     change: input.change,
+    archiveConfirmation: input.archiveConfirmation,
     revision,
     targetRef,
     ready: findingCodes.length === 0,
     evidenceFreshness: evidence.freshness,
     operationCount: operations.length,
     operations,
+    workspace,
     findingCodes,
     preflightHash: canonicalHash(PREFLIGHT_HASH_TAG, facts),
   };

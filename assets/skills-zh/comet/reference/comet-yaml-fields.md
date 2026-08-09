@@ -2,7 +2,7 @@
 
 规范路径：`comet/reference/comet-yaml-fields.md`
 
-本文件是 `openspec/changes/<name>/` 下每个 change 级 `.comet.yaml` 状态文件的字段参考。按需查阅，不随 skill 一次性加载。项目级默认配置放在 `.comet/config.yaml`，全局默认配置放在 `~/.comet/config.yaml`；项目配置优先于全局配置。
+本文件是 `<classic-change-dir>/` 下每个 change 级 `.comet.yaml` 状态文件的字段参考。`<classic-change-dir>` 来自 `comet/reference/classic-layout.md` 的 resolver 绑定。按需查阅，不随 skill 一次性加载。项目级默认配置放在 `.comet/config.yaml`，全局默认配置放在 `~/.comet/config.yaml`；项目配置优先于全局配置。
 
 ## 示例
 
@@ -44,7 +44,7 @@ archived: false
 | `base_ref` | init 时记录的 git commit SHA，用于 scale 评估。无 plan 时作为改动文件数统计基准 |
 | `build_mode` | 已选择的执行方式，可为空。取值：`subagent-driven-development`（隔离后台 subagent 逐任务实现并审查）、`executing-plans`（主会话按计划顺序执行）、`direct`（主会话直接编码，默认仅 hotfix/tweak 允许，full workflow 需 `direct_override: true`） |
 | `build_pause` | build 阶段内部暂停点。`null` 表示无暂停，`plan-ready` 表示 plan 已生成，用户选择切换模型后暂停 |
-| `subagent_dispatch` | `null` 或 `confirmed`。仅当已确认当前平台存在真实后台 subagent / Task / multi-agent 调度能力时，`build_mode: subagent-driven-development` 才能写入并用于离开 build 阶段 |
+| `subagent_dispatch` | `null` 或 `confirmed`。`confirmed` 记录用户已选择 `subagent-driven-development`；该模式只有带此记录时才能离开 build 阶段 |
 | `tdd_mode` | `tdd` 或 `direct`。full workflow 离开 build 阶段前必须已选择。`tdd` 强制每个任务先写失败测试再实现；`direct` 不强制逐任务 TDD，但仍需相关测试与 bug 回归证据。hotfix/tweak 默认 `direct` |
 | `review_mode` | `off`、`standard` 或 `thorough`。full workflow 离开 build 阶段前必须已选择；hotfix/tweak 默认 `off` |
 | `isolation` | `current`、`branch` 或 `worktree`。full 初始化可为 `null`，离开 build 前必须由用户显式选择 `current`、实际创建/选择 `branch`，或实际创建/选择 `worktree`；hotfix/tweak 在入口用户决策点后也可如实使用三种模式，不得在未创建分支时虚构为 `branch` |
@@ -54,10 +54,10 @@ archived: false
 | `verify_result` | `pending`、`pass` 或 `fail` |
 | `verify_failures` | 机器维护的连续验证失败次数；`verify-fail` 自动加一，`verify-pass` 或 `archive-reopen` 重置为 `0`。达到 `3` 后下一次失败必须进入超限策略决策 |
 | `verification_report` | 验证报告文件路径，verify 通过前必须指向已存在文件 |
-| `branch_status` | `pending` 或 `handled`。verify 和 archive 执行期间保持 `pending`；归档改动提交且用户选择的分支处理完成后设为 `handled` |
+| `branch_status` | `pending` 或 `handled`。verify 阶段保持 `pending`；用户在归档前确认立即远端交付后，归档完成时设为 `handled` 并包含在唯一归档提交中。`handled` 只表示交付方式已经确认，不表示 push 或 PR 创建已经成功；只有远端操作成功后才能清除 current selection 并宣告 workflow 完成 |
 | `created_at` | change 创建日期（init 时自动写入），格式 `YYYY-MM-DD` |
 | `verified_at` | 验证通过时间，可为空 |
-| `archive_confirmation` | `null`、`pending` 或 `confirmed`。`verify-pass` 进入 archive 阶段时写入 `pending`；用户在 `/comet-archive` 最终确认选择「确认归档」后，`archive-confirm` transition 写入 `confirmed`；`archive-reopen` 会清空该字段，防止复用旧确认 |
+| `archive_confirmation` | `null`、`pending` 或 `confirmed`。`verify-pass` 进入 archive 阶段时写入 `pending`；用户在 `/comet-archive` 最终确认选择任一“确认归档并立即远端交付”选项后，`archive-confirm` transition 写入 `confirmed`；`archive-reopen` 会清空该字段，防止复用旧确认 |
 | `archived` | change 是否已归档 |
 
 ## 可选字段

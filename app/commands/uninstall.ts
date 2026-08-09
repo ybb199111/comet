@@ -2,13 +2,20 @@ import path from 'path';
 import { checkbox, select } from '@inquirer/prompts';
 
 import { getBaseDir, type InstallScope } from '../../platform/install/detect.js';
-import { PLATFORMS, getPlatformSkillsDir } from '../../platform/install/platforms.js';
+import {
+  PLATFORMS,
+  getPlatformSkillsDir,
+  getPlatformSkillsDirs,
+} from '../../platform/install/platforms.js';
+import { fileExists } from '../../platform/fs/file-system.js';
 import {
   removeCometSkillsForPlatform,
   removeCometRulesForPlatform,
   removeCometHooksForPlatform,
   removeWorkingDirs,
   removeCometProjectInstructions,
+  removeOpenSpecSkillsForPlatform,
+  removeSuperpowersSkillsForPlatforms,
 } from '../../domains/skill/uninstall.js';
 import { detectInstalledCometTargets, type InstalledCometTarget } from './update.js';
 import {
@@ -19,6 +26,11 @@ import {
   type ProjectRegistryTarget,
 } from '../../platform/install/project-registry.js';
 import { assertProjectScopeOptions, resolveProjectScopeMode } from './project-scope-selection.js';
+import { platformSelectPrompt } from './platform-select-prompt.js';
+import type { CometWorkflow } from '../../domains/comet-entry/types.js';
+import { readWorkflowProjectConfigSnapshot } from '../../domains/workflow-contract/project-config-reader.js';
+import { writeWorkflowProjectConfigDocument } from '../../domains/workflow-contract/project-config-writer.js';
+import { t, type Language, type TranslationKey } from './i18n.js';
 
 interface UninstallOptions {
   json?: boolean;
@@ -28,6 +40,10 @@ interface UninstallOptions {
   currentProject?: boolean;
   recoverProjectCleanup?: boolean;
   recoveryTargets?: ProjectRegistryTarget[];
+  targetPlatforms?: string[];
+  workflows?: CometWorkflow[];
+  companionSkills?: Array<'openspec' | 'superpowers'>;
+  language?: Language;
 }
 
 interface TargetUninstallResult {
@@ -43,11 +59,177 @@ interface TargetUninstallResult {
   workingDirsRemoved: number;
 }
 
+type TargetWorkflowSelection = {
+  target: InstalledCometTarget;
+  installedWorkflows: CometWorkflow[];
+  workflows: CometWorkflow[];
+  companionSkills: Array<'openspec' | 'superpowers'>;
+};
+
+const ALL_WORKFLOWS: CometWorkflow[] = ['native', 'classic'];
+
+function formatMessage(
+  lang: Language,
+  key: TranslationKey,
+  values: Record<string, string | number>,
+): string {
+  return Object.entries(values).reduce(
+    (message, [name, value]) => message.replaceAll(`{${name}}`, String(value)),
+    t(lang, key),
+  );
+}
+
+async function resolveUninstallLanguage(
+  projectPath: string,
+  fallbackTargets: readonly ProjectRegistryTarget[] = [],
+): Promise<Language> {
+  try {
+    const snapshot = await readWorkflowProjectConfigSnapshot(projectPath, {
+      allowPartialProject: true,
+    });
+    const configuredLanguages = [
+      snapshot.document?.native?.language,
+      snapshot.document?.classic?.language,
+    ];
+    if (configuredLanguages.includes('zh-CN')) return 'zh';
+  } catch {
+    // A malformed or absent project config must not prevent uninstalling.
+  }
+  return fallbackTargets.some((target) => target.language === 'zh') ? 'zh' : 'en';
+}
+
+async function resolveTargetSelection(
+  targets: InstalledCometTarget[],
+  options: UninstallOptions,
+  log: (message: string) => void,
+  lang: Language,
+): Promise<InstalledCometTarget[] | null> {
+  if (options.targetPlatforms !== undefined) {
+    return targets.filter((target) => options.targetPlatforms!.includes(target.platform.id));
+  }
+  if (options.force || options.json || targets.length === 0) return targets;
+
+  const detectedPlatforms = new Set(targets.map((target) => target.platform.id));
+  const selectedPlatformIds = await platformSelectPrompt({
+    message: t(lang, 'selectPlatformsToUninstall'),
+    choices: PLATFORMS.map((platform) => ({
+      name: `${platform.name}${detectedPlatforms.has(platform.id) ? ` (${t(lang, 'detected')})` : ''}`,
+      summaryName: platform.name,
+      value: platform.id,
+      checked: detectedPlatforms.has(platform.id),
+    })),
+    selectedLabel: t(lang, 'uninstallSelectedPlatforms'),
+    emptyLabel: t(lang, 'uninstallNoneSelected'),
+    requiredErrorLabel: t(lang, 'uninstallPlatformsRequired'),
+    required: true,
+  });
+  const selectedTargets = targets.filter((target) =>
+    selectedPlatformIds.includes(target.platform.id),
+  );
+  if (selectedTargets.length === 0) {
+    log(`\n  ${t(lang, 'noInstalledPlatformsSelected')}\n`);
+    return null;
+  }
+  return selectedTargets;
+}
+
+async function resolveWorkflowSelection(
+  options: UninstallOptions,
+  lang: Language,
+): Promise<{ workflows: CometWorkflow[]; companionSkills: Array<'openspec' | 'superpowers'> }> {
+  if (options.workflows) {
+    return {
+      workflows: options.workflows,
+      companionSkills: options.companionSkills ?? [],
+    };
+  }
+  if (options.force || options.json) {
+    return { workflows: [...ALL_WORKFLOWS], companionSkills: [] };
+  }
+
+  const selected = await checkbox({
+    message: t(lang, 'selectWorkflowsToUninstall'),
+    choices: [
+      { name: t(lang, 'nativeWorkflow'), value: 'native' as const, checked: true },
+      { name: t(lang, 'classicWorkflow'), value: 'classic' as const, checked: true },
+    ],
+    required: true,
+  });
+  const workflows = (selected as CometWorkflow[] | undefined)?.filter((workflow) =>
+    ALL_WORKFLOWS.includes(workflow),
+  );
+  const resolvedWorkflows = workflows && workflows.length > 0 ? workflows : [...ALL_WORKFLOWS];
+  if (!resolvedWorkflows.includes('classic')) {
+    return { workflows: resolvedWorkflows, companionSkills: [] };
+  }
+
+  const companionSkills =
+    ((await checkbox({
+      message: t(lang, 'removeClassicCompanionSkills'),
+      choices: [
+        { name: t(lang, 'openSpecSkills'), value: 'openspec', checked: false },
+        { name: t(lang, 'superpowersSkills'), value: 'superpowers', checked: false },
+      ],
+      required: false,
+    })) as Array<'openspec' | 'superpowers'> | undefined) ?? [];
+  return { workflows: resolvedWorkflows, companionSkills };
+}
+
+async function detectInstalledWorkflows(target: InstalledCometTarget, projectPath: string) {
+  const baseDir = getBaseDir(target.scope, projectPath);
+  const workflows: CometWorkflow[] = [];
+  for (const workflow of ['native', 'classic'] as const) {
+    const skill = workflow === 'native' ? 'comet-native' : 'comet-classic';
+    if (
+      await Promise.all(
+        getPlatformSkillsDirs(target.platform, target.scope).map((skillsDir) =>
+          fileExists(path.join(baseDir, skillsDir, 'skills', skill, 'SKILL.md')),
+        ),
+      ).then((results) => results.some(Boolean))
+    ) {
+      workflows.push(workflow);
+    }
+  }
+  return workflows;
+}
+
+async function removeSelectedWorkflowsFromProjectConfig(
+  projectPath: string,
+  workflowsToRemove: readonly CometWorkflow[],
+): Promise<boolean> {
+  const snapshot = await readWorkflowProjectConfigSnapshot(projectPath, {
+    allowPartialProject: true,
+  });
+  const config = snapshot.document?.config;
+  if (!config) return false;
+  const configured = config.workflows ?? [config.default_workflow];
+  const remaining = configured.filter((workflow) => !workflowsToRemove.includes(workflow));
+  if (remaining.length === 0) return false;
+
+  const document = { ...(snapshot.document?.value ?? {}) };
+  document.workflows = remaining;
+  document.default_workflow = remaining.includes(config.default_workflow)
+    ? config.default_workflow
+    : remaining[0];
+  for (const workflow of workflowsToRemove) delete document[workflow];
+  const language =
+    (document.native as { language?: unknown } | undefined)?.language === 'zh-CN' ||
+    (document.classic as { language?: unknown } | undefined)?.language === 'zh-CN'
+      ? 'zh-CN'
+      : 'en';
+  await writeWorkflowProjectConfigDocument(projectPath, document, language, {
+    expectedIdentity: snapshot.identity,
+  });
+  return true;
+}
+
 interface SingleProjectUninstallResult {
   projectPath: string;
   projectScopeProcessed: boolean;
   targets: TargetUninstallResult[];
   workingDirsRemoved: number;
+  workingDirsPreserved: string[];
+  workingDirsFailureReason?: string;
   projectInstructionsRemoved: number;
   summary: {
     targetsProcessed: number;
@@ -93,6 +275,8 @@ function currentProjectJson(result: SingleProjectUninstallResult | null): {
     hooksFailed: number;
   }>;
   workingDirsRemoved: number;
+  workingDirsPreserved: string[];
+  workingDirsFailureReason?: string;
   summary: SingleProjectUninstallResult['summary'];
   projectInstructionsRemoved: number;
 } {
@@ -110,6 +294,8 @@ function currentProjectJson(result: SingleProjectUninstallResult | null): {
         hooksFailed: r.hooksFailed,
       })) ?? [],
     workingDirsRemoved: result?.workingDirsRemoved ?? 0,
+    workingDirsPreserved: result?.workingDirsPreserved ?? [],
+    workingDirsFailureReason: result?.workingDirsFailureReason,
     summary: result?.summary ?? {
       targetsProcessed: 0,
       totalSkillsRemoved: 0,
@@ -126,64 +312,64 @@ async function uninstallSingleProject(
   options: UninstallOptions = {},
   log: (message: string) => void,
 ): Promise<SingleProjectUninstallResult | null> {
+  const targetScope = options.scope ?? 'project';
   const detectedTargets = await detectInstalledCometTargets(projectPath, {
-    scopes: options.scope ? [options.scope] : undefined,
-    respectDetectionPaths: options.scope === undefined,
+    scopes: [targetScope],
+    respectDetectionPaths: false,
   });
   const targets = mergeCleanupTargets(
     detectedTargets,
     options.recoveryTargets ?? [],
     options.recoverProjectCleanup === true,
   );
+  const lang =
+    options.language ??
+    (await resolveUninstallLanguage(projectPath, options.recoveryTargets ?? []));
 
   if (targets.length === 0 && !options.recoverProjectCleanup) {
     return null;
   }
 
   const scopeLabel = (scope: InstallScope) =>
-    scope === 'global' ? 'global' : `project (${projectPath})`;
+    scope === 'global' ? t(lang, 'globalScope') : `${t(lang, 'projectScope')} (${projectPath})`;
+  const scopeName = (scope: InstallScope) =>
+    scope === 'global' ? t(lang, 'globalScope') : t(lang, 'projectScope');
 
   if (targets.length > 0) {
-    log('  Found Comet installations on the following targets:\n');
+    log(`  ${t(lang, 'foundCometInstallations')}\n`);
     for (const target of targets) {
       const skillsDir = getPlatformSkillsDir(target.platform, target.scope);
       const prefix = target.scope === 'global' ? '~/' : '';
       log(`    ${target.platform.name} (${scopeLabel(target.scope)})`);
-      log(`      Path: ${prefix}${skillsDir}/skills/`);
+      log(`      ${t(lang, 'pathLabel')} ${prefix}${skillsDir}/skills/`);
     }
   } else {
-    log('  Found an indexed project with follow-on cleanup still pending.\n');
+    log(`  ${t(lang, 'foundIndexedProjectCleanup')}\n`);
   }
 
-  let selectedTargets = targets;
-  if (!options.force && !options.json) {
-    if (targets.length === 1) {
-      const confirmed = await select({
-        message: `Uninstall Comet from ${targets[0].platform.name} (${targets[0].scope})?`,
-        choices: [
-          { name: 'Yes, uninstall', value: true },
-          { name: 'No, cancel', value: false },
-        ],
+  const selectedTargets = await resolveTargetSelection(targets, options, log, lang);
+  if (!selectedTargets) return null;
+  const workflowSelection = await resolveWorkflowSelection(options, lang);
+
+  const installedWorkflowsByTarget = new Map<string, CometWorkflow[]>();
+  for (const target of targets) {
+    installedWorkflowsByTarget.set(
+      `${target.scope}:${target.platform.id}`,
+      await detectInstalledWorkflows(target, projectPath),
+    );
+  }
+
+  const targetWorkflowSelections: TargetWorkflowSelection[] = [];
+  for (const target of selectedTargets) {
+    const installedWorkflows =
+      installedWorkflowsByTarget.get(`${target.scope}:${target.platform.id}`) ?? [];
+    if (workflowSelection.workflows.length > 0) {
+      targetWorkflowSelections.push({
+        target,
+        installedWorkflows,
+        workflows: workflowSelection.workflows,
+        companionSkills: workflowSelection.companionSkills,
       });
-      if (!confirmed) {
-        log('\n  Cancelled.\n');
-        return null;
-      }
-    } else {
-      const selected = await checkbox({
-        message: 'Select targets to uninstall:',
-        choices: targets.map((t) => ({
-          name: `${t.platform.name} (${t.scope})`,
-          value: `${t.platform.id}:${t.scope}`,
-          checked: true,
-        })),
-        required: true,
-      });
-      selectedTargets = targets.filter((t) => selected.includes(`${t.platform.id}:${t.scope}`));
-      if (selectedTargets.length === 0) {
-        log('\n  No targets selected. Cancelled.\n');
-        return null;
-      }
     }
   }
 
@@ -194,13 +380,23 @@ async function uninstallSingleProject(
   let totalHooks = 0;
   let totalFailures = 0;
   let projectInstructionsRemoved = 0;
+  const superpowersTargetsByScope = new Map<InstallScope, InstalledCometTarget[]>();
 
-  for (const target of selectedTargets) {
+  for (const {
+    target,
+    installedWorkflows,
+    workflows,
+    companionSkills,
+  } of targetWorkflowSelections) {
     const baseDir = getBaseDir(target.scope, projectPath);
+    const retainedWorkflows = installedWorkflows.filter(
+      (workflow) => !workflows.includes(workflow),
+    );
+    const removingAllWorkflows = retainedWorkflows.length === 0;
 
     let hooksRemoved = 0;
     let hooksFailed = 0;
-    if (target.platform.supportsHooks) {
+    if (removingAllWorkflows && target.platform.supportsHooks) {
       const hooksResult = await removeCometHooksForPlatform(baseDir, target.platform, target.scope);
       hooksRemoved = hooksResult.removed;
       hooksFailed = hooksResult.failed;
@@ -208,23 +404,53 @@ async function uninstallSingleProject(
       totalFailures += hooksResult.failed;
     }
 
-    const rulesResult = await removeCometRulesForPlatform(baseDir, target.platform, target.scope);
+    const rulesResult = removingAllWorkflows
+      ? await removeCometRulesForPlatform(baseDir, target.platform, target.scope)
+      : { removed: 0, failed: 0 };
     totalRules += rulesResult.removed;
     totalFailures += rulesResult.failed;
 
     const skillsResult =
       hooksFailed === 0 && rulesResult.failed === 0
-        ? await removeCometSkillsForPlatform(baseDir, target.platform, target.scope)
+        ? await removeCometSkillsForPlatform(
+            baseDir,
+            target.platform,
+            target.scope,
+            workflows,
+            retainedWorkflows,
+          )
         : { removed: 0, failed: 0 };
     totalSkills += skillsResult.removed;
     totalFailures += skillsResult.failed;
 
+    if (hooksFailed === 0 && rulesResult.failed === 0 && companionSkills.includes('openspec')) {
+      const result = await removeOpenSpecSkillsForPlatform(baseDir, target.platform, target.scope);
+      totalSkills += result.removed;
+      totalFailures += result.failed;
+      log(
+        `  ${target.platform.name} (${scopeName(target.scope)}): ${result.removed} ${t(lang, 'openSpecSkillsRemoved')}`,
+      );
+    }
+    if (hooksFailed === 0 && rulesResult.failed === 0 && companionSkills.includes('superpowers')) {
+      const targetsForScope = superpowersTargetsByScope.get(target.scope) ?? [];
+      targetsForScope.push(target);
+      superpowersTargetsByScope.set(target.scope, targetsForScope);
+    }
+
     log(
-      `  ${target.platform.name} (${target.scope}): ${skillsResult.removed} skills, ${rulesResult.removed} rules, ${hooksRemoved} hooks removed`,
+      `  ${target.platform.name} (${scopeName(target.scope)}): ${formatMessage(
+        lang,
+        'targetAssetsRemoved',
+        {
+          skills: skillsResult.removed,
+          rules: rulesResult.removed,
+          hooks: hooksRemoved,
+        },
+      )}`,
     );
     if (skillsResult.failed + rulesResult.failed + hooksFailed > 0) {
       log(
-        `  ${target.platform.name} (${target.scope}): cleanup failed; uninstall incomplete and follow-on cleanup skipped`,
+        `  ${target.platform.name} (${scopeName(target.scope)}): ${t(lang, 'targetCleanupFailed')}`,
       );
     }
 
@@ -242,26 +468,115 @@ async function uninstallSingleProject(
     });
   }
 
+  for (const [scope, superpowersTargets] of superpowersTargetsByScope) {
+    const selectedPlatformIds = new Set(superpowersTargets.map((target) => target.platform.id));
+    const removeSharedStorage = targets
+      .filter((target) => target.scope === scope)
+      .every((target) => selectedPlatformIds.has(target.platform.id));
+    const result = await removeSuperpowersSkillsForPlatforms(
+      projectPath,
+      superpowersTargets.map((target) => target.platform),
+      scope,
+      { removeSharedStorage },
+    );
+    totalSkills += result.removed;
+    totalFailures += result.failed;
+    log(
+      `  ${formatMessage(lang, 'superpowersSkillsRemoved', {
+        platforms: superpowersTargets.map((target) => target.platform.name).join(', '),
+        scope: scope === 'global' ? t(lang, 'globalScope') : t(lang, 'projectScope'),
+        count: result.removed,
+      })}`,
+    );
+  }
+
   let workingDirsRemoved = 0;
+  let workingDirsPreserved: string[] = [];
+  let workingDirsFailureReason: string | undefined;
+  const selectedProjectWorkflows = [
+    ...new Set(
+      targetWorkflowSelections
+        .filter(({ target }) => target.scope === 'project')
+        .flatMap(({ workflows }) => workflows),
+    ),
+  ] as CometWorkflow[];
   const hasProjectScope =
     options.recoverProjectCleanup === true || selectedTargets.some((t) => t.scope === 'project');
-  if (hasProjectScope && totalFailures === 0) {
+  const selectedTargetKeys = new Set(
+    targetWorkflowSelections.map(({ target }) => `${target.scope}:${target.platform.id}`),
+  );
+  const projectWorkflowsAfterUninstall = new Set<CometWorkflow>();
+  for (const target of targets) {
+    if (target.scope !== 'project') continue;
+    const key = `${target.scope}:${target.platform.id}`;
+    const installed = installedWorkflowsByTarget.get(key) ?? [];
+    const selection = selectedTargetKeys.has(key)
+      ? targetWorkflowSelections.find(
+          ({ target: selectedTarget }) =>
+            `${selectedTarget.scope}:${selectedTarget.platform.id}` === key,
+        )
+      : undefined;
+    for (const workflow of installed) {
+      if (!selection || !selection.workflows.includes(workflow)) {
+        projectWorkflowsAfterUninstall.add(workflow);
+      }
+    }
+  }
+  const projectWorkflowsToRemove = selectedProjectWorkflows.filter(
+    (workflow) => !projectWorkflowsAfterUninstall.has(workflow),
+  );
+  const removingAllProjectWorkflows =
+    hasProjectScope &&
+    selectedProjectWorkflows.length > 0 &&
+    projectWorkflowsAfterUninstall.size === 0;
+  if (hasProjectScope && removingAllProjectWorkflows && totalFailures === 0) {
     const removeResult = await removeCometProjectInstructions(projectPath);
     projectInstructionsRemoved = removeResult.removed;
     if (projectInstructionsRemoved > 0) {
-      log(`  Project instructions: ${projectInstructionsRemoved} managed block(s) removed`);
+      log(
+        `  ${formatMessage(lang, 'projectInstructionsRemoved', {
+          count: projectInstructionsRemoved,
+        })}`,
+      );
     }
   }
 
   if (hasProjectScope && totalFailures === 0) {
-    const dirsResult = await removeWorkingDirs(projectPath);
+    const dirsResult = await removeWorkingDirs(
+      projectPath,
+      removingAllProjectWorkflows ? {} : { workflows: projectWorkflowsToRemove },
+    );
     workingDirsRemoved = dirsResult.removed;
+    workingDirsPreserved = dirsResult.preserved ?? [];
+    workingDirsFailureReason = dirsResult.reason;
     totalFailures += dirsResult.failed;
     if (workingDirsRemoved > 0) {
-      log(`  Working directories: ${workingDirsRemoved} removed`);
+      log(`  ${formatMessage(lang, 'workingDirectoriesRemoved', { count: workingDirsRemoved })}`);
+    }
+    if (workingDirsPreserved.length > 0) {
+      const relativePaths = workingDirsPreserved.map((entry) => path.relative(projectPath, entry));
+      log(`  ${t(lang, 'workingDirectoriesPreserved')} ${relativePaths.join(', ')}`);
+      log(`    ${t(lang, 'workingDirectoriesPreservedReason')}`);
+      log(`    ${t(lang, 'workingDirectoriesPreservedImpact')}`);
     }
     if (dirsResult.failed > 0) {
-      log(`  Working directories: cleanup failed (${dirsResult.failed})`);
+      log(
+        `  ${formatMessage(lang, 'workingDirectoriesCleanupFailed', {
+          count: dirsResult.failed,
+        })}`,
+      );
+      if (workingDirsFailureReason) {
+        log(`    ${t(lang, 'workingDirectoriesFailureReason')} ${workingDirsFailureReason}`);
+      }
+    }
+  }
+
+  if (hasProjectScope && !removingAllProjectWorkflows && totalFailures === 0) {
+    try {
+      await removeSelectedWorkflowsFromProjectConfig(projectPath, projectWorkflowsToRemove);
+    } catch {
+      totalFailures += 1;
+      log(`  ${t(lang, 'projectConfigCleanupFailed')}`);
     }
   }
 
@@ -270,6 +585,8 @@ async function uninstallSingleProject(
     projectScopeProcessed: hasProjectScope,
     targets: results,
     workingDirsRemoved,
+    workingDirsPreserved,
+    workingDirsFailureReason,
     projectInstructionsRemoved,
     summary: {
       targetsProcessed: results.length,
@@ -303,6 +620,7 @@ async function refreshRegistryAfterProjectUninstall(
 async function uninstallAllIndexedProjects(
   options: UninstallOptions,
   log: (message: string) => void,
+  lang: Language,
 ): Promise<void> {
   const registryProjects = await listProjectRegistryEntries({ strict: true });
   const results = [];
@@ -329,28 +647,44 @@ async function uninstallAllIndexedProjects(
   }
 
   if (!options.force && !options.json) {
-    log(
-      `  Comet will uninstall project-scope files from ${runnableProjects.length} indexed project(s):`,
-    );
+    log(`  ${t(lang, 'allIndexedProjects')}: ${runnableProjects.length}`);
     for (const project of runnableProjects) {
       log(`    - ${project.projectPath}`);
       log(`      ${project.targets.map((target) => target.platform.name).join(', ')}`);
     }
     const confirmed = await select({
-      message: 'Proceed with uninstalling all indexed projects?',
+      message: t(lang, 'uninstallAllProjectsPrompt'),
       choices: [
-        { name: 'Yes, uninstall all indexed projects', value: true },
-        { name: 'No, cancel', value: false },
+        { name: t(lang, 'uninstallAllProjectsYes'), value: true },
+        { name: t(lang, 'uninstallAllProjectsNo'), value: false },
       ],
     });
     if (!confirmed) {
-      log('\n  Cancelled.\n');
+      log(`\n  ${t(lang, 'cancelled')}\n`);
       return;
     }
   }
 
+  const selectableTargets = runnableProjects.flatMap(({ targets, registryProject }) =>
+    mergeCleanupTargets(targets, registryProject.lastTargets, true),
+  );
+  const selectedTargets = await resolveTargetSelection(selectableTargets, options, log, lang);
+  if (!selectedTargets) return;
+  const selectedPlatformIds = [...new Set(selectedTargets.map((target) => target.platform.id))];
+  const workflowSelection = await resolveWorkflowSelection(options, lang);
+
   for (const project of runnableProjects) {
     const { projectPath, targets, registryProject } = project;
+    const projectTargets = mergeCleanupTargets(targets, registryProject.lastTargets, true);
+    if (!projectTargets.some((target) => selectedPlatformIds.includes(target.platform.id))) {
+      results.push({
+        projectPath,
+        status: 'skipped',
+        reason: 'no installed platforms selected for this project',
+        targets: [],
+      });
+      continue;
+    }
     try {
       const result = await uninstallSingleProject(
         projectPath,
@@ -360,8 +694,11 @@ async function uninstallAllIndexedProjects(
           allProjects: false,
           currentProject: true,
           force: true,
+          targetPlatforms: selectedPlatformIds,
           recoverProjectCleanup: true,
           recoveryTargets: registryProject.lastTargets,
+          workflows: workflowSelection.workflows,
+          companionSkills: workflowSelection.companionSkills,
         },
         log,
       );
@@ -421,7 +758,7 @@ async function uninstallAllIndexedProjects(
   }
 
   log(
-    `\n  Uninstalled ${results.filter((result) => result.status === 'uninstalled').length} indexed project(s).`,
+    `\n  ${t(lang, 'uninstalledIndexedProjects')} ${results.filter((result) => result.status === 'uninstalled').length}`,
   );
 }
 
@@ -436,22 +773,30 @@ export async function uninstallCommand(
   const registryProjects = await listProjectRegistryEntries({
     strict: options.allProjects === true,
   });
+  const registeredProject = await findProjectRegistryEntry(projectPath, registryProjects);
+  const lang = await resolveUninstallLanguage(projectPath, registeredProject?.lastTargets);
 
-  log(`\n  Comet Uninstall\n`);
+  log(`\n  ${t(lang, 'uninstallTitle')}\n`);
 
-  const scopeMode = await resolveProjectScopeMode('uninstall', options, registryProjects.length);
+  const scopeMode = await resolveProjectScopeMode(
+    'uninstall',
+    options,
+    registryProjects.length,
+    lang,
+  );
   if (scopeMode === 'all-projects') {
-    await uninstallAllIndexedProjects(options, log);
+    await uninstallAllIndexedProjects(options, log, lang);
     return;
   }
 
-  const registeredProject = await findProjectRegistryEntry(projectPath, registryProjects);
   const result = await uninstallSingleProject(
     projectPath,
     {
       ...options,
+      scope: options.scope ?? 'project',
       recoverProjectCleanup: Boolean(registeredProject) && options.scope !== 'global',
       recoveryTargets: registeredProject?.lastTargets,
+      language: lang,
     },
     log,
   );
@@ -461,7 +806,7 @@ export async function uninstallCommand(
       console.log(JSON.stringify(currentProjectJson(result), null, 2));
       return;
     }
-    log('  No Comet installations found. Nothing to uninstall.\n');
+    log(`  ${t(lang, 'noCometInstallationsFound')}\n`);
     return;
   }
 
@@ -472,18 +817,22 @@ export async function uninstallCommand(
     return;
   }
 
-  log(`\n  Summary:`);
-  log(`    Targets: ${result.summary.targetsProcessed}`);
-  log(`    Skills removed: ${result.summary.totalSkillsRemoved}`);
-  log(`    Rules removed: ${result.summary.totalRulesRemoved}`);
-  log(`    Hooks removed: ${result.summary.totalHooksRemoved}`);
+  log(`\n  ${t(lang, 'summary')}`);
+  log(`    ${t(lang, 'summaryTargets')} ${result.summary.targetsProcessed}`);
+  log(`    ${t(lang, 'summarySkillsRemoved')} ${result.summary.totalSkillsRemoved}`);
+  log(`    ${t(lang, 'summaryRules')} ${result.summary.totalRulesRemoved}`);
+  log(`    ${t(lang, 'summaryHooks')} ${result.summary.totalHooksRemoved}`);
   if (result.summary.totalFailures > 0) {
-    log(`    Cleanup failures: ${result.summary.totalFailures}`);
-    log(`\n  Uninstall incomplete. Preserved remaining project state.\n`);
+    log(`    ${t(lang, 'cleanupFailures')} ${result.summary.totalFailures}`);
+    log(`\n  ${t(lang, 'uninstallIncomplete')}\n`);
     return;
   }
   if (result.projectInstructionsRemoved > 0) {
-    log(`    Project instructions removed: ${result.projectInstructionsRemoved}`);
+    log(
+      `    ${formatMessage(lang, 'projectInstructionsRemoved', {
+        count: result.projectInstructionsRemoved,
+      })}`,
+    );
   }
-  log(`\n  Uninstall complete.\n`);
+  log(`\n  ${t(lang, 'uninstallComplete')}\n`);
 }

@@ -5,6 +5,8 @@ description: "Use when the user explicitly invokes /comet-classic, asks to start
 
 # Comet Classic — OpenSpec + Superpowers Dual-Star Development Workflow
 
+Before starting or recovering, read and follow `comet/reference/classic-layout.md`. Every OpenSpec CLI call in this file must use the adapter, and every file path must use the `<classic-*>` logical roots bound by that protocol.
+
 OpenSpec and Superpowers orbit the same goal like a binary star system.
 
 ```
@@ -22,16 +24,16 @@ Agents need only read this section for decision-making. Refer to the Reference A
 
 ### Output Language Rule
 
-Use the configured Comet artifact language as the output language for every OpenSpec and Superpowers artifact. The configured value is a normalized language id, `en` or `zh-CN`. For an existing change, read `language` from `openspec/changes/<name>/.comet.yaml` using `comet state get <name> language`. Before `.comet.yaml` exists, read `classic.language` from project `.comet/config.yaml`, then fall back to global `~/.comet/config.yaml`; if neither exists, fall back to the current user request language. Include the resolved language explicitly in every prompt or ARGUMENTS passed to external OpenSpec/Superpowers skills.
+Use the configured Comet artifact language as the output language for every OpenSpec and Superpowers artifact. The configured value is a normalized language id, `en` or `zh-CN`. For an existing change, read `language` from `<classic-change-dir>/.comet.yaml` using `comet state get <name> language`. Before `.comet.yaml` exists, read `classic.language` from project `.comet/config.yaml`, then fall back to global `~/.comet/config.yaml`; if neither exists, fall back to the current user request language. Include the resolved language explicitly in every prompt or ARGUMENTS passed to external OpenSpec/Superpowers skills.
 
 ### Automatic Phase Detection
 
 **Step 0: Active Change Discovery and Intent Resolution**
 
-1. First load script locations through `comet/reference/scripts.md` and ensure `$COMET_INTENT` is available.
-2. Run `openspec list --json` to collect active changes.
+1. First follow `comet/reference/scripts.md` and run the public `comet` CLI command directly.
+2. Run `comet classic openspec -- list --json` to collect active changes.
 3. Fill a `CometIntentFrame` from the user request, active change list, and necessary repository state.
-4. Prefer `node "$COMET_INTENT" route --stdin` to pass the frame JSON and get the runtime-normalized route. `CometIntentFrame + runtime scorer` is the source of truth; this prose is only for intent recognition slot extraction.
+4. Prefer `comet classic intent route --stdin` to pass the frame JSON and get the runtime-normalized route. `CometIntentFrame + runtime scorer` is the source of truth; this prose is only for intent recognition slot extraction.
 5. Handle the runtime route:
    - `hotfix` → invoke `/comet-hotfix`
    - `tweak` → invoke `/comet-tweak`
@@ -53,7 +55,7 @@ When multiple active changes exist and the user has not selected one, do not bin
 When the user did not explicitly invoke `/comet-classic`, but this repository may already have an active Comet change, run the read-only probe before starting work that may need code changes or investigation:
 
 ```bash
-node "$COMET_RESUME_PROBE" probe --stdin
+comet resume-probe . --stdin --json
 ```
 
 The probe only reads repository state. Follow the returned action:
@@ -120,7 +122,7 @@ Calling `/opsx:new` directly leaves `.comet.yaml` missing and breaks later phase
 
 **Step 1: Read `.comet.yaml` state metadata**
 
-Prefer reading `openspec/changes/<name>/.comet.yaml`. If not available, fall back to `openspec status --change "<name>" --json`, `tasks.md`, and `docs/superpowers/` file checks.
+Prefer reading `<classic-change-dir>/.comet.yaml`. If not available, fall back to `comet classic openspec -- status --change "<name>" --json`, `<classic-change-dir>/tasks.md`, and `<classic-superpowers-root>/` file checks.
 
 **Resume rules**:
 - On every context resume, rerun Step 0 and Step 1; do not trust conversation history for phase detection
@@ -168,7 +170,7 @@ See the "Upgrade Assessment" section of each `comet-hotfix` / `comet-tweak` for 
 
 | Scenario | Handling |
 |----------|----------|
-| `openspec list --json` fails | Check if openspec is installed, prompt user to run `openspec init` |
+| `comet classic openspec -- list --json` fails | Check whether OpenSpec is installed; if the artifact root is missing or damaged, prompt the user to run `comet update --scope project` or rerun `comet init --scope project` |
 | Sub-skill unavailable | Stop workflow, prompt to install or enable the corresponding skill |
 | `.comet.yaml` missing | Enter the relevant preset's `/comet-open` initialization, then run `comet state select`; never skip initialization |
 | `.comet.yaml` malformed | Stop and report the parse error; repair from version control, backup, or verifiable artifacts, never overwrite it with `comet state set` |
@@ -182,7 +184,7 @@ A single `/comet-classic` invocation starts from the detected phase and advances
 
 Flow chain: open → design → build → verify → archive
 
-**Continuous execution requirement**: starting from the detected phase, the agent automatically continues through all later phases. But **auto-advancing only applies at transition points without user decisions**. When encountering user decision points, **must use the current platform's available user input/confirmation mechanism to pause and wait for the user's explicit response**. Must not use recommendation rules, defaults, or historical preferences to substitute for user confirmation, and must not just output a text prompt and then continue executing.
+**Continuous execution requirement**: starting from the detected phase, the agent automatically continues through all later phases. But **auto-advancing only applies at transition points without user decisions**. When encountering user decision points, pause, present clear options, and wait for the user's explicit response. Must not use recommendation rules, defaults, or historical preferences to substitute for user confirmation, and must not just output a text prompt and then continue executing.
 
 **Distinguish phase advancement vs automatic handoff**: each sub-skill runs phase guard `--apply` before exit to advance the `.comet.yaml` `phase` field. This step **always happens** and is not controlled by `auto_transition`. After that, the sub-skill runs `comet state next <name>` to resolve the next action: when `auto_transition` is not `false`, output is `NEXT: auto` (auto-invoke next skill); when `auto_transition` is `false`, output is `NEXT: manual` (do not invoke next skill; return control with `HINT`). `NEXT: manual` is not a user decision point and must not ask whether to continue. Therefore `auto_transition` **only controls next skill invocation, not phase advancement**. Regardless of `auto_transition`, genuine user decision points below remain blocking.
 
@@ -192,7 +194,7 @@ Nodes requiring user participation (pause only at these nodes):
 1. Workflow target selection: multiple active changes, continue an existing change versus create a new one, or choose which completed batch item starts first
 2. Open-phase final proposal/design/tasks review, including the change name and scope; clear requests have no pre-artifact summary/name confirmation
 3. Confirm the design approach during brainstorming
-4. One joint build decision: plan-ready pause or all available workflow settings (workspace isolation + execution method + TDD mode + code review mode, plus branch name when branch is selected)
+4. One joint build decision: plan-ready pause or all workflow settings (workspace isolation + execution method + TDD mode + code review mode, plus branch name when branch is selected)
 5. Verify-phase acceptance of WARNING/SUGGESTION deviations, Spec drift handling, or continue/stop after the 4th failure; the first 3 clearly repairable failures close automatically
 6. Archive phase final confirmation before running the archive script
 7. Choose finishing-branch handling after exact archive changes are committed
@@ -200,13 +202,13 @@ Nodes requiring user participation (pause only at these nodes):
 9. Build phase scope expansion requiring redesign or new change split
 10. Open phase large PRD split confirmation
 
-Agents should not skip these decision points; other unambiguous phase transitions must proceed automatically, must not exit midway. At decision points, **must not skip user confirmation or choose automatically — must explicitly obtain the user's choice through the current platform's available user input/confirmation mechanism before continuing**.
+Agents should not skip these decision points; other unambiguous phase transitions must proceed automatically, must not exit midway. At decision points, **must not skip user confirmation or choose automatically — ask clear options and wait for the user's explicit choice before continuing**.
 
 **Red Flags** — when these thoughts appear, STOP and check:
 
 | Agent Thought | Actual Risk |
 |--------------|-------------|
-| "The user would probably agree with this approach" | Cannot decide for the user — use the current platform's user input/confirmation mechanism |
+| "The user would probably agree with this approach" | Cannot decide for the user — present the choice and wait for the reply |
 | "This is a small change, confirmation isn't needed" | Decision points have no size exception — blocking points must wait |
 | "The user chose A last time, so A again" | Historical preference cannot substitute for current confirmation |
 | "I explained the plan and the user didn't object" | No objection ≠ consent — must use tool to get explicit choice |
@@ -281,9 +283,9 @@ See `comet/reference/decision-point.md` for the complete user decision point pro
 
 See `comet/reference/debug-gate.md` for the complete debug gate protocol.
 
-### Script Location
+### Public CLI
 
-Use the stable `comet` CLI for workflow state, guards, handoff, and archive. Locate internal launchers through `comet/reference/scripts.md` only for intent/resume probes that do not yet have a public subcommand. Key entry points:
+Follow `comet/reference/scripts.md` once per session and use only the public `comet` CLI. Do not search for or invoke internal bundles. Key entry points:
 
 ```bash
 comet guard <change-name> <phase> --apply             # phase guard + state update

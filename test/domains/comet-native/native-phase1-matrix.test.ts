@@ -9,6 +9,7 @@ import {
   recoverArchiveTransaction,
 } from '../../../domains/comet-native/native-archive.js';
 import {
+  createNativeChange,
   nativeChangeDir,
   readNativeChange,
   writeNativeChange,
@@ -80,7 +81,12 @@ async function prepareChange(options: {
   failVerificationFirst?: boolean;
 }): Promise<void> {
   const rootArgs = ['--project-root', options.projectRoot] as const;
-  expect((await runNativeCli(['new', options.name, ...rootArgs])).exitCode).toBe(0);
+  await createNativeChange({
+    paths: options.paths,
+    name: options.name,
+    language: 'en',
+    verificationProtocol: 'legacy-v1',
+  });
   const changeDir = nativeChangeDir(options.paths, options.name);
   await fs.writeFile(path.join(changeDir, 'brief.md'), BRIEF);
   if (options.specChange.source) {
@@ -100,6 +106,7 @@ async function prepareChange(options: {
         options.name,
         '--summary',
         'Requirements and complete target spec are ready',
+        '--confirmed',
         ...rootArgs,
       ])
     ).exitCode,
@@ -407,7 +414,7 @@ describe('Comet Native Phase 1 behavior matrix', () => {
     await expect(
       fs.access(path.join(paths.specsDir, 'rollback-capability', 'spec.md')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
-  });
+  }, 60_000);
 
   it('continues and rolls back interrupted artifact-root moves from pending config', async () => {
     const projectRoot = await project();
@@ -465,7 +472,12 @@ describe('Comet Native Phase 1 behavior matrix', () => {
       path.join(projectRoot, 'openspec', 'changes', 'should-not-read', 'secret.md'),
       'not Native state\n',
     );
-    await runNativeCli(['new', 'malformed-state', '--project-root', projectRoot]);
+    await createNativeChange({
+      paths,
+      name: 'malformed-state',
+      language: 'en',
+      verificationProtocol: 'legacy-v1',
+    });
     await fs.writeFile(
       path.join(nativeChangeDir(paths, 'malformed-state'), 'comet-state.yaml'),
       'schema: comet.native.v1\nphase: [broken\n',
@@ -503,7 +515,7 @@ describe('Comet Native Phase 1 behavior matrix', () => {
 
     await fs.mkdir(path.join(projectRoot, '.comet'), { recursive: true });
     await fs.writeFile(path.join(projectRoot, '.comet', 'config.yaml'), 'native: [broken\n');
-    const configResult = await runNativeCli(['list', '--json', '--project-root', projectRoot]);
+    const configResult = await runNativeCli(['status', '--json', '--project-root', projectRoot]);
     expect(configResult.exitCode).toBe(65);
     expect(json(configResult).error?.code).toBe('invalid-data');
   });

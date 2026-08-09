@@ -2,15 +2,27 @@ import {
   inspectClassicHookGuard,
   listActiveClassicHookChanges,
 } from '../comet-classic/classic-hook-guard.js';
+import { ClassicLayoutUnavailableError } from '../comet-classic/classic-layout.js';
 import { resolveCurrentChange } from '../comet-classic/classic-current-change.js';
 import {
   inspectNativeHookGuard,
   listActiveNativeHookChanges,
 } from '../comet-native/native-hook-guard.js';
-import { readProjectConfig } from '../comet-native/native-config.js';
+import { memoizedHookRead } from '../../platform/process/hook-read-cache.js';
+import { readWorkflowProjectConfig } from '../workflow-contract/project-config-reader.js';
 import { readCometCurrentSelection } from './current-selection.js';
+import { readCachedProjectConfig } from './entry-reads.js';
+import { scopeCometHookTargets } from '../workflow-contract/hook-target-scope.js';
 import type { CometHookDecision, CometHookRequest } from './hook-types.js';
 import type { CometWorkflow } from './types.js';
+
+// Wrap the hot reads so that within one Hook decision the router and the
+// delegated Classic/Native Guard share a single config + selection read
+// instead of each re-opening the same files.
+const readCachedCurrentSelection = memoizedHookRead(
+  'readCometCurrentSelection',
+  (projectRoot: string) => readCometCurrentSelection(projectRoot),
+);
 
 export interface ActiveHookChange {
   workflow: CometWorkflow;
@@ -18,17 +30,26 @@ export interface ActiveHookChange {
   phase: string;
 }
 
+interface StaleHookSelection {
+  code: 'target-missing';
+  reason: string;
+}
+
 export type HookWorkflowOwnerResolution =
-  | { status: 'none' }
-  | { status: 'owned' | 'inferred'; owner: ActiveHookChange }
-  | { status: 'ambiguous'; candidates: ActiveHookChange[] }
+  | { status: 'none'; staleSelection?: StaleHookSelection }
+  | { status: 'owned'; owner: ActiveHookChange }
+  | { status: 'inferred'; owner: ActiveHookChange; staleSelection?: StaleHookSelection }
+  | {
+      status: 'ambiguous';
+      candidates: ActiveHookChange[];
+      staleSelection?: StaleHookSelection;
+    }
   | {
       status: 'stale';
       code:
         | 'selection-unreadable'
         | 'change-state-unreadable'
         | 'workflow-disabled'
-        | 'target-missing'
         | 'classic-selection-invalid';
       reason: string;
     };
@@ -38,6 +59,7 @@ interface HookRouterDependencies {
   listClassic: typeof listActiveClassicHookChanges;
   inspectNative: typeof inspectNativeHookGuard;
   inspectClassic: typeof inspectClassicHookGuard;
+  scopeTargets?: typeof scopeCometHookTargets;
 }
 
 const DEFAULT_DEPENDENCIES: HookRouterDependencies = {
@@ -47,20 +69,63 @@ const DEFAULT_DEPENDENCIES: HookRouterDependencies = {
   inspectClassic: inspectClassicHookGuard,
 };
 
-function enabledWorkflows(config: Awaited<ReturnType<typeof readProjectConfig>>): CometWorkflow[] {
+function enabledWorkflows(
+  config: Awaited<ReturnType<typeof readWorkflowProjectConfig>>,
+): CometWorkflow[] {
   if (!config) return ['classic'];
   return config.workflows ?? [config.default_workflow];
+}
+
+async function listEnabledActiveChanges(
+  projectRoot: string,
+  enabled: CometWorkflow[],
+  dependencies: Pick<HookRouterDependencies, 'listNative' | 'listClassic'>,
+  cached?: { workflow: CometWorkflow; candidates: ActiveHookChange[] },
+  options: { tolerateUnavailableClassic?: boolean } = {},
+): Promise<ActiveHookChange[]> {
+  const listClassic = async (): Promise<ActiveHookChange[]> => {
+    if (!enabled.includes('classic')) return [];
+    if (cached?.workflow === 'classic') return cached.candidates;
+    try {
+      return await dependencies.listClassic(projectRoot);
+    } catch (error) {
+      if (options.tolerateUnavailableClassic && error instanceof ClassicLayoutUnavailableError) {
+        return [];
+      }
+      throw error;
+    }
+  };
+  const [native, classic] = await Promise.all([
+    enabled.includes('native')
+      ? cached?.workflow === 'native'
+        ? cached.candidates
+        : dependencies.listNative(projectRoot)
+      : [],
+    listClassic(),
+  ]);
+  return [...native, ...classic];
+}
+
+function resolveActiveCandidates(
+  candidates: ActiveHookChange[],
+  staleSelection?: StaleHookSelection,
+): HookWorkflowOwnerResolution {
+  if (candidates.length === 0) return { status: 'none', staleSelection };
+  if (candidates.length === 1) {
+    return { status: 'inferred', owner: candidates[0], staleSelection };
+  }
+  return { status: 'ambiguous', candidates, staleSelection };
 }
 
 export async function resolveHookWorkflowOwner(
   projectRoot: string,
   dependencies: Pick<HookRouterDependencies, 'listNative' | 'listClassic'> = DEFAULT_DEPENDENCIES,
 ): Promise<HookWorkflowOwnerResolution> {
-  const config = await readProjectConfig(projectRoot);
+  const config = await readCachedProjectConfig(projectRoot);
   const enabled = enabledWorkflows(config);
   let current;
   try {
-    current = await readCometCurrentSelection(projectRoot);
+    current = await readCachedCurrentSelection(projectRoot);
   } catch (error) {
     return {
       status: 'stale',
@@ -93,11 +158,23 @@ export async function resolveHookWorkflowOwner(
     }
     const owner = selectedCandidates.find((candidate) => candidate.name === selection.change);
     if (!owner) {
-      return {
-        status: 'stale',
+      const staleSelection: StaleHookSelection = {
         code: 'target-missing',
         reason: `selected ${selection.workflow} change '${selection.change}' is missing or archived`,
       };
+      try {
+        const candidates = await listEnabledActiveChanges(projectRoot, enabled, dependencies, {
+          workflow: selection.workflow,
+          candidates: selectedCandidates,
+        });
+        return resolveActiveCandidates(candidates, staleSelection);
+      } catch (error) {
+        return {
+          status: 'stale',
+          code: 'change-state-unreadable',
+          reason: `cannot safely enumerate active Comet changes: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
     }
     if (selection.workflow === 'classic') {
       const resolved = await resolveCurrentChange(projectRoot);
@@ -115,13 +192,17 @@ export async function resolveHookWorkflowOwner(
     return { status: 'owned', owner };
   }
 
-  let native: ActiveHookChange[];
-  let classic: ActiveHookChange[];
   try {
-    [native, classic] = await Promise.all([
-      enabled.includes('native') ? dependencies.listNative(projectRoot) : Promise.resolve([]),
-      enabled.includes('classic') ? dependencies.listClassic(projectRoot) : Promise.resolve([]),
-    ]);
+    const candidates = await listEnabledActiveChanges(
+      projectRoot,
+      enabled,
+      dependencies,
+      undefined,
+      {
+        tolerateUnavailableClassic: true,
+      },
+    );
+    return resolveActiveCandidates(candidates);
   } catch (error) {
     return {
       status: 'stale',
@@ -129,11 +210,6 @@ export async function resolveHookWorkflowOwner(
       reason: `cannot safely enumerate active Comet changes: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  const candidates: ActiveHookChange[] = [...native, ...classic];
-
-  if (candidates.length === 0) return { status: 'none' };
-  if (candidates.length === 1) return { status: 'inferred', owner: candidates[0] };
-  return { status: 'ambiguous', candidates };
 }
 
 export async function inspectCometHook(
@@ -143,6 +219,30 @@ export async function inspectCometHook(
 ): Promise<CometHookDecision> {
   if (request.intent === 'non-write') {
     return { allowed: true, reason: 'Hook event is not a write' };
+  }
+  if (request.intent === 'unknown' || request.targets.length === 0) {
+    return { allowed: true, reason: 'Hook write target is outside Comet attribution' };
+  }
+
+  let projectRequest: CometHookRequest;
+  try {
+    const scoped = await (dependencies.scopeTargets ?? scopeCometHookTargets)(
+      projectRoot,
+      request.targets,
+    );
+    if (scoped.projectTargets.length === 0) {
+      return { allowed: true, reason: 'Write targets are outside the guarded project' };
+    }
+    projectRequest = { ...request, targets: scoped.projectTargets };
+  } catch (error) {
+    return {
+      allowed: false,
+      reason: [
+        'Comet Hook Router scope could not be determined safely.',
+        `Reason: ${error instanceof Error ? error.message : String(error)}`,
+        'Next: verify that the project root is accessible, then retry the write.',
+      ].join(' '),
+    };
   }
 
   try {
@@ -167,8 +267,8 @@ export async function inspectCometHook(
 
     const owner = resolution.owner;
     return owner.workflow === 'native'
-      ? dependencies.inspectNative(projectRoot, request, owner.name)
-      : dependencies.inspectClassic(projectRoot, owner.name, request);
+      ? dependencies.inspectNative(projectRoot, projectRequest, owner.name)
+      : dependencies.inspectClassic(projectRoot, owner.name, projectRequest);
   } catch (error) {
     return {
       allowed: false,

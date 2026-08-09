@@ -117,6 +117,18 @@ npm install -g @rpamis/comet
 
 ## 快速开始
 
+一次全局初始化即可让已选宿主中的 `/comet` 在所有项目可用：
+
+```bash
+comet init --scope global
+cd your-project
+# 在宿主中调用 /comet
+```
+
+首次在一个尚未配置的项目中调用 `/comet` 时，Comet 会把 `~/.comet/config.yaml` 中的全局默认值固化为项目的 `.comet/config.yaml`，并只在该项目内创建产物目录。之后修改全局默认值不会改写已经激活的项目。Hook 继续识别这份项目配置与 `.comet/current-change.json`；仅触发 Hook、`comet status` 或普通只读解析不会自动初始化项目。
+
+如需把 Skill、Rule 与 Hook 直接复制到项目，或显式覆盖该项目的工作流设置，仍可执行项目初始化：
+
 ```bash
 cd your-project
 comet init
@@ -140,6 +152,7 @@ Classic 专属默认值统一收纳在 `classic:` 块中；旧顶层字段会在
 
 ```yaml
 classic:
+  artifact_layout: docs
   language: zh-CN
   context_compression: off
   review_mode: standard
@@ -194,15 +207,17 @@ Comet Eval的自动化双Agent架构能够在线上与LangSmith/LangFuse环境�
 <details>
 <summary><code>comet init [path]</code> — 初始化 Comet 工作流</summary>
 
-为选定的 AI 编码平台初始化 Comet。交互模式可选择 Native、Classic 或两者；新的非交互项目默认使用自包含 Native，检测到既有 Classic 状态时保持 Classic。两套工作流拥有独立入口、状态、产物与 Guard；每个平台只安装一份 `comet-workflow-guard` Rule，支持 Hook 的平台只安装一个 `comet-hook-router.mjs`。Router 根据 `.comet/current-change.json`，一次只把写入路由给当前 Native 或 Classic Guard。只有 Classic 安装 OpenSpec 和 Superpowers，Native 不依赖外部 Skill。
+为选定的 AI 编码平台初始化 Comet。交互模式可选择 Native、Classic 或两者；新的非交互项目默认使用自包含 Native，检测到既有 Classic 状态时保持 Classic。传入 `--platform` 时只初始化该平台；未知但合法的平台 id 会作为项目内自定义平台安装到 `.<platform>/`，包含所选 workflow 的 skills、scripts、rules 与 hooks。两套工作流拥有独立入口、状态、产物与 Guard；每个平台只安装一份 `comet-workflow-guard` Rule，支持 Hook 的平台只安装一个 `comet-hook-router.mjs`。Router 根据 `.comet/current-change.json`，一次只把写入路由给当前 Native 或 Classic Guard。只有 Classic 安装 OpenSpec 和 Superpowers，Native 不依赖外部 Skill。
 
 | 选项                | 描述                                                 |
 | ------------------- | ---------------------------------------------------- |
 | `--yes`             | 非交互模式，自动选择已检测平台（未检测到则选择全部） |
 | `--scope <scope>`   | 安装范围：`project` 或 `global`                      |
 | `--language <lang>` | 技能语言：`en` 或 `zh`（跳过交互式语言选择）         |
+| `--platform <platform>` | 只初始化指定平台；项目范围内可使用自定义平台 id |
 | `--workflow <mode>` | 初始化工作流：`native`、`classic` 或 `both`          |
-| `--root <path>`     | Native 的项目内产物根目录，例如 `docs`               |
+| `--root <path>`     | Native 的项目内产物根目录；全局范围时保存为项目相对默认值 |
+| `--codegraph <action>` | 非交互式项目索引操作：显式选择 `init` 或 `skip`    |
 | `--skip-existing`   | 跳过已安装的组件                                     |
 | `--overwrite`       | 覆盖已安装的组件                                     |
 | `--json`            | 输出结构化 JSON                                      |
@@ -254,25 +269,28 @@ Comet Eval的自动化双Agent架构能够在线上与LangSmith/LangFuse环境�
 <details>
 <summary><code>comet doctor [path]</code> — 诊断 Comet 安装健康状态</summary>
 
-检查项目级/全局安装、工作目录、已安装技能、脚本，以及活跃 change 的诊断信息。`comet doctor` 会对畸形
-`.comet.yaml` 报告 diagnostic 状态，对有效 change 报告 current step / runtime mode，并指出哪些运行时证据缺失导致无法安全恢复。
+检查项目级/全局安装、工作目录、已安装技能、脚本、CodeGraph 索引，以及活跃 change 的诊断信息。`comet doctor` 会对畸形
+`.comet.yaml` 报告 diagnostic 状态，对有效 change 报告 current step / runtime mode，并指出哪些运行时证据缺失导致无法安全恢复。在 Git secondary worktree 中，它会分别报告当前 worktree、primary worktree 与 global fallback 的安装状态；primary 中被忽略的资产只用于分类，不会跨 worktree 执行。
 
-| 选项              | 描述                                                    |
-| ----------------- | ------------------------------------------------------- |
-| `--json`          | 输出结构化诊断结果                                      |
-| `--scope <scope>` | 诊断 `auto`、`project` 或 `global` 范围（默认：`auto`） |
+| 选项              | 描述                                                                         |
+| ----------------- | ---------------------------------------------------------------------------- |
+| `--json`          | 输出结构化诊断结果，包括 CodeGraph 状态与有效 runtime 来源                   |
+| `--scope <scope>` | 诊断 `auto`、`project` 或 `global` 范围（默认：`auto`）                      |
+| `--repair`        | 修复可确定恢复的托管安装与状态                                                |
+| `--yes`           | 与 `--repair` 同用，显式授权 CodeGraph 初始化、重建或同步等可能耗时的项目修复 |
 
 </details>
 
 <details>
 <summary><code>comet update [path]</code> — 更新 Comet 包和技能</summary>
 
-刷新已检测到的项目级/全局 Comet 技能。仅刷新当前项目时默认不会修改任何 npm 安装（包括全局包和项目级包）；需要同时升级 CLI 时必须显式传入 `--self-update`。显式 `--scope global` 会确定性走 current-project 资产范围，不会进入 all-projects 选择，也不会隐式更新 npm 包。自更新会先比较完整 semver（包括预发布版本），拒绝降级，并在安装前隔离验证候选包的版本、Workflow 与 Native 命令；安装失败时尝试恢复精确的当前版本。
+刷新已检测到的项目级/全局 Comet 技能；传入 `--platform` 时只刷新该平台，也可在项目范围内刷新自定义平台。仅刷新当前项目时默认不会修改任何 npm 安装（包括全局包和项目级包）；需要同时升级 CLI 时必须显式传入 `--self-update`。显式 `--scope global` 会确定性走 current-project 资产范围，不会进入 all-projects 选择，也不会隐式更新 npm 包。自更新会先比较完整 semver（包括预发布版本），拒绝降级，并在安装前隔离验证候选包的版本、Workflow 与 Native 命令；安装失败时尝试恢复精确的当前版本。
 
 | 选项                 | 描述                                      |
 | -------------------- | ----------------------------------------- |
 | `--json`             | 以 JSON 输出 npm 和 skill 更新结果        |
 | `--language <lang>`  | 覆盖自动检测到的 skill 语言 (`en`, `zh`)  |
+| `--platform <platform>` | 只刷新指定平台；项目范围内可使用自定义平台 id |
 | `--scope <scope>`    | 仅更新 `global` 或 `project` 安装范围     |
 | `--current-project`  | 只刷新当前项目                            |
 | `--all-projects`     | 刷新登记的所有项目级安装                  |
@@ -570,11 +588,11 @@ Classic 使用解耦状态架构，文件独立管理：
 | 文件                                      | 归属     | 用途                           |
 | ----------------------------------------- | -------- | ------------------------------ |
 | `.openspec.yaml`                          | OpenSpec | Spec 生命周期、变更元数据      |
-| `openspec/changes/<name>/.comet.yaml`     | Comet    | 工作流阶段、执行模式、验证状态 |
+| `<classic-change-dir>/.comet.yaml`        | Comet    | 工作流阶段、执行模式、验证状态 |
 | `.comet/run-state.json`                   | Engine   | Run 身份和执行状态（机器所有） |
 | `.comet/state-events.jsonl`               | Comet    | 追加式状态转移审计日志         |
 
-每个 change 目录下的 `.comet.yaml` 保存 Classic 工作流状态，只保留 `run_id` 指向 Engine Run。Engine 的机器状态放在
+每个 change 目录下的 `.comet.yaml` 保存 Classic 工作流状态，只保留 `run_id` 指向 Engine Run。`<classic-change-dir>` 由项目的 `classic.artifact_layout` 解析；可用 `comet classic root show` 查看当前 OpenSpec 根。Engine 的机器状态放在
 该 change 的 `.comet/run-state.json`，使用 `currentStep`、`status`、`iteration` 等 camelCase 字段；旧 YAML 中残留的 Run 字段会在兼容读取后迁移出去，`skill` 不再是当前 `.comet.yaml` 的合法字段。项目级默认配置只放在 `.comet/config.yaml`。
 
 阶段推进由 TypeScript transition table、`comet-state transition`、`comet-guard --apply` 和归档命令统一处理。
@@ -721,23 +739,29 @@ your-project/
 │   ├── comet-*/SKILL.md
 │   ├── openspec-*/SKILL.md
 │   └── brainstorming/SKILL.md
-├── openspec/                    # OpenSpec — WHAT
-│   ├── config.yaml
-│   └── changes/
-│       └── <name>/
-│           ├── .openspec.yaml       # OpenSpec 状态
-│           ├── .comet.yaml          # Comet 工作流状态（Classic 字段 + run_id 关联）
-│           ├── .comet/
-│           │   ├── run-state.json   # Engine Run 状态（机器所有，自动迁移）
-│           │   └── state-events.jsonl # 状态转移审计日志（追加式）
-│           ├── proposal.md
-│           ├── design.md
-│           ├── specs/<capability>/spec.md
-│           └── tasks.md
-└── docs/superpowers/            # Superpowers — HOW
-    ├── specs/                   # 设计文档
-    └── plans/                   # 实现计划
+└── docs/
+    ├── openspec/                    # OpenSpec — WHAT（classic.artifact_layout: docs）
+    │   ├── config.yaml
+    │   ├── specs/<capability>/spec.md # 归档后的主 spec
+    │   └── changes/
+    │       ├── archive/YYYY-MM-DD-<name>/ # 已归档 change
+    │       └── <name>/
+    │           ├── .openspec.yaml       # OpenSpec 状态
+    │           ├── .comet.yaml          # Comet 工作流状态（Classic 字段 + run_id 关联）
+    │           ├── .comet/
+    │           │   ├── run-state.json   # Engine Run 状态（机器所有，自动迁移）
+    │           │   └── state-events.jsonl # 状态转移审计日志（追加式）
+    │           ├── proposal.md
+    │           ├── design.md
+    │           ├── specs/<capability>/spec.md
+    │           └── tasks.md
+    └── superpowers/                 # Superpowers — HOW
+        ├── specs/                   # 设计文档
+        ├── plans/                   # 实现计划
+        └── reports/                 # 验证报告
 ```
+
+新建的 Classic 和双工作流项目默认使用 `classic.artifact_layout: docs`。保留旧布局的项目继续把 OpenSpec 根目录放在仓库根的 `openspec/`，Superpowers 产物仍位于 `docs/superpowers/`。可用 `comet classic root show` 查看当前布局；迁移时先运行 `comet classic root move docs --dry-run`，再按计划执行 `--apply`，不要只修改配置字段。
 
 </details>
 
@@ -793,7 +817,7 @@ Benchmark 核心结论：
 
 ## Star历史
 
-[![Star History Chart](https://api.star-history.com/chart?repos=rpamis/comet&type=date&legend=top-left&sealed_token=vRfs1efclBxdyNz7q0GUHGe9kUU96aSUCa1eHI8CEWehNHvZoop01eCjM0jpVMgeYBjvnGBcd0OUHnhQBC8p6gXP2Drpmo3pLXl_r0prKSuNW6OTqddOBCgaPtSt_KDlRgXjHZhx94_zcXWkIg5HOJEjPq4Qp2TMEa6inFxm7TixQQRIdPgKw2Z00nie)](https://www.star-history.com/?repos=rpamis%2Fcomet&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=rpamis/comet&type=date&legend=top-left&sealed_token=UMxkYc2GrflG4LawVBIB1HY-k5O2WqatK4llgyINHBnPZRAl9PdOtca_ciCdXoKWpzzOF_K2YLyQ0CQ1Lx1tJjeO53J5mgRo9yK0DanAT_ClPsf4O2XxBQ)](https://www.star-history.com/?repos=rpamis%2Fcomet&type=date&legend=top-left)
 
 ## Contributors
 

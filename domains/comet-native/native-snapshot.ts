@@ -4,6 +4,11 @@ import { promises as fs } from 'fs';
 import path from 'path';
 
 import { atomicWriteJson } from './native-atomic-file.js';
+import {
+  DEFAULT_NATIVE_SNAPSHOT_CONFIG,
+  normalizeNativeSnapshotPattern,
+  readProjectConfig,
+} from './native-config.js';
 import { sha256Text } from './native-hash.js';
 import { hasComparableNativeFileObject, sameNativeFileObject } from './native-file-identity.js';
 import { isInsidePath, resolveContainedNativePath } from './native-paths.js';
@@ -18,6 +23,7 @@ import type {
   NativeSnapshotEntry,
   NativeSnapshotOmission,
   NativeSnapshotOmissionOverflow,
+  NativeSnapshotPolicy,
 } from './native-types.js';
 
 export const DEFAULT_NATIVE_SNAPSHOT_LIMITS = {
@@ -41,8 +47,16 @@ const MANIFEST_KEYS = new Set([
   'omitted',
   'omittedCount',
   'omissionOverflow',
+  'policy',
 ]);
-const LIMIT_KEYS = new Set(['maxFiles', 'maxFileBytes', 'maxTotalBytes', 'maxManifestBytes']);
+const LIMIT_KEYS = new Set([
+  'maxFiles',
+  'maxFileBytes',
+  'maxTotalBytes',
+  'maxManifestBytes',
+  'maxDurationMs',
+]);
+const POLICY_KEYS = new Set(['schema', 'include', 'exclude', 'hash']);
 const CAPTURE_KEYS = new Set(['provider', 'gitSelection', 'physicalSelection', 'projection']);
 const GIT_PROJECTION_KEYS = new Set(['provider', 'selection']);
 const GIT_SELECTION_KEYS = new Set([
@@ -72,7 +86,7 @@ const PHYSICAL_SELECTION_STREAM_KEYS = new Set([
   'overflow',
   'unstable',
 ]);
-const ENTRY_KEYS = new Set(['path', 'hash', 'size', 'type']);
+const ENTRY_KEYS = new Set(['path', 'hash', 'size', 'type', 'gitObjectId']);
 const OMISSION_KEYS = new Set(['path', 'size', 'type', 'reason']);
 const OMISSION_OVERFLOW_KEYS = new Set(['ref', 'hash', 'count']);
 const SNAPSHOT_ORIGINS = new Set<NativeContentSnapshotManifest['origin']>([
@@ -105,6 +119,7 @@ interface SnapshotOptions {
   now?: Date;
   origin?: NativeContentSnapshotManifest['origin'];
   limits?: Partial<NativeContentSnapshotManifest['limits']>;
+  policy?: Pick<NativeSnapshotPolicy, 'include' | 'exclude'> | NativeSnapshotPolicy;
   denylist?: readonly string[];
   gitSelectionLimits?: Partial<NativeGitSelectionLimits>;
   gitSelectionHooks?: NativeGitSelectionHooks;
@@ -116,6 +131,14 @@ interface SnapshotOptions {
    */
   deadlineMs?: number;
   gitProcess?: NativeGitProcessAdapter;
+  /**
+   * When set, the snapshot reuses baseline entry hashes for Git-tracked files whose blob object id
+   * is unchanged since baseline, instead of re-reading and re-hashing them. Only changed, added,
+   * and working-tree-modified files are captured from disk. The resulting manifest is byte-for-byte
+   * equivalent to a full snapshot (same entries ⇒ same projection hash). Ignored for non-Git
+   * projects and when baseline entries lack the recorded gitObjectId.
+   */
+  incrementalBaseline?: NativeContentSnapshotManifest;
 }
 
 interface NativeGitProcessAdapter {
@@ -151,6 +174,7 @@ interface NativeGitSelectionHooks {
   afterCombined?: () => void | Promise<void>;
   afterInitialSelection?: () => void | Promise<void>;
   afterFirstEntryCaptured?: (relative: string) => void | Promise<void>;
+  afterContentRevalidation?: () => void | Promise<void>;
   outputChunkBytes?: number;
 }
 
@@ -165,6 +189,12 @@ interface NativeGitSnapshotSelection {
   untracked: Set<string>;
   gitlinks: Set<string>;
   nestedRepositories: Set<string>;
+  /**
+   * Git blob object id for each tracked file (from `git ls-files --stage`).
+   * Used by the incremental snapshot path to detect unchanged files without
+   * re-reading them. Absent for non-staged and untracked paths.
+   */
+  trackedObjectIds: Map<string, string>;
   omissions: NativeSnapshotOmission[];
   overflow: NativeGitSelectionOverflow | null;
   evidence: NativeGitSelectionEvidence | null;
@@ -718,13 +748,26 @@ interface NativeGitSelectionResults {
 
 async function readNativeGitSelectionResults(
   execution: NativeSnapshotExecution,
-  projectRoot: string,
+  paths: NativeProjectPaths,
   limits: NativeGitSelectionLimits,
   hooks: Pick<
     NativeGitSelectionHooks,
     'afterStageBefore' | 'afterCombined' | 'outputChunkBytes'
   > = {},
 ): Promise<NativeGitSelectionResults> {
+  const projectRoot = path.resolve(paths.projectRoot);
+  const selectionFile = path.join(projectRoot, '.comet', 'current-change.json');
+  const excludedRefs = [paths.nativeRoot, paths.configFile, selectionFile].map((target) => {
+    const relative = path.relative(projectRoot, path.resolve(target)).replaceAll('\\', '/');
+    const safe = safeGitProjectPath(relative);
+    if (safe === null) throw new Error('Native Git snapshot exclusion escaped the project root');
+    return safe;
+  });
+  const pathspecs = [
+    '--',
+    '.',
+    ...excludedRefs.flatMap((relative) => [`:(exclude)${relative}`, `:(exclude)${relative}/**`]),
+  ];
   const options: GitNullRecordOptions = {
     ...limits,
     ...(hooks.outputChunkBytes === undefined ? {} : { outputChunkBytes: hooks.outputChunkBytes }),
@@ -732,21 +775,21 @@ async function readNativeGitSelectionResults(
   const stagedBefore = await runGitNullRecords(
     execution,
     projectRoot,
-    ['ls-files', '--stage', '-z'],
+    ['ls-files', '--stage', '-z', ...pathspecs],
     options,
   );
   await hooks.afterStageBefore?.();
   const combined = await runGitNullRecords(
     execution,
     projectRoot,
-    ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],
+    ['ls-files', '--cached', '--others', '--exclude-standard', '-z', ...pathspecs],
     options,
   );
   await hooks.afterCombined?.();
   const stagedAfter = await runGitNullRecords(
     execution,
     projectRoot,
-    ['ls-files', '--stage', '-z'],
+    ['ls-files', '--stage', '-z', ...pathspecs],
     options,
   );
   return { stagedBefore, combined, stagedAfter };
@@ -762,10 +805,11 @@ function gitSelectionFence(results: NativeGitSelectionResults): NativeGitSelecti
 
 async function nativeGitSnapshotSelection(
   execution: NativeSnapshotExecution,
-  projectRoot: string,
+  paths: NativeProjectPaths,
   limits: NativeGitSelectionLimits = DEFAULT_NATIVE_GIT_SELECTION_LIMITS,
   hooks: NativeGitSelectionHooks = {},
 ): Promise<NativeGitSnapshotSelection | null> {
+  const projectRoot = path.resolve(paths.projectRoot);
   if (!(await hasGitMetadataBoundary(projectRoot))) return null;
   let insideWorktree: Buffer;
   try {
@@ -784,7 +828,7 @@ async function nativeGitSnapshotSelection(
   }
   let results: NativeGitSelectionResults;
   try {
-    results = await readNativeGitSelectionResults(execution, projectRoot, limits, hooks);
+    results = await readNativeGitSelectionResults(execution, paths, limits, hooks);
   } catch (error) {
     if (isNativeGitSnapshotTimeout(error)) throw error;
     throw new Error('Native Git snapshot provider failed after repository detection', {
@@ -794,6 +838,7 @@ async function nativeGitSnapshotSelection(
   const { stagedBefore, combined, stagedAfter } = results;
 
   const tracked = new Set<string>();
+  const trackedObjectIds = new Map<string, string>();
   const gitlinks = new Set<string>();
   const addStagedRecords = (records: readonly Buffer[]): void => {
     for (const encoded of records) {
@@ -814,6 +859,7 @@ async function nativeGitSnapshotSelection(
         throw new Error('Native Git snapshot provider returned an unsafe staged path');
       }
       tracked.add(relative);
+      if (header.stage === '0') trackedObjectIds.set(relative, header.objectId);
       if (header.mode === '160000' && header.stage === '0') gitlinks.add(relative);
     }
   };
@@ -831,6 +877,7 @@ async function nativeGitSnapshotSelection(
   for (const gitlink of gitlinks) nestedRepositories.delete(gitlink);
   return {
     tracked,
+    trackedObjectIds,
     untracked,
     gitlinks,
     nestedRepositories,
@@ -872,14 +919,14 @@ function gitSelectionChanged(
 
 async function finalizeNativeGitSnapshotSelection(
   execution: NativeSnapshotExecution,
-  projectRoot: string,
+  paths: NativeProjectPaths,
   limits: NativeGitSelectionLimits,
   selection: NativeGitSnapshotSelection,
   outputChunkBytes?: number,
 ): Promise<void> {
   let finalResults: NativeGitSelectionResults;
   try {
-    finalResults = await readNativeGitSelectionResults(execution, projectRoot, limits, {
+    finalResults = await readNativeGitSelectionResults(execution, paths, limits, {
       ...(outputChunkBytes === undefined ? {} : { outputChunkBytes }),
     });
   } catch (error) {
@@ -954,6 +1001,7 @@ async function nativePhysicalSnapshotSelection(options: {
   physicalProjectRoot: string;
   physicalNativeRoot: string;
   denylist: readonly string[];
+  policy?: ResolvedSnapshotPolicy;
   limits: NativePhysicalSelectionLimits;
   hooks?: NativePhysicalSelectionHooks;
 }): Promise<NativePhysicalSnapshotSelection> {
@@ -1085,6 +1133,7 @@ async function nativePhysicalSnapshotSelection(options: {
         if (!hasExecutionBudget()) break;
         const type = physicalSelectionRecordType(stat);
         if (type === 'directory') {
+          if (snapshotPolicyExcludesDirectory(options.policy, relative)) continue;
           if (!hasExecutionBudget()) break;
           let realDirectory: string;
           try {
@@ -1334,6 +1383,180 @@ function serializedManifestBytes(manifest: NativeContentSnapshotManifest): numbe
   return Buffer.byteLength(JSON.stringify(manifest, null, 2) + '\n');
 }
 
+function snapshotPolicyHash(include: readonly string[], exclude: readonly string[]): string {
+  return sha256Text(
+    `comet.native.snapshot-policy.v1\n${JSON.stringify({ include, exclude, hash: 'sha256' })}`,
+  );
+}
+
+type SnapshotPatternToken =
+  | { kind: 'literal'; value: string }
+  | { kind: 'question' | 'star' | 'globstar' | 'globstar-slash' };
+
+type SnapshotPatternMatcher = (relative: string, hasBudget?: () => boolean) => boolean;
+
+interface ResolvedSnapshotPolicy {
+  manifest: NativeSnapshotPolicy;
+  includeMatchers: SnapshotPatternMatcher[];
+  excludeMatchers: SnapshotPatternMatcher[];
+  excludedDirectoryPrefixes: string[];
+}
+
+function epsilonClosure(
+  tokens: readonly SnapshotPatternToken[],
+  positions: ReadonlySet<number>,
+  checkpoint?: () => boolean,
+): Set<number> | null {
+  const closure = new Set(positions);
+  const pending = [...positions];
+  while (pending.length > 0) {
+    if (checkpoint && !checkpoint()) return null;
+    const position = pending.pop()!;
+    const token = tokens[position];
+    if (
+      token &&
+      (token.kind === 'star' || token.kind === 'globstar' || token.kind === 'globstar-slash') &&
+      !closure.has(position + 1)
+    ) {
+      closure.add(position + 1);
+      pending.push(position + 1);
+    }
+  }
+  return closure;
+}
+
+function cooperativePatternCheckpoint(hasBudget: () => boolean): () => boolean {
+  let operationsUntilCheck = 0;
+  return (): boolean => {
+    if (operationsUntilCheck > 0) {
+      operationsUntilCheck -= 1;
+      return true;
+    }
+    if (!hasBudget()) return false;
+    operationsUntilCheck = 63;
+    return true;
+  };
+}
+
+export function compileNativeSnapshotPattern(pattern: string): SnapshotPatternMatcher {
+  const normalized = normalizeNativeSnapshotPattern(pattern, 'Native snapshot pattern');
+  const tokens: SnapshotPatternToken[] = [];
+  for (let index = 0; index < normalized.length; index += 1) {
+    const character = normalized[index]!;
+    if (character === '*' && normalized[index + 1] === '*') {
+      index += 1;
+      if (normalized[index + 1] === '/') {
+        index += 1;
+        tokens.push({ kind: 'globstar-slash' });
+      } else {
+        tokens.push({ kind: 'globstar' });
+      }
+    } else if (character === '*') {
+      tokens.push({ kind: 'star' });
+    } else if (character === '?') {
+      tokens.push({ kind: 'question' });
+    } else {
+      tokens.push({ kind: 'literal', value: character });
+    }
+  }
+
+  return (relative: string, hasBudget?: () => boolean): boolean => {
+    const checkpoint = hasBudget ? cooperativePatternCheckpoint(hasBudget) : undefined;
+    if (checkpoint && !checkpoint()) return false;
+    let positions = epsilonClosure(tokens, new Set([0]), checkpoint);
+    if (positions === null) return false;
+    for (const character of relative) {
+      if (checkpoint && !checkpoint()) return false;
+      const next = new Set<number>();
+      for (const position of positions) {
+        if (checkpoint && !checkpoint()) return false;
+        const token = tokens[position];
+        if (!token) continue;
+        if (token.kind === 'literal' && token.value === character) {
+          next.add(position + 1);
+        } else if (token.kind === 'question' && character !== '/') {
+          next.add(position + 1);
+        } else if (token.kind === 'star' && character !== '/') {
+          next.add(position);
+        } else if (token.kind === 'globstar') {
+          next.add(position);
+        } else if (token.kind === 'globstar-slash') {
+          next.add(position);
+          if (character === '/') next.add(position + 1);
+        }
+      }
+      positions = epsilonClosure(tokens, next, checkpoint);
+      if (positions === null) return false;
+      if (positions.size === 0) return false;
+    }
+    return epsilonClosure(tokens, positions, checkpoint)?.has(tokens.length) ?? false;
+  };
+}
+
+function resolveSnapshotPolicy(
+  value: SnapshotOptions['policy'],
+): ResolvedSnapshotPolicy | undefined {
+  if (value === undefined) return undefined;
+  const include = [
+    ...new Set(value.include.map((item) => normalizeNativeSnapshotPattern(item, 'include'))),
+  ].sort((left, right) => left.localeCompare(right, 'en'));
+  const exclude = [
+    ...new Set(value.exclude.map((item) => normalizeNativeSnapshotPattern(item, 'exclude'))),
+  ].sort((left, right) => left.localeCompare(right, 'en'));
+  if (include.length === 0) throw new Error('Native snapshot policy include must not be empty');
+  const hash = snapshotPolicyHash(include, exclude);
+  if ('hash' in value && value.hash !== hash) {
+    throw new Error('Native snapshot policy hash is invalid');
+  }
+  return {
+    manifest: {
+      schema: 'comet.native.snapshot-policy.v1',
+      include,
+      exclude,
+      hash,
+    },
+    includeMatchers: include.map(compileNativeSnapshotPattern),
+    excludeMatchers: exclude.map(compileNativeSnapshotPattern),
+    excludedDirectoryPrefixes: exclude
+      .flatMap((pattern) => {
+        if (!pattern.endsWith('/**')) return [];
+        const prefix = pattern.slice(0, -3);
+        return /[*?]/u.test(prefix) ? [] : [prefix];
+      })
+      .sort((left, right) => left.localeCompare(right, 'en')),
+  };
+}
+
+function snapshotPolicyExcludesDirectory(
+  policy: ResolvedSnapshotPolicy | undefined,
+  relative: string,
+): boolean {
+  return policy?.excludedDirectoryPrefixes.includes(relative) ?? false;
+}
+
+function snapshotPolicyIncludes(
+  policy: ResolvedSnapshotPolicy | undefined,
+  relative: string,
+  execution: NativeSnapshotExecution,
+): boolean {
+  if (!policy) return true;
+  const hasBudget = (): boolean => nativeSnapshotExecutionHasBudget(execution);
+  let included = false;
+  for (const matcher of policy.includeMatchers) {
+    if (!hasBudget()) return false;
+    if (matcher(relative, hasBudget)) {
+      included = true;
+      break;
+    }
+  }
+  if (!included) return false;
+  for (const matcher of policy.excludeMatchers) {
+    if (!hasBudget()) return false;
+    if (matcher(relative, hasBudget)) return false;
+  }
+  return true;
+}
+
 function foldSnapshotOverflowHash(previous: string, kind: string, value: unknown): string {
   const payload = JSON.stringify(value);
   return sha256Text(
@@ -1487,12 +1710,19 @@ function parseEntry(value: unknown, index: number): NativeSnapshotEntry {
     throw new Error(`Native snapshot entry ${index} hash is invalid`);
   }
   if (entry.type !== 'file') throw new Error(`Native snapshot entry ${index} type is invalid`);
-  return {
+  const parsed: NativeSnapshotEntry = {
     path: entryPath,
     hash: entry.hash,
     size: nonNegativeInteger(entry.size, `Native snapshot entry ${index} size`),
     type: 'file',
   };
+  if (entry.gitObjectId !== undefined) {
+    if (typeof entry.gitObjectId !== 'string' || !GIT_OBJECT_ID_PATTERN.test(entry.gitObjectId)) {
+      throw new Error(`Native snapshot entry ${index} gitObjectId is invalid`);
+    }
+    parsed.gitObjectId = entry.gitObjectId;
+  }
+  return parsed;
 }
 
 function parseOmission(value: unknown, index: number): NativeSnapshotOmission {
@@ -1781,7 +2011,29 @@ export function parseNativeContentSnapshotManifest(value: unknown): NativeConten
       limitValue.maxManifestBytes,
       'Native snapshot maxManifestBytes',
     ),
+    ...(limitValue.maxDurationMs === undefined
+      ? {}
+      : {
+          maxDurationMs: positiveInteger(limitValue.maxDurationMs, 'Native snapshot maxDurationMs'),
+        }),
   };
+  let policy: NativeSnapshotPolicy | undefined;
+  if (manifest.policy !== undefined) {
+    const policyValue = record(manifest.policy, 'Native snapshot policy');
+    rejectUnknown(policyValue, POLICY_KEYS, 'Native snapshot policy');
+    if (policyValue.schema !== 'comet.native.snapshot-policy.v1') {
+      throw new Error('Native snapshot policy schema is invalid');
+    }
+    if (!Array.isArray(policyValue.include) || !Array.isArray(policyValue.exclude)) {
+      throw new Error('Native snapshot policy patterns must be arrays');
+    }
+    policy = resolveSnapshotPolicy({
+      include: policyValue.include as string[],
+      exclude: policyValue.exclude as string[],
+      hash: policyValue.hash as string,
+      schema: 'comet.native.snapshot-policy.v1',
+    })!.manifest;
+  }
   if (!Array.isArray(manifest.entries) || !Array.isArray(manifest.omitted)) {
     throw new Error('Native content snapshot entries and omissions must be arrays');
   }
@@ -1879,6 +2131,7 @@ export function parseNativeContentSnapshotManifest(value: unknown): NativeConten
     createdAt: manifest.createdAt,
     complete: manifest.complete,
     limits,
+    ...(policy ? { policy } : {}),
     entries,
     omitted,
     omittedCount,
@@ -1916,7 +2169,7 @@ export async function filterNativeContentSnapshotToProjectScope(
   const gitSelectionLimits = resolveNativeGitSelectionLimits(options.gitSelectionLimits);
   const selection = await nativeGitSnapshotSelection(
     execution,
-    projectRoot,
+    paths,
     gitSelectionLimits,
     options.gitSelectionHooks,
   );
@@ -1954,7 +2207,7 @@ export async function filterNativeContentSnapshotToProjectScope(
 
   await finalizeNativeGitSnapshotSelection(
     execution,
-    projectRoot,
+    paths,
     gitSelectionLimits,
     selection,
     options.gitSelectionHooks?.outputChunkBytes,
@@ -2065,14 +2318,21 @@ export async function createNativeContentSnapshot(
   paths: NativeProjectPaths,
   options: SnapshotOptions = {},
 ): Promise<NativeContentSnapshotManifest> {
-  const execution = createNativeSnapshotExecution(options);
   const limits = {
     maxFiles: options.limits?.maxFiles ?? DEFAULT_NATIVE_SNAPSHOT_LIMITS.maxFiles,
     maxFileBytes: options.limits?.maxFileBytes ?? DEFAULT_NATIVE_SNAPSHOT_LIMITS.maxFileBytes,
     maxTotalBytes: options.limits?.maxTotalBytes ?? DEFAULT_NATIVE_SNAPSHOT_LIMITS.maxTotalBytes,
     maxManifestBytes:
       options.limits?.maxManifestBytes ?? DEFAULT_NATIVE_SNAPSHOT_LIMITS.maxManifestBytes,
+    ...(options.limits?.maxDurationMs === undefined
+      ? {}
+      : { maxDurationMs: options.limits.maxDurationMs }),
   };
+  const policy = resolveSnapshotPolicy(options.policy);
+  const execution = createNativeSnapshotExecution({
+    ...options,
+    deadlineMs: options.deadlineMs ?? limits.maxDurationMs,
+  });
   const gitSelectionLimits = resolveNativeGitSelectionLimits(options.gitSelectionLimits);
   const physicalSelectionLimits = resolveNativePhysicalSelectionLimits(
     options.physicalSelectionLimits,
@@ -2170,6 +2430,7 @@ export async function createNativeContentSnapshot(
     target: string,
     relative: string,
     before: import('fs').Stats,
+    gitObjectId?: string,
   ): Promise<void> => {
     if (!before.isFile() || before.isSymbolicLink()) return;
     if (!nativeSnapshotExecutionHasBudget(execution)) return;
@@ -2258,7 +2519,13 @@ export async function createNativeContentSnapshot(
     }
     if (!nativeSnapshotExecutionHasBudget(execution)) return;
     await recordCapturedEntry(
-      { path: relative, hash: boundedHash.hash, size: after.size, type: 'file' },
+      {
+        path: relative,
+        hash: boundedHash.hash,
+        size: after.size,
+        type: 'file',
+        ...(gitObjectId === undefined ? {} : { gitObjectId }),
+      },
       { kind: 'file', target, realTarget, stat: after },
     );
   };
@@ -2484,7 +2751,7 @@ export async function createNativeContentSnapshot(
 
   const gitSelection = await nativeGitSnapshotSelection(
     execution,
-    projectRoot,
+    paths,
     gitSelectionLimits,
     options.gitSelectionHooks,
   );
@@ -2495,12 +2762,16 @@ export async function createNativeContentSnapshot(
       physicalProjectRoot,
       physicalNativeRoot,
       denylist,
+      policy,
       limits: physicalSelectionLimits,
       hooks: options.physicalSelectionHooks,
     });
     await options.physicalSelectionHooks?.afterInitialSelection?.();
     for (const record of before.records) {
       if (record.type !== 'file' && record.type !== 'symlink') continue;
+      if (capturedEntryValidations.has(record.path)) continue;
+      if (remainingNativeSnapshotTime(execution) < 1) break;
+      if (!snapshotPolicyIncludes(policy, record.path, execution)) continue;
       if (remainingNativeSnapshotTime(execution) < 1) break;
       const target = path.resolve(projectRoot, ...record.path.split('/'));
       let stat: import('fs').Stats;
@@ -2542,6 +2813,7 @@ export async function createNativeContentSnapshot(
       physicalProjectRoot,
       physicalNativeRoot,
       denylist,
+      policy,
       limits: physicalSelectionLimits,
     });
     const finalized = finalizeNativePhysicalSelection(before.evidence, after.evidence);
@@ -2558,8 +2830,86 @@ export async function createNativeContentSnapshot(
     }
   } else {
     await options.gitSelectionHooks?.afterInitialSelection?.();
+    // Incremental path: index only baseline entries that carry a trustworthy
+    // Git object id. Other entries (untracked files, links, legacy manifests,
+    // or files captured from dirty working-tree content) fall back to normal
+    // capture individually instead of disabling reuse for the whole project.
+    const incrementalBaseline = options.incrementalBaseline;
+    const baselineByPath = new Map<string, NativeSnapshotEntry>();
+    let incrementalEnabled = false;
+    if (incrementalBaseline) {
+      const parsedBaseline = parseNativeContentSnapshotManifest(incrementalBaseline);
+      for (const entry of parsedBaseline.entries) {
+        if (entry.gitObjectId !== undefined) baselineByPath.set(entry.path, entry);
+      }
+      incrementalEnabled = baselineByPath.size > 0;
+    }
+    // `git ls-files --modified` intentionally trusts assume-unchanged and
+    // skip-worktree index flags. Those paths can have different bytes on disk
+    // while Git reports a clean working tree, so their object ids cannot prove
+    // that a raw-content snapshot entry is reusable.
+    const unsafeGitObjectIdPaths = new Set<string>();
+    let gitObjectIdsTrusted = true;
+    try {
+      const tagged = await runGitNullRecords(execution, projectRoot, ['ls-files', '-v', '-z'], {
+        ...gitSelectionLimits,
+        ...(options.gitSelectionHooks?.outputChunkBytes === undefined
+          ? {}
+          : { outputChunkBytes: options.gitSelectionHooks.outputChunkBytes }),
+      });
+      if (tagged.overflow) {
+        incrementalEnabled = false;
+        gitObjectIdsTrusted = false;
+        baselineByPath.clear();
+      } else {
+        for (const encoded of tagged.records) {
+          const record = decodeGitRecord(encoded);
+          const separator = record.indexOf(' ');
+          const relative = separator < 0 ? null : safeGitProjectPath(record.slice(separator + 1));
+          if (separator !== 1 || relative === null) {
+            throw new Error('Native Git snapshot provider returned a malformed tagged record');
+          }
+          if (record[0] !== 'H') unsafeGitObjectIdPaths.add(relative);
+        }
+      }
+    } catch (error) {
+      if (isNativeGitSnapshotTimeout(error)) throw error;
+      incrementalEnabled = false;
+      gitObjectIdsTrusted = false;
+      baselineByPath.clear();
+    }
+    // Detect files modified in the working tree but not yet staged. Git index
+    // object ids do not reflect unstaged edits, so such files must be
+    // re-captured even when their staged object id matches baseline. This
+    // probe also protects newly-created baselines from binding a working-tree
+    // hash to an unrelated index object id.
+    const workingTreeModified = new Set<string>();
+    try {
+      const modifiedOutput = await runGitBoundedOutput(
+        execution,
+        projectRoot,
+        ['ls-files', '--modified', '-z'],
+        GIT_TEXT_STDOUT_LIMIT,
+      );
+      for (const raw of modifiedOutput.toString('utf8').split('\0')) {
+        const modifiedPath = safeGitProjectPath(raw);
+        if (modifiedPath !== null) workingTreeModified.add(modifiedPath);
+      }
+    } catch {
+      // The snapshot can still be captured safely from disk, but neither
+      // baseline reuse nor new object-id bindings are trustworthy.
+      incrementalEnabled = false;
+      gitObjectIdsTrusted = false;
+      baselineByPath.clear();
+    }
+    const reusedTrackedPaths = new Set<string>();
+    const boundObjectIdPaths = new Set<string>();
     for (const relative of selectionPaths(gitSelection)) {
+      if (capturedEntryValidations.has(relative)) continue;
       if (!isSnapshotProjectRef(paths, relative)) continue;
+      if (remainingNativeSnapshotTime(execution) < 1) break;
+      if (!snapshotPolicyIncludes(policy, relative, execution)) continue;
+      if (remainingNativeSnapshotTime(execution) < 1) break;
       const target = path.resolve(projectRoot, ...relative.split('/'));
       if (
         target === configFile ||
@@ -2666,16 +3016,88 @@ export async function createNativeContentSnapshot(
         }
         continue;
       }
-      await captureFile(target, relative, before);
+      // Incremental reuse: if this tracked file's git blob object id matches
+      // baseline and the working tree is not modified, the content is
+      // provably unchanged — reuse the baseline hash without reading the file.
+      const currentObjectId = gitSelection.trackedObjectIds.get(relative);
+      const baselineEntry = currentObjectId ? baselineByPath.get(relative) : undefined;
+      if (
+        incrementalEnabled &&
+        baselineEntry?.gitObjectId !== undefined &&
+        baselineEntry.gitObjectId === currentObjectId &&
+        !unsafeGitObjectIdPaths.has(relative) &&
+        !workingTreeModified.has(relative)
+      ) {
+        if (entries.length >= limits.maxFiles) {
+          omit({ path: relative, size: baselineEntry.size, type: 'file', reason: 'file-count' });
+          continue;
+        }
+        if (baselineEntry.size > limits.maxFileBytes) {
+          omit({ path: relative, size: baselineEntry.size, type: 'file', reason: 'file-size' });
+          continue;
+        }
+        if (totalBytes + baselineEntry.size > limits.maxTotalBytes) {
+          omit({ path: relative, size: baselineEntry.size, type: 'file', reason: 'total-size' });
+          continue;
+        }
+        // Reuse the baseline entry verbatim (path, hash, size, gitObjectId).
+        // Do not register a validation: the file is not opened, so there is no
+        // TOCTOU window and revalidateCapturedEntries correctly skips it.
+        entries.push({ ...baselineEntry });
+        totalBytes += baselineEntry.size;
+        reusedTrackedPaths.add(relative);
+        continue;
+      }
+      const boundObjectId =
+        gitObjectIdsTrusted &&
+        !unsafeGitObjectIdPaths.has(relative) &&
+        !workingTreeModified.has(relative)
+          ? currentObjectId
+          : undefined;
+      await captureFile(target, relative, before, boundObjectId);
+      if (boundObjectId !== undefined) boundObjectIdPaths.add(relative);
     }
     await revalidateCapturedEntries();
+    await options.gitSelectionHooks?.afterContentRevalidation?.();
     await finalizeNativeGitSnapshotSelection(
       execution,
-      projectRoot,
+      paths,
       gitSelectionLimits,
       gitSelection,
       options.gitSelectionHooks?.outputChunkBytes,
     );
+    // Reused entries already require a final worktree fence. Newly captured entries only need
+    // the extra fence when they are being added to an incremental baseline: a full snapshot has
+    // never promised an object-id binding for a file captured during this run, and paying for a
+    // second Git traversal on every full capture regresses the normal snapshot path.
+    if (reusedTrackedPaths.size > 0 || (incrementalEnabled && boundObjectIdPaths.size > 0)) {
+      const modifiedAfter = await runGitBoundedOutput(
+        execution,
+        projectRoot,
+        ['ls-files', '--modified', '-z'],
+        GIT_TEXT_STDOUT_LIMIT,
+      );
+      const finalWorkingTreeModified = new Set<string>();
+      for (const raw of modifiedAfter.toString('utf8').split('\0')) {
+        const modifiedPath = safeGitProjectPath(raw);
+        if (modifiedPath !== null) finalWorkingTreeModified.add(modifiedPath);
+      }
+      for (const relative of reusedTrackedPaths) {
+        if (!finalWorkingTreeModified.has(relative)) continue;
+        const entry = entries.find((candidate) => candidate.path === relative);
+        invalidateCapturedEntry(relative, {
+          path: relative,
+          size: entry?.size ?? null,
+          type: 'file',
+          reason: 'changed-during-read',
+        });
+      }
+      for (const relative of boundObjectIdPaths) {
+        if (!finalWorkingTreeModified.has(relative)) continue;
+        const entry = entries.find((candidate) => candidate.path === relative);
+        if (entry) delete entry.gitObjectId;
+      }
+    }
     for (const omission of gitSelection.omissions) omit(omission);
     if (gitSelection.overflow) foldGitSelectionOverflow(gitSelection.overflow);
   }
@@ -2698,6 +3120,7 @@ export async function createNativeContentSnapshot(
     createdAt: (options.now ?? new Date()).toISOString(),
     complete: omittedCount === 0,
     limits,
+    ...(policy ? { policy: policy.manifest } : {}),
     entries,
     omitted,
     omittedCount,
@@ -2736,6 +3159,27 @@ export async function createNativeContentSnapshot(
     manifest = buildManifest();
   }
   return manifest;
+}
+
+export async function createNativeCurrentContentSnapshot(
+  paths: NativeProjectPaths,
+  baseline: NativeContentSnapshotManifest,
+  options: Pick<SnapshotOptions, 'origin' | 'now'> = {},
+): Promise<NativeContentSnapshotManifest> {
+  const config = await readProjectConfig(paths.projectRoot);
+  const settings = config?.native.snapshot ?? DEFAULT_NATIVE_SNAPSHOT_CONFIG;
+  return createNativeContentSnapshot(paths, {
+    ...options,
+    policy: baseline.policy,
+    incrementalBaseline: baseline,
+    limits: {
+      maxFiles: settings.max_files,
+      maxFileBytes: settings.max_total_bytes,
+      maxTotalBytes: settings.max_total_bytes,
+      maxDurationMs: settings.max_duration_ms,
+    },
+    deadlineMs: settings.max_duration_ms,
+  });
 }
 
 export async function writeNativeBaselineManifest(

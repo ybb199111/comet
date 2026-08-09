@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 
+import { memoizedHookRead } from '../../platform/process/hook-read-cache.js';
 import { parseCometHookRequest, readCometHookRequest } from '../comet-entry/hook-adapter.js';
 import type {
   CometHookDecision,
@@ -52,7 +53,7 @@ function requestTargetsAreControlOnly(
   );
 }
 
-async function activeNativeContext(projectRoot: string): Promise<ActiveNativeContext | null> {
+async function activeNativeContextImpl(projectRoot: string): Promise<ActiveNativeContext | null> {
   const config = await readProjectConfig(projectRoot);
   if (!config || !(config.workflows ?? [config.default_workflow]).includes('native')) return null;
 
@@ -73,6 +74,14 @@ async function activeNativeContext(projectRoot: string): Promise<ActiveNativeCon
   }
   return { paths, changes };
 }
+
+// `activeNativeContext` is invoked once by `listActiveNativeHookChanges`
+// (router) and again by `inspectNativeHookGuard`. Within a single Hook
+// decision the changes directory is immutable, so memoize the enumeration to
+// avoid a second readdir + per-change state read.
+const activeNativeContext = memoizedHookRead('nativeActiveContext', (projectRoot: string) =>
+  activeNativeContextImpl(projectRoot),
+);
 
 export async function listActiveNativeHookChanges(
   projectRoot: string,
@@ -151,8 +160,8 @@ export async function inspectNativeHookGuard(
   }
   if (request.intent === 'unknown' || request.targets.length === 0) {
     return {
-      allowed: false,
-      reason: `Hook write target could not be determined while Native change ${change.name} is in ${change.phase}; resume /comet-native before retrying`,
+      allowed: true,
+      reason: 'Hook write target was not attributed to the guarded project',
       workflow: 'native',
       phase: change.phase,
       change: change.name,

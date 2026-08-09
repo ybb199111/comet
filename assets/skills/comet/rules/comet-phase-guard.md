@@ -8,7 +8,7 @@
 
 ### 阶段感知（最高优先级）
 
-有活跃 comet change 时（`openspec/changes/<name>/.comet.yaml` 存在），**每次开始执行操作前**必须读取 `phase` 字段确认当前阶段。
+有活跃 comet change 时（Classic layout resolver 绑定的 `<classic-change-dir>/.comet.yaml` 存在），**每次开始执行操作前**必须读取 `phase` 字段确认当前阶段。
 
 当存在多个 active change 时，必须先明确当前 change，再运行：
 
@@ -28,7 +28,7 @@ comet state select <change-name>
 | `verify` | 验证、记录验证报告 | 跳过失败处理、提前处理分支 |
 | `archive` | 确认归档、运行归档脚本、提交归档改动、分支处理 | 写源代码 |
 
-Hook 硬拦截白名单包括 `openspec/*`、`docs/superpowers/*`、`.superpowers/*`、`.claude/*` 和 `.comet/*` 等流程/平台工作区；这些路径可写不代表可以跳过当前阶段的产物和确认要求。
+Hook 硬拦截仅豁免 Classic layout resolver 返回的当前阶段合法产物，以及 Comet 自有的 `.comet/*`、`.superpowers/*` 控制工作区和根目录 Markdown。配置目录及其中的 worktree/source 文件不属于通用豁免范围，必须服从当前 change 的阶段约束。
 
 ### 阶段进入自洽性校验（写源代码前必查）
 
@@ -37,12 +37,13 @@ Hook 硬拦截白名单包括 `openspec/*`、`docs/superpowers/*`、`.superpower
 | 检测到 | 判定 | 动作 |
 |--------|------|------|
 | `phase: build` + `workflow: full` + `design_doc` 为空/null | 绕过 design 空跳 | 停止写源代码，运行 `/comet-design` 补 Design Doc 并过 guard |
+| `phase: build` + `workflow: full` + `plan` 为空/null 或记录路径失效 | 绕过实施计划 | 停止写源代码，回 `/comet-build` Step 1 创建或恢复 plan，记录路径并用 `comet state check <name> build --recover` 验证 |
 | `phase: build` + proposal/design/tasks 任一缺失或为空 | 绕过 open 空跳 | 回 `/comet-open` 补齐三件套 |
 | `phase: archive` + `verify_result` ≠ `pass` | 绕过 verify 空跳 | 回 `/comet-verify` 完成验证 |
 
-> 说明：上表只覆盖 hook 硬拦截实际检测的范围（`design_doc` 空跳在 build 阶段；proposal/design/tasks 三件套完整性在 open→build 的 guard 退出时校验）。`verify` 阶段不在此写源码自洽检查内——若 verify 发现产物缺失，按下方「Verify 阶段专项」的 verify-fail 回退处理。
+> 说明：上表只覆盖 hook 硬性拦截实际检测的范围（build 阶段的 `design_doc` 与 `plan` 状态；proposal/design/tasks 三件套完整性在 open→build 的 guard 退出时校验）。Hook 提示中的 `RECOVERY`、`SUCCESS` 和 `RETRY` 共同定义恢复闭环；达到 `SUCCESS` 前不得重试被阻塞的源码写入。`verify` 阶段不在此写源码自洽检查内——若 verify 发现产物缺失，按下方「Verify 阶段专项」的 verify-fail 回退处理。
 
-预设例外：`workflow: hotfix/tweak` 本就跳过 design，`design_doc` 为空属正常，不算非法。
+预设例外：`workflow: hotfix/tweak` 本就跳过 design 和 Superpowers 实施计划，`design_doc` 与 `plan` 为空属正常，不算非法。
 
 升级态说明：预设（hotfix/tweak）命中升级信号并经用户确认升级后，通过 `comet state transition <name> preset-escalate` 合法地变为 `workflow: full` + `phase: design` + `design_doc: null`，同时清除预设专属 build 配置。此时 `phase: design` + `design_doc` 为空**属正常升级前置态**，不是非法空跳——agent 应进入 `/comet-design` 补 Design Doc，并在 build 重新完成联合工作方式选择。该终态不命中上表「绕过 design 空跳」行（该行仅检测 `phase: build`）。
 
@@ -86,7 +87,7 @@ Hook 硬拦截白名单包括 `openspec/*`、`docs/superpowers/*`、`.superpower
 
 ## Build 阶段专项
 
-1. plan 创建后先过滤不可执行选项，再只发起一个联合决策：暂停，或一次性提交工作区/执行/TDD/审查配置及条件性的分支名
+1. plan 创建后，展示本工作流支持的全部选择并只发起一个联合决策：暂停，或一次性提交工作区/执行/TDD/审查配置及条件性的分支名
 2. 每个 task 验收后必须: tasks.md 打勾 → git commit（不得积攒）。`subagent-driven-development` 必须按当前 `review_mode` 完成验收，再由协调者按任务唯一文本定向勾选和验证；不得用未完成任务总表代替当前任务验证
 3. 遇到失败必须加载 **systematic-debugging** skill，根因未定位前不得提出源码修复
 4. spec 变更分级: 小改直接编辑 | 中改加载 brainstorming | 大改暂停等用户确认拆分
@@ -108,12 +109,12 @@ comet state check <name> <phase> --recover
 
 按脚本输出的 **Recovery action** 决定下一步。
 
-恢复后必须先用「阶段进入自洽性校验」表复查一遍：若发现 `phase` 与产物不自洽（design_doc/三件套/verify_result 任一不匹配），按非法空跳处理，回对应阶段补齐，不得信任 `phase` 字段直接续跑。
+恢复后必须先用「阶段进入自洽性校验」表复查一遍：若发现 `phase` 与产物不自洽（design_doc/plan/三件套/verify_result 任一不匹配），按非法空跳处理，严格执行脚本或 Hook 输出的恢复步骤，并在达到 `SUCCESS` 后才重试原操作；不得信任 `phase` 字段直接续跑。
 
 **特别注意 `build_mode`**：若恢复脚本输出 `build_mode: subagent-driven-development`，你是协调者，不是执行者。必须：
 1. 使用 Skill 工具重新加载 Superpowers `subagent-driven-development` 技能 (Use the Skill tool to reload the Superpowers `subagent-driven-development` skill)
 2. 读取 `comet/reference/subagent-dispatch.md` 获取 Comet 专属扩展 (re-read `comet/reference/subagent-dispatch.md` for Comet-specific extensions)
-3. 读取 `openspec/changes/<name>/.comet/subagent-progress.md` 恢复精确阶段、证据和审查-修复轮次 (Read `openspec/changes/<name>/.comet/subagent-progress.md` to recover the exact stage, evidence, and review-fix round)
+3. 读取 `<classic-change-dir>/.comet/subagent-progress.md` 恢复精确阶段、证据和审查-修复轮次 (Read `<classic-change-dir>/.comet/subagent-progress.md` to recover the exact stage, evidence, and review-fix round)
 4. 禁止在主会话中直接执行 task (Do not execute the pending task directly in the main window)
 5. 按检查点恢复；缺失或不匹配时才从第一个未勾选 task 开始
 6. 已提交但未按 `review_mode` 完成验收的 task 保持未勾选，继续对应的验证/审查/修复循环

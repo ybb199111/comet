@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import dotenv
+import pytest
 
 from scaffold.python import utils
 from scaffold.python.skill_parser import load_skill_content, parse_skill_md
@@ -209,6 +210,87 @@ def test_docker_subject_run_uses_controller_verified_immutable_image_identity():
     assert '"$image_id"' in docker_sh
 
 
+def test_docker_harness_has_no_native_review_sidecar_contract():
+    docker_sh = (utils.SHELL_DIR / "docker.sh").read_text(encoding="utf-8")
+
+    assert "native_review_sidecar" not in docker_sh
+    assert "NATIVE_REVIEW_CONTROLLER_VOLUME" not in docker_sh
+    assert "COMET_NATIVE_REVIEW_VERIFIER_URL" not in docker_sh
+
+
+def _get_image_name(directory: Path) -> str:
+    """Resolve the image name for a workspace directory via docker.sh (bash required)."""
+    script = (
+        'source "$1"; '
+        'image=$(get_image_name "$2") || { echo "image lookup failed"; exit 1; }; '
+        'echo "image=$image"'
+    )
+    try:
+        result = subprocess.run(
+            [
+                utils.BASH_EXEC,
+                "-c",
+                script,
+                "_",
+                utils._to_bash_path(utils.SHELL_DIR / "docker.sh"),
+                utils._to_bash_path(directory),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except FileNotFoundError:
+        pytest.skip("bash not available")
+    assert result.returncode == 0, f"get_image_name failed (stderr: {result.stderr})"
+    return result.stdout.strip()
+
+
+def test_get_image_name_falls_back_to_environment_dockerfile(tmp_path: Path):
+    """get_image_name() resolves environment/Dockerfile when dir/Dockerfile is absent.
+
+    docker_build() falls back to environment/Dockerfile, so get_image_name() must
+    apply the same rule; otherwise the fallback in docker_build() is dead code and
+    building a workspace that only carries an environment/Dockerfile always fails.
+    """
+    env_dir = tmp_path / "environment"
+    env_dir.mkdir()
+    (env_dir / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    root_dir = tmp_path / "root"
+    root_dir.mkdir()
+    (root_dir / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+    assert _get_image_name(tmp_path) == _get_image_name(root_dir)
+
+
+def test_get_image_name_prefers_root_dockerfile_over_environment(tmp_path: Path):
+    """When both dir/Dockerfile and environment/Dockerfile exist, prefer the root one.
+
+    The environment/ fallback only applies when the root Dockerfile is absent, mirroring
+    docker_build()'s resolution order.
+    """
+    root_only = tmp_path / "root-only"
+    root_only.mkdir()
+    (root_only / "Dockerfile").write_text("FROM node:22\n", encoding="utf-8")
+
+    both = tmp_path / "both"
+    both.mkdir()
+    (both / "Dockerfile").write_text("FROM node:22\n", encoding="utf-8")
+    both_env = both / "environment"
+    both_env.mkdir()
+    (both_env / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    env_only = tmp_path / "env-only"
+    env_only.mkdir()
+    env_only_env = env_only / "environment"
+    env_only_env.mkdir()
+    (env_only_env / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    assert _get_image_name(root_only) == _get_image_name(both)
+    assert _get_image_name(both) != _get_image_name(env_only)
+
+
 def test_run_claude_fixture_defaults_langsmith_hook_log_path():
     conftest_py = (Path(__file__).resolve().parents[1] / "conftest.py").read_text(encoding="utf-8")
 
@@ -232,6 +314,10 @@ def test_claude_loop_applies_plugin_args_to_subject_turns_only():
     assert 'claude -p "$USER_REPLY" "${PLUGIN_ARGS[@]}"' in loop_sh
     assert "fresh resume boundary detected" in loop_sh
     assert 'claude -p "$sim_prompt" "${PLUGIN_ARGS[@]}"' not in loop_sh
+    assert 'if ! rm -f -- "$SIMULATOR_PROMPT_FILE"; then' in loop_sh
+    assert loop_sh.index('rm -f -- "$SIMULATOR_PROMPT_FILE"') < loop_sh.index(
+        'RAW=$(claude -p "$SUBJECT_PROMPT"'
+    )
 
 
 def test_claude_loop_surfaces_subject_resume_failure(tmp_path: Path):
@@ -282,6 +368,113 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"session-1","re
     assert "resume failed stdout diagnostic" in result.stderr
     assert "resume failed diagnostic" in result.stderr
     assert "subject turn 2 failed" in result.stderr
+
+
+def test_claude_loop_consumes_deterministic_reply_steps_in_order(tmp_path: Path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env bash
+prompt=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "-p" ]]; then
+    prompt="$2"
+    break
+  fi
+  shift
+done
+printf '%s\n' '{"type":"system","session_id":"session-1"}'
+case "$prompt" in
+  "First reply.")
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"session-1","result":"Question: Which second choice should be used? Recommendation: B. Impact: changes output."}'
+    ;;
+  "Second reply.")
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"session-1","result":"Workflow completed through all phases and archived."}'
+    ;;
+  *)
+    printf '%s\n' '{"type":"result","subtype":"success","session_id":"session-1","result":"Question: Which first choice should be used? Recommendation: A. Impact: changes output."}'
+    ;;
+esac
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{utils._to_bash_path(fake_bin)}:{env.get('PATH', '')}"
+    result = subprocess.run(
+        [
+            utils.BASH_EXEC,
+            utils._to_bash_path(utils.SHELL_DIR / "run-claude-loop.sh"),
+            "Implement the requested change.",
+            "--max-turns",
+            "3",
+            "--decision-reply-step",
+            "First reply.",
+            "--decision-reply-step",
+            "Second reply.",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("deterministic decision reply applied") == 2
+    assert "workflow completion detected" in result.stderr
+
+
+def test_claude_loop_removes_private_simulator_prompt_before_subject_run(tmp_path: Path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env bash
+if [[ -e "$SIMULATOR_LEAK_PATH" ]]; then
+  echo "private simulator prompt leaked to subject" >&2
+  exit 43
+fi
+printf '%s\n' '{"type":"system","session_id":"session-1"}'
+printf '%s\n' '{"type":"result","subtype":"success","session_id":"session-1","result":"Workflow completed through all phases and archived."}'
+""",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_claude.chmod(0o755)
+    simulator_prompt = tmp_path / ".eval-simulator-prompt.txt"
+    simulator_prompt.write_text("private fixed decisions", encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{utils._to_bash_path(fake_bin)}:{env.get('PATH', '')}"
+    env["SIMULATOR_LEAK_PATH"] = utils._to_bash_path(simulator_prompt)
+    result = subprocess.run(
+        [
+            utils.BASH_EXEC,
+            utils._to_bash_path(utils.SHELL_DIR / "run-claude-loop.sh"),
+            "Implement the requested change.",
+            "--max-turns",
+            "1",
+            "--simulator-prompt-file",
+            utils._to_bash_path(simulator_prompt),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "private simulator prompt leaked" not in result.stderr
+    assert not simulator_prompt.exists()
 
 
 def test_decision_point_detector_rejects_completion_statements():
@@ -373,7 +566,9 @@ def test_completion_point_detector_requires_explicit_non_negated_workflow_comple
         "completion-point.sh", "Change add-counting completed through Archive.", check=False
     )
     archived_to = utils.run_shell(
-        "completion-point.sh", "- **Archived to**: docs/comet/archive/2026-07-19-add-counting/", check=False
+        "completion-point.sh",
+        "- **Archived to**: docs/comet/archive/2026-07-19-add-counting/",
+        check=False,
     )
     completed_all_phases = utils.run_shell(
         "completion-point.sh",
@@ -410,3 +605,28 @@ def test_completion_point_detector_requires_explicit_non_negated_workflow_comple
     assert phase_done.returncode == 1
     assert negated.returncode == 1
     assert negated_through_archive.returncode == 1
+
+
+def test_copied_scaffold_is_importable_by_validator_script(tmp_path: Path):
+    validation_dir = tmp_path / "validation"
+    validation_dir.mkdir()
+    (validation_dir / "check.py").write_text(
+        "from comet_checks import run_comet_checks\n"
+        "from scaffold.python.validation.core import load_test_context\n"
+        "print('ok')\n",
+        encoding="utf-8",
+    )
+
+    utils._copy_scaffold_to_docker(tmp_path)
+
+    result = subprocess.run(
+        [os.sys.executable, str(validation_dir / "check.py")],
+        cwd=tmp_path,
+        env={"PATH": os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok\n"

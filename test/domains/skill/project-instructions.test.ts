@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   installCometProjectInstructions,
   removeCometProjectInstructions,
+  syncCometProjectInstructions,
 } from '../../../domains/skill/project-instructions.js';
 
 let tmpDir: string;
@@ -58,6 +59,28 @@ describe('Comet project instructions', () => {
     expect(content).not.toContain('`.comet.yaml`');
   });
 
+  it.each([
+    [
+      'zh' as const,
+      '用户通过宿主明确调用任意 Comet Skill',
+      '不要运行 resume probe',
+      '当前请求未明确调用 Comet Skill',
+    ],
+    [
+      'en' as const,
+      'user explicitly invokes any Comet Skill through the host',
+      'do not run the resume probe',
+      'current request did not explicitly invoke a Comet Skill',
+    ],
+  ])('gives explicit Comet Skill invocation precedence in %s', async (language, ...markers) => {
+    await installCometProjectInstructions(tmpDir, language);
+
+    const content = await fs.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf8');
+    for (const marker of markers) {
+      expect(content).toContain(marker);
+    }
+  });
+
   it('removes only the managed block', async () => {
     const agents = path.join(tmpDir, 'AGENTS.md');
     await fs.writeFile(agents, '# User\n\nKeep me.\n', 'utf8');
@@ -68,5 +91,21 @@ describe('Comet project instructions', () => {
     expect(result.removed).toBeGreaterThan(0);
     expect(await fs.readFile(agents, 'utf8')).toContain('Keep me.');
     expect(await fs.readFile(agents, 'utf8')).not.toContain('<comet-ambient-resume>');
+  });
+
+  it('removes managed blocks when Ambient Resume is disabled', async () => {
+    await fs.writeFile(path.join(tmpDir, 'AGENTS.md'), '# User\n\nKeep AGENTS rules.\n', 'utf8');
+    await fs.writeFile(path.join(tmpDir, 'CLAUDE.md'), '# User\n\nKeep Claude rules.\n', 'utf8');
+    await installCometProjectInstructions(tmpDir, 'en');
+
+    const result = await syncCometProjectInstructions(tmpDir, 'en', false);
+
+    expect(result.changed).toBe(2);
+    await expect(fs.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf8')).resolves.toBe(
+      '# User\n\nKeep AGENTS rules.\n',
+    );
+    await expect(fs.readFile(path.join(tmpDir, 'CLAUDE.md'), 'utf8')).resolves.toBe(
+      '# User\n\nKeep Claude rules.\n',
+    );
   });
 });

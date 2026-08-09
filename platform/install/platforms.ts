@@ -15,8 +15,12 @@ export interface Platform {
   legacySkillsDirs?: string[];
   /** Platform configuration and hook root when it differs from the Skill root. */
   configDir?: string;
+  /** Global platform configuration and hook root when it differs from the global Skill root. */
+  globalConfigDir?: string;
   detectionPaths?: string[];
   openspecToolId: string;
+  /** OpenSpec's generated tool root when it differs from Comet's canonical Skill root. */
+  openspecSkillsDir?: string;
   /** Platform's rules/instructions subdirectory relative to rulesBaseDir (defaults to baseDir). Omit if unsupported. */
   rulesDir?: string;
   /** Override base directory for rules. When set, rules go to rulesBaseDir/rulesDir instead of skillsDir/rulesDir. Useful when rules live outside the skills config dir (e.g., Cline's .clinerules/ is at project root, not inside .cline/). */
@@ -34,11 +38,18 @@ export interface Platform {
     | 'qwen'
     | 'kiro'
     | 'qoder'
-    | 'codebuddy';
+    | 'codebuddy'
+    | 'trae';
   /** Hook config filename relative to the platform config root when it differs from the format default. */
   hookConfigFile?: string;
   /** Historical hook config filenames checked during migration and uninstall. */
   legacyHookConfigFiles?: string[];
+}
+
+const PLATFORM_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+
+export function isValidPlatformId(platformId: string): boolean {
+  return PLATFORM_ID_PATTERN.test(platformId);
 }
 
 export function getPlatformSkillsDir(platform: Platform, scope: InstallScope): string {
@@ -55,6 +66,9 @@ export function getPlatformSkillsDirs(platform: Platform, scope: InstallScope): 
 }
 
 export function getPlatformConfigDir(platform: Platform, scope: InstallScope): string {
+  if (scope === 'global' && platform.globalConfigDir) {
+    return platform.globalConfigDir;
+  }
   return platform.configDir ?? getPlatformSkillsDir(platform, scope);
 }
 
@@ -88,6 +102,7 @@ export const PLATFORMS: Platform[] = [
     configDir: '.codex',
     detectionPaths: ['.codex'],
     openspecToolId: 'codex',
+    openspecSkillsDir: '.codex',
     rulesBaseDir: '.codex',
     rulesDir: 'rules',
     rulesFormat: 'md',
@@ -297,17 +312,23 @@ export const PLATFORMS: Platform[] = [
     openspecToolId: 'trae',
     rulesDir: 'rules',
     rulesFormat: 'md',
+    supportsHooks: true,
+    hookFormat: 'trae',
   },
   {
     id: 'trae-cn',
     name: 'Trae CN',
     skillsDir: '.trae-cn',
     globalSkillsDir: '.trae-cn',
+    configDir: '.trae',
+    globalConfigDir: '.trae-cn',
     // OpenSpec exposes Trae as one tool id; keep Comet's CN-specific install
     // directories but reuse the supported OpenSpec Trae integration.
     openspecToolId: 'trae',
     rulesDir: 'rules',
     rulesFormat: 'md',
+    supportsHooks: true,
+    hookFormat: 'trae',
   },
   {
     id: 'zcode',

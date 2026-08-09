@@ -5,6 +5,7 @@ import {
   NATIVE_ACCEPTANCE_EVIDENCE_START_MARKER,
   deriveBriefAcceptanceCriteria,
   deriveSpecAcceptanceCriteria,
+  deriveSpecMandatoryAcceptanceCriteria,
   normalizeNativeAcceptanceText,
   parseNativeVerificationMachineBlock,
   projectNativeAcceptancePage,
@@ -89,6 +90,37 @@ describe('Native acceptance criteria', () => {
     ).toThrow('integrity');
   });
 
+  it('projects bounded prior verification gaps on Build acceptance pages', () => {
+    const criteria = Array.from({ length: 3 }, (_, index) => ({
+      id: `acceptance-${index.toString(16).padStart(64, '0')}`,
+      kind: 'brief-example' as const,
+      source: 'brief.md',
+      context: [],
+      text: `Criterion ${index}.`,
+    }));
+    const statuses = new Map([
+      [criteria[0].id, 'satisfied' as const],
+      [criteria[1].id, 'failed' as const],
+      [criteria[2].id, 'missing' as const],
+    ]);
+    const page = projectNativeAcceptancePage({
+      criteria,
+      acceptanceHash: 'a'.repeat(64),
+      verificationStatuses: statuses,
+      failedCheckIds: Array.from({ length: 20 }, (_, index) => `check-${index}`),
+    });
+
+    expect(page.items.map((item) => item.verificationStatus)).toEqual([
+      'satisfied',
+      'failed',
+      'missing',
+    ]);
+    expect(page.failedAcceptanceIds).toEqual([criteria[1].id]);
+    expect(page.missingAcceptanceIds).toEqual([criteria[2].id]);
+    expect(page.failedCheckIds).toHaveLength(16);
+    expect(page.failedCheckIdsTruncated).toBe(true);
+  });
+
   it('derives stable IDs from Acceptance examples independent of list order and wrapping', () => {
     const first = `# Outcome
 Ship login.
@@ -156,6 +188,155 @@ Keep compatibility.
       text: expect.stringContaining('Valid credentials'),
     });
     expect(criteria[0].id).not.toBe(criteria[1].id);
+  });
+
+  it('derives mandatory specification bullets even when a spec has no Scenario headings', () => {
+    const spec = `# Capability
+
+## Contract
+
+- Runtime MUST bind each requirement to a receipt.
+- 失败检查必须阻断归档。
+- This explanatory note is not normative.
+
+\`\`\`md
+- Runtime MUST ignore this example.
+\`\`\`
+`;
+
+    expect(deriveSpecMandatoryAcceptanceCriteria(spec, 'specs/capability/spec.md')).toMatchObject([
+      {
+        kind: 'spec-must',
+        source: 'specs/capability/spec.md',
+        text: 'Runtime MUST bind each requirement to a receipt.',
+      },
+      {
+        kind: 'spec-must',
+        text: '失败检查必须阻断归档。',
+      },
+      {
+        kind: 'spec-must',
+        text: 'This explanatory note is not normative.',
+      },
+    ]);
+  });
+
+  it('covers prose and numbered requirements while leaving Scenario bodies to Scenario criteria', () => {
+    const spec = `# Capability
+
+Runtime preserves the current receipt graph.
+
+1. Numbered requirements remain auditable.
+2. Runtime MUST reject a stale receipt.
+
+### Scenario: Stale receipt
+- **WHEN** the receipt is stale
+- **THEN** verification is blocked
+`;
+    const mandatory = deriveSpecMandatoryAcceptanceCriteria(spec);
+    const scenarios = deriveSpecAcceptanceCriteria(spec);
+
+    expect(mandatory.map((entry) => entry.text)).toEqual([
+      'Runtime preserves the current receipt graph.',
+      'Numbered requirements remain auditable.',
+      'Runtime MUST reject a stale receipt.',
+    ]);
+    expect(mandatory.some((entry) => /WHEN|THEN/u.test(entry.text))).toBe(false);
+    expect(scenarios).toHaveLength(1);
+  });
+
+  it('keeps wrapped paragraphs/list items stable and excludes explicit non-goals and syntax noise', () => {
+    const wrapped = `# Contract
+
+Runtime preserves the current
+receipt graph.
+
+- A list requirement spans
+  multiple physical lines.
+
+<!-- implementation note -->
+| Field | Value |
+| --- | --- |
+
+## Non-goals
+This sentence is explicitly not a requirement.
+`;
+    const unwrapped = `# Contract
+
+Runtime preserves the current receipt graph.
+
+- A list requirement spans multiple physical lines.
+
+| Field | Value |
+| --- | --- |
+
+## Non-goals
+Another excluded sentence.
+`;
+    const texts = (value: string) =>
+      deriveSpecMandatoryAcceptanceCriteria(value).map((entry) => entry.text);
+
+    expect(texts(wrapped)).toEqual(texts(unwrapped));
+    expect(texts(wrapped)).toEqual([
+      'Runtime preserves the current receipt graph.',
+      'A list requirement spans multiple physical lines.',
+      '| Field | Value |',
+    ]);
+  });
+
+  it('resumes mandatory parsing after a multiline HTML comment', () => {
+    const spec = `# Contract
+<!--
+- Hidden MUST text is not a requirement.
+-->
+- Runtime MUST retain this visible requirement.
+`;
+    expect(deriveSpecMandatoryAcceptanceCriteria(spec).map((entry) => entry.text)).toEqual([
+      'Runtime MUST retain this visible requirement.',
+    ]);
+  });
+
+  it('keeps HTML comments with alternate valid endings out of mandatory criteria', () => {
+    const spec = `# Contract
+<!-- hidden MUST not be accepted --!>
+- Runtime MUST remain visible.
+`;
+    expect(deriveSpecMandatoryAcceptanceCriteria(spec).map((entry) => entry.text)).toEqual([
+      'Runtime MUST remain visible.',
+    ]);
+  });
+
+  it('keeps requirements after void HTML tags and inside semantic containers', () => {
+    const spec = `# Contract
+<br>
+- Runtime MUST remain visible after a void tag.
+
+<details>
+<summary>Normative details</summary>
+
+- Runtime MUST capture requirements inside details.
+</details>
+`;
+
+    expect(deriveSpecMandatoryAcceptanceCriteria(spec).map((entry) => entry.text)).toEqual([
+      'Runtime MUST remain visible after a void tag.',
+      'Runtime MUST capture requirements inside details.',
+    ]);
+  });
+
+  it('derives a separate mandatory criterion for every table row', () => {
+    const spec = `# Contract
+| Check | Requirement |
+| --- | --- |
+| first | Runtime MUST retain the first result. |
+| second | Runtime MUST retain the second result. |
+`;
+
+    expect(deriveSpecMandatoryAcceptanceCriteria(spec).map((entry) => entry.text)).toEqual([
+      '| Check | Requirement |',
+      '| first | Runtime MUST retain the first result. |',
+      '| second | Runtime MUST retain the second result. |',
+    ]);
   });
 
   it('keeps the Scenario ID set stable when Scenario blocks are reordered', () => {
@@ -244,7 +425,7 @@ Alpha result.
     ]);
   });
 
-  it('ignores Scenario headings inside HTML blocks', () => {
+  it('does not hide Scenario headings merely because they are inside an HTML container', () => {
     const spec = `<div>
 ### Scenario: HTML example only
 </div>
@@ -254,7 +435,7 @@ Alpha result.
 Real result.
 `;
 
-    expect(deriveSpecAcceptanceCriteria(spec)).toHaveLength(1);
+    expect(deriveSpecAcceptanceCriteria(spec)).toHaveLength(2);
   });
 
   it('fails closed on duplicate Acceptance sections and empty criteria', () => {
@@ -273,13 +454,17 @@ Real result.
 });
 
 describe('Native verification acceptance evidence block', () => {
+  const receiptRef = (character: string) =>
+    `runtime/evidence/receipts/${character.repeat(64)}.json`;
   const entries = [
     {
       acceptance_id: `acceptance-${'1'.repeat(64)}`,
-      evidence_refs: ['runtime/evidence/login-test.json'],
+      status: 'passed' as const,
+      evidence_refs: [receiptRef('a')],
     },
     {
       acceptance_id: `acceptance-${'2'.repeat(64)}`,
+      status: 'failed' as const,
       evidence_refs: [],
       skipped_reason: 'Requires a hardware security key.',
     },
@@ -342,8 +527,9 @@ Focused tests passed.
 [
   {
     "acceptance_id": "${id}",
-    "evidence_refs": ["review-visible.json"],
-    "evidence_refs": ["machine-only.json"]
+    "status": "passed",
+    "evidence_refs": ["${receiptRef('b')}"],
+    "evidence_refs": ["${receiptRef('c')}"]
   }
 ]
 ${NATIVE_ACCEPTANCE_EVIDENCE_END_MARKER}`;
@@ -358,13 +544,13 @@ ${NATIVE_ACCEPTANCE_EVIDENCE_END_MARKER}`;
   });
 
   it('rejects duplicate or empty acceptance IDs and unknown fields', () => {
-    const duplicate = [entries[0], { ...entries[0], evidence_refs: ['other.json'] }];
+    const duplicate = [entries[0], { ...entries[0], evidence_refs: [receiptRef('d')] }];
     expect(() => serializeNativeVerificationMachineBlock(duplicate)).toThrow(
       'duplicate acceptance_id',
     );
     expect(() =>
       serializeNativeVerificationMachineBlock([
-        { acceptance_id: '', evidence_refs: ['receipt.json'] },
+        { acceptance_id: '', status: 'passed', evidence_refs: [receiptRef('e')] },
       ]),
     ).toThrow('acceptance_id');
     expect(() =>
@@ -377,22 +563,64 @@ ${NATIVE_ACCEPTANCE_EVIDENCE_END_MARKER}`;
     ).toThrow('unknown field');
   });
 
-  it('requires either evidence refs or a skipped reason, but never both', () => {
+  it('requires passed evidence and lets failed entries use receipts, a reason, or both', () => {
     expect(() =>
       serializeNativeVerificationMachineBlock([
-        { acceptance_id: `acceptance-${'3'.repeat(64)}`, evidence_refs: [] },
+        {
+          acceptance_id: `acceptance-${'3'.repeat(64)}`,
+          status: 'passed',
+          evidence_refs: [],
+        },
       ]),
-    ).toThrow('evidence_refs or skipped_reason');
+    ).toThrow('passed status requires evidence_refs');
+
+    expect(
+      serializeNativeVerificationMachineBlock([
+        {
+          acceptance_id: `acceptance-${'3'.repeat(64)}`,
+          status: 'failed',
+          evidence_refs: [receiptRef('f')],
+          skipped_reason: 'The automated check failed.',
+        },
+      ]),
+    ).toContain(receiptRef('f'));
 
     expect(() =>
       serializeNativeVerificationMachineBlock([
         {
           acceptance_id: `acceptance-${'3'.repeat(64)}`,
-          evidence_refs: ['receipt.json'],
-          skipped_reason: 'Not run.',
+          status: 'failed',
+          evidence_refs: [],
         },
       ]),
-    ).toThrow('must not include both');
+    ).toThrow('failed status requires evidence_refs or a skipped_reason');
+  });
+
+  it('rejects removed waived entries and waiver refs', () => {
+    expect(() =>
+      serializeNativeVerificationMachineBlock([
+        {
+          acceptance_id: `acceptance-${'9'.repeat(64)}`,
+          status: 'waived',
+          evidence_refs: [],
+          waiver_ref: `runtime/evidence/waivers/${'9'.repeat(64)}.json`,
+        },
+      ]),
+    ).toThrow('unknown field');
+    expect(() =>
+      serializeNativeVerificationMachineBlock([
+        {
+          acceptance_id: `acceptance-${'8'.repeat(64)}`,
+          evidence_refs: [],
+          status: 'waived',
+          waiver: {
+            reason: 'The required platform is unavailable.',
+            risk: 'The fallback may miss a platform-specific regression.',
+            alternative_evidence_refs: ['test/fallback.md'],
+          },
+        },
+      ]),
+    ).toThrow('unknown field');
   });
 
   it('rejects empty, duplicate, or non-string evidence refs and blank skipped reasons', () => {
@@ -400,6 +628,7 @@ ${NATIVE_ACCEPTANCE_EVIDENCE_END_MARKER}`;
       serializeNativeVerificationMachineBlock([
         {
           acceptance_id: `acceptance-${'4'.repeat(64)}`,
+          status: 'passed',
           evidence_refs: ['', 'receipt.json'],
         },
       ]),
@@ -408,7 +637,8 @@ ${NATIVE_ACCEPTANCE_EVIDENCE_END_MARKER}`;
       serializeNativeVerificationMachineBlock([
         {
           acceptance_id: `acceptance-${'4'.repeat(64)}`,
-          evidence_refs: ['receipt.json', 'receipt.json'],
+          status: 'passed',
+          evidence_refs: [receiptRef('a'), receiptRef('a')],
         },
       ]),
     ).toThrow('duplicate evidence ref');
@@ -416,6 +646,7 @@ ${NATIVE_ACCEPTANCE_EVIDENCE_END_MARKER}`;
       serializeNativeVerificationMachineBlock([
         {
           acceptance_id: `acceptance-${'4'.repeat(64)}`,
+          status: 'passed',
           evidence_refs: [42],
         },
       ]),
@@ -424,6 +655,7 @@ ${NATIVE_ACCEPTANCE_EVIDENCE_END_MARKER}`;
       serializeNativeVerificationMachineBlock([
         {
           acceptance_id: `acceptance-${'4'.repeat(64)}`,
+          status: 'failed',
           evidence_refs: [],
           skipped_reason: '   ',
         },
@@ -438,6 +670,7 @@ ${NATIVE_ACCEPTANCE_EVIDENCE_END_MARKER}`;
         serializeNativeVerificationMachineBlock([
           {
             acceptance_id: `acceptance-${'5'.repeat(64)}`,
+            status: 'passed',
             evidence_refs: [reference],
           },
         ]),

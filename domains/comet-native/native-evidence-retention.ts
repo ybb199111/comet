@@ -27,6 +27,7 @@ import {
   parseNativePartialAllowance,
   parseNativeVerificationEvidenceEnvelope,
 } from './native-verification-evidence.js';
+import { parseNativeVerificationReceipt } from './native-verification-receipt.js';
 
 export const NATIVE_EVIDENCE_RETENTION_POLICY = Object.freeze({
   minimumAgeMs: 30 * 24 * 60 * 60 * 1_000,
@@ -42,13 +43,14 @@ const HASH_FILE_PATTERN = /^([a-f0-9]{64})\.json$/u;
 const CLEANUP_QUARANTINE_PATTERN =
   /^\.([a-f0-9]{64}\.json)\.([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\.gc$/u;
 const MANAGED_REF_PATTERN =
-  /^runtime\/evidence\/(snapshots|scopes|allowances|verifications|reports|check-receipts)\/[a-f0-9]{64}\.json$/u;
+  /^runtime\/evidence\/(snapshots|scopes|allowances|verifications|reports|receipts|check-receipts)\/[a-f0-9]{64}\.json$/u;
 const MANAGED_KINDS = [
   'snapshots',
   'scopes',
   'allowances',
   'verifications',
   'reports',
+  'receipts',
   'check-receipts',
 ] as const;
 
@@ -279,7 +281,8 @@ function parseDocument(
         evidence.implementationScopeRef,
         nativeReportEvidenceRef(evidence.reportHash),
         ...managedDependency(evidence.partialAllowanceRef),
-        ...managedDependency(evidence.receiptRef),
+        ...evidence.requiredReceiptRefs,
+        ...evidence.receiptRefs,
         ...traceDependencies,
       ],
     };
@@ -299,6 +302,16 @@ function parseDocument(
       throw new Error('Native report evidence filename/hash does not match its content');
     }
     return { canonical: report, dependencies: [] };
+  }
+  if (kind === 'receipts') {
+    const receipt = parseNativeVerificationReceipt(value);
+    if (receipt.bindings.change !== expectedChange || receipt.receiptHash !== hash) {
+      throw new Error('Native verification receipt filename/change does not match its content');
+    }
+    return {
+      canonical: receipt,
+      dependencies: receipt.kind === 'static-inspection' ? [receipt.evidence.checkReceiptRef] : [],
+    };
   }
   const receipt = parseNativeCheckReceipt(value);
   if (receipt.change !== expectedChange || receipt.receiptHash !== hash) {

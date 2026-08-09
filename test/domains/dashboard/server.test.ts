@@ -5,6 +5,16 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 import { startDashboardServer } from '../../../domains/dashboard/server.js';
+import { resolveDashboardStaticPath } from '../../../domains/dashboard/server.js';
+import {
+  defaultProjectConfig,
+  writeProjectConfig,
+} from '../../../domains/comet-native/native-config.js';
+import { nativeProjectPaths } from '../../../domains/comet-native/native-paths.js';
+import {
+  createNativeChange,
+  nativeChangeDir,
+} from '../../../domains/comet-native/native-change.js';
 
 interface HttpResult {
   status: number;
@@ -77,6 +87,182 @@ describe('startDashboardServer', () => {
     });
   });
 
+  it('lists the current project and only resolves snapshot requests by registered project id', async () => {
+    const handle = await startDashboardServer({
+      projectPath: projectDir,
+      port: 0,
+      webRoot: webDir,
+    });
+    handles.push(handle);
+
+    const directoryResponse = await request(handle.port, '/api/dashboard/projects');
+    expect(directoryResponse.status).toBe(200);
+    const directory = JSON.parse(directoryResponse.body) as {
+      currentProjectId: string;
+      projects: Array<{ id: string; path: string }>;
+    };
+    expect(directory.projects).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: projectDir })]),
+    );
+
+    const snapshotResponse = await request(
+      handle.port,
+      `/api/dashboard/projects/${directory.currentProjectId}`,
+    );
+    expect(snapshotResponse.status).toBe(200);
+    expect(JSON.parse(snapshotResponse.body)).toMatchObject({
+      project: expect.objectContaining({ path: projectDir }),
+    });
+
+    const unknownResponse = await request(handle.port, '/api/dashboard/projects/not-a-project-id');
+    expect(unknownResponse.status).toBe(404);
+    expect(JSON.parse(unknownResponse.body)).toEqual({ error: 'Unknown dashboard project id' });
+  });
+
+  it('serves paginated change rows and loads a selected change detail on demand', async () => {
+    const changesRoot = path.join(projectDir, 'openspec', 'changes');
+    await fs.mkdir(changesRoot, { recursive: true });
+    for (let index = 0; index < 6; index += 1) {
+      const changeDir = path.join(changesRoot, `server-${index}`);
+      await fs.mkdir(changeDir, { recursive: true });
+      await fs.writeFile(path.join(changeDir, '.comet.yaml'), 'phase: build\n');
+      await fs.writeFile(path.join(changeDir, 'tasks.md'), '- [ ] pending\n');
+      await fs.writeFile(path.join(changeDir, 'proposal.md'), '# Proposal\n');
+    }
+
+    const handle = await startDashboardServer({
+      projectPath: projectDir,
+      port: 0,
+      webRoot: webDir,
+    });
+    handles.push(handle);
+
+    const directoryResponse = await request(handle.port, '/api/dashboard/projects');
+    const directory = JSON.parse(directoryResponse.body) as { currentProjectId: string };
+    const base = `/api/dashboard/projects/${directory.currentProjectId}`;
+
+    const overviewResponse = await request(handle.port, `${base}/overview`);
+    expect(overviewResponse.status).toBe(200);
+    expect(JSON.parse(overviewResponse.body)).toMatchObject({
+      summary: { activeChanges: 6 },
+    });
+    expect(JSON.parse(overviewResponse.body)).not.toHaveProperty('changes');
+
+    const pageResponse = await request(handle.port, `${base}/changes?status=active&limit=5`);
+    expect(pageResponse.status).toBe(200);
+    const page = JSON.parse(pageResponse.body) as {
+      items: Array<{ id: string; status: string }>;
+      total: number;
+      nextCursor: string | null;
+    };
+    expect(page.total).toBe(6);
+    expect(page.items).toHaveLength(5);
+    expect(page.nextCursor).toEqual(expect.any(String));
+
+    const detailResponse = await request(
+      handle.port,
+      `${base}/change?changeId=${encodeURIComponent(page.items[0].id)}`,
+    );
+    expect(detailResponse.status).toBe(200);
+    expect(JSON.parse(detailResponse.body)).toMatchObject({
+      id: page.items[0].id,
+      artifacts: expect.any(Object),
+      artifactPreviews: expect.any(Array),
+    });
+  });
+
+  it('serves Native changes from a paginated endpoint instead of embedding them in overview', async () => {
+    await writeProjectConfig(projectDir, defaultProjectConfig('docs'));
+    const paths = await nativeProjectPaths(projectDir, 'docs');
+    for (let index = 0; index < 6; index += 1) {
+      const state = await createNativeChange({
+        paths,
+        name: `native-server-${index}`,
+        language: 'en',
+      });
+      await fs.writeFile(path.join(nativeChangeDir(paths, state.name), 'brief.md'), '# Outcome\n');
+    }
+
+    const handle = await startDashboardServer({
+      projectPath: projectDir,
+      port: 0,
+      webRoot: webDir,
+    });
+    handles.push(handle);
+
+    const directoryResponse = await request(handle.port, '/api/dashboard/projects');
+    const directory = JSON.parse(directoryResponse.body) as { currentProjectId: string };
+    const base = `/api/dashboard/projects/${directory.currentProjectId}`;
+
+    const overviewResponse = await request(handle.port, `${base}/overview`);
+    expect(overviewResponse.status).toBe(200);
+    expect(JSON.parse(overviewResponse.body)).toMatchObject({
+      native: {
+        totalChangeCount: 6,
+        activeChangeCount: 6,
+        changes: [],
+      },
+    });
+
+    const firstResponse = await request(
+      handle.port,
+      `${base}/native-changes?status=active&limit=5`,
+    );
+    expect(firstResponse.status).toBe(200);
+    const first = JSON.parse(firstResponse.body) as {
+      items: Array<{ name: string; status: string }>;
+      total: number;
+      nextCursor: string | null;
+    };
+    expect(first.total).toBe(6);
+    expect(first.items).toHaveLength(5);
+    expect(first.items.every((item) => item.status === 'active')).toBe(true);
+    expect(first.items[0]).not.toHaveProperty('artifacts');
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    const detailResponse = await request(
+      handle.port,
+      `${base}/native-change?status=active&changeName=${encodeURIComponent(first.items[0].name)}`,
+    );
+    expect(detailResponse.status).toBe(200);
+    expect(JSON.parse(detailResponse.body)).toMatchObject({
+      name: first.items[0].name,
+      artifacts: [expect.objectContaining({ key: 'brief' })],
+    });
+
+    const secondResponse = await request(
+      handle.port,
+      `${base}/native-changes?status=active&limit=5&cursor=${encodeURIComponent(first.nextCursor!)}`,
+    );
+    expect(secondResponse.status).toBe(200);
+    expect(JSON.parse(secondResponse.body)).toMatchObject({
+      total: 6,
+      items: expect.arrayContaining([expect.objectContaining({ name: 'native-server-5' })]),
+      nextCursor: null,
+    });
+  });
+
+  it('rejects a Native page limit above the Classic Dashboard maximum', async () => {
+    await writeProjectConfig(projectDir, defaultProjectConfig('docs'));
+
+    const handle = await startDashboardServer({
+      projectPath: projectDir,
+      port: 0,
+      webRoot: webDir,
+    });
+    handles.push(handle);
+
+    const directoryResponse = await request(handle.port, '/api/dashboard/projects');
+    const directory = JSON.parse(directoryResponse.body) as { currentProjectId: string };
+    const response = await request(
+      handle.port,
+      `/api/dashboard/projects/${directory.currentProjectId}/native-changes?status=active&limit=51`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(JSON.parse(response.body).error).toContain('between 1 and 50');
+  });
+
   it('serves the static index for the root path', async () => {
     const handle = await startDashboardServer({
       projectPath: projectDir,
@@ -105,7 +291,11 @@ describe('startDashboardServer', () => {
     expect(res.body).toContain('console.log');
   });
 
-  it('rejects path traversal attempts', async () => {
+  it('rejects static paths that escape its web root', () => {
+    expect(resolveDashboardStaticPath(webDir, '/../etc/passwd')).toBeNull();
+  });
+
+  it('rejects encoded path traversal attempts', async () => {
     const handle = await startDashboardServer({
       projectPath: projectDir,
       port: 0,
@@ -113,10 +303,9 @@ describe('startDashboardServer', () => {
     });
     handles.push(handle);
 
-    const res = await request(handle.port, '/../etc/passwd');
-    // Node's http client normalises `..` before sending, so we expect 404
-    // (file not found) or 403 (traversal guard) — either is acceptable.
-    expect([403, 404]).toContain(res.status);
+    const response = await request(handle.port, '/%2e%2e/etc/passwd');
+    expect(response.status).toBe(404);
+    expect(JSON.parse(response.body)).toEqual({ error: 'Not found' });
   });
 
   it('falls back to the next available port when the requested one is taken', async () => {

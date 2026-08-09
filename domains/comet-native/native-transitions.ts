@@ -2,6 +2,8 @@ import { randomUUID } from 'crypto';
 
 import { decideWithResolver, recordOutcomeWithResolver } from '../engine/loop.js';
 import { inspectNativeGuard } from './native-guards.js';
+import { DEFAULT_NATIVE_MAX_VERIFY_FAILURES } from './native-config.js';
+import { checkNativeChangeLocked } from './native-check.js';
 import { projectNativeAcceptancePage } from './native-acceptance.js';
 import { nativeChangeDir, readNativeChange } from './native-change.js';
 import { collectNativeContractFiles } from './native-contract-files.js';
@@ -21,10 +23,7 @@ import {
   nativeRepairScopeHash,
   type NativeRepairTrajectoryProjection,
 } from './native-repair-runtime.js';
-import {
-  hashNativeRepairOverrideSummary,
-  normalizeNativeRepairFailureTokens,
-} from './native-repair-stagnation.js';
+import { hashNativeRepairOverrideSummary } from './native-repair-stagnation.js';
 import {
   NATIVE_RUNTIME_HASH,
   NATIVE_RUNTIME_PACKAGE,
@@ -37,6 +36,7 @@ import {
   inspectNativeVerificationEvidence,
   inspectNativeVerificationFreshness,
   persistNativeVerificationEvidence,
+  type NativeVerificationPreparation,
 } from './native-verification-runtime.js';
 import {
   continueNativeTransitionLocked,
@@ -49,6 +49,7 @@ import type {
   NativeAdvanceEvidence,
   NativeAdvanceResult,
   NativeChangeState,
+  NativeClarificationMode,
   NativePhase,
   NativeProjectPaths,
   NativeRepairDecisionProjection,
@@ -59,10 +60,19 @@ interface AdvanceNativeChangeOptions {
   paths: NativeProjectPaths;
   name: string;
   evidence: NativeAdvanceEvidence;
+  clarificationMode: NativeClarificationMode;
+  maxVerifyFailures?: number;
   now?: Date;
   runId?: () => string;
   transitionId?: () => string;
   hooks?: NativeTransitionHooks;
+}
+
+export function formatNativeReceiptBindingMismatchMessage(options: {
+  change: string;
+  detail: string;
+}): string {
+  return `Native verification receipt binding is invalid: ${options.detail}. Re-issue the affected receipts with \`comet native receipt refresh ${options.change} --apply\`.`;
 }
 
 function hasEvidenceRetreatExtras(evidence: NativeAdvanceEvidence): boolean {
@@ -74,9 +84,6 @@ function hasEvidenceRetreatExtras(evidence: NativeAdvanceEvidence): boolean {
     evidence.partialReason !== undefined ||
     evidence.verificationResult !== undefined ||
     evidence.verificationReport !== undefined ||
-    evidence.verificationReceipt !== undefined ||
-    evidence.repairFailureCategories !== undefined ||
-    evidence.repairFailedCheckIds !== undefined ||
     evidence.repairOverrideSignature !== undefined ||
     evidence.repairOverrideSummary !== undefined
   );
@@ -109,19 +116,62 @@ function repairFinding(
   };
 }
 
+function nativeVerificationFindingResult(options: {
+  paths: NativeProjectPaths;
+  state: NativeChangeState;
+  previousPhase: NativePhase;
+  clarificationMode: NativeClarificationMode;
+  preparation: NativeVerificationPreparation;
+}): NativeAdvanceResult {
+  const findings = structureNativeFindings({
+    paths: options.paths,
+    state: options.state,
+    findings: options.preparation.findingCodes.map((code) => {
+      if (
+        code === 'verification-receipt-binding-mismatch' &&
+        options.preparation.receiptBindingFailures &&
+        options.preparation.receiptBindingFailures.length > 0
+      ) {
+        const detail = options.preparation.receiptBindingFailures
+          .map((failure) => {
+            const target = failure.acceptanceId
+              ? `${failure.ref}[${failure.acceptanceId}]`
+              : failure.ref;
+            return `${target} -> ${failure.mismatches.join('; ')}`;
+          })
+          .join(' | ');
+        return {
+          code,
+          message: formatNativeReceiptBindingMismatchMessage({
+            change: options.state.name,
+            detail,
+          }),
+        };
+      }
+      return {
+        code,
+        message: `Native verification evidence is not current: ${code}`,
+      };
+    }),
+  });
+  return {
+    change: options.state,
+    previousPhase: options.previousPhase,
+    next: 'manual',
+    nextCommand: null,
+    findings,
+    continuation: nativeContinuation({
+      state: options.state,
+      findings,
+      clarificationMode: options.clarificationMode,
+    }),
+  };
+}
+
 function validateNativeAdvanceEvidence(evidence: NativeAdvanceEvidence): void {
   assertNativeTrajectoryText(evidence.summary, 'Native transition summary');
   if (evidence.noCodeReason !== undefined) {
     assertNativeTrajectoryText(evidence.noCodeReason, 'Native transition no-code reason');
-  }
-  if (
-    evidence.repairFailureCategories !== undefined ||
-    evidence.repairFailedCheckIds !== undefined
-  ) {
-    normalizeNativeRepairFailureTokens({
-      categories: evidence.repairFailureCategories,
-      failedCheckIds: evidence.repairFailedCheckIds,
-    });
   }
   if (
     evidence.repairOverrideSignature !== undefined &&
@@ -151,11 +201,6 @@ function normalizeNativeAdvanceEvidence(evidence: NativeAdvanceEvidence): Native
 }
 
 function validateRepairEvidence(state: NativeChangeState, evidence: NativeAdvanceEvidence): void {
-  const hasFailureFacts =
-    evidence.repairFailureCategories !== undefined || evidence.repairFailedCheckIds !== undefined;
-  if (hasFailureFacts && (state.phase !== 'verify' || evidence.verificationResult !== 'fail')) {
-    throw new Error('Native repair failure facts are only valid for a failed Verify outcome');
-  }
   const hasOverrideSignature = evidence.repairOverrideSignature !== undefined;
   const hasOverrideSummary = evidence.repairOverrideSummary !== undefined;
   if (hasOverrideSignature !== hasOverrideSummary) {
@@ -228,6 +273,7 @@ async function retreatStaleNativeEvidence(options: {
       continuation: nativeContinuation({
         state: options.state,
         archiveReady: previousPhase === 'archive',
+        clarificationMode: options.transition.clarificationMode,
       }),
     };
   }
@@ -282,7 +328,10 @@ async function retreatStaleNativeEvidence(options: {
     next: 'auto',
     nextCommand: null,
     findings: [],
-    continuation: nativeContinuation({ state: persisted }),
+    continuation: nativeContinuation({
+      state: persisted,
+      clarificationMode: options.transition.clarificationMode,
+    }),
   };
 }
 
@@ -291,18 +340,23 @@ export async function advanceNativeChange(
 ): Promise<NativeAdvanceResult> {
   const normalizedOptions = {
     ...options,
+    maxVerifyFailures: options.maxVerifyFailures ?? DEFAULT_NATIVE_MAX_VERIFY_FAILURES,
     evidence: normalizeNativeAdvanceEvidence(options.evidence),
   };
   validateNativeAdvanceEvidence(normalizedOptions.evidence);
   return withNativeMutationLock(options.paths, `advance ${options.name}`, () =>
     withNativeTransitionLock(options.paths, options.name, `advance ${options.name}`, () =>
-      advanceNativeChangeLocked(normalizedOptions),
+      advanceNativeChangeLocked(
+        normalizedOptions as AdvanceNativeChangeOptions & {
+          maxVerifyFailures: number;
+        },
+      ),
     ),
   );
 }
 
 async function advanceNativeChangeLocked(
-  options: AdvanceNativeChangeOptions,
+  options: AdvanceNativeChangeOptions & { maxVerifyFailures: number },
 ): Promise<NativeAdvanceResult> {
   await settleNativeChangeJournalsLocked(options.paths, options.name);
   const state = await readNativeChange(options.paths, options.name);
@@ -318,35 +372,53 @@ async function advanceNativeChangeLocked(
       last.data.evidenceHash === hash &&
       last.data.nextPhase === state.phase
     ) {
-      const repair = Object.hasOwn(last.data, 'repairStagnation')
-        ? await inspectLatestNativeRepairDecision(options.paths, state)
-        : null;
-      const repairFindings =
-        repair && repair.disposition !== 'continue'
-          ? structureNativeFindings({
-              paths: options.paths,
-              state,
-              findings: [repairFinding(repair)],
-            })
-          : [];
-      const stopped = repair?.disposition === 'manual-stop' || repair?.disposition === 'hard-stop';
-      return {
-        change: state,
-        previousPhase: (last.data.previousPhase as NativePhase) ?? state.phase,
-        next: stopped ? 'manual' : 'auto',
-        nextCommand: stopped
-          ? null
-          : state.phase === 'archive'
-            ? `comet native archive ${state.name} --dry-run`
-            : null,
-        findings: repairFindings,
-        continuation: nativeContinuation({
-          state,
+      const verificationRetryIsFresh =
+        last.data.previousPhase === 'verify'
+          ? ['complete', 'partial'].includes(
+              (
+                await inspectNativeVerificationFreshness({
+                  paths: options.paths,
+                  state,
+                  now: options.now,
+                })
+              ).freshness,
+            )
+          : true;
+      if (!verificationRetryIsFresh) {
+        // Do not let an old transition hash bypass the current report/envelope freshness fence.
+      } else {
+        const repair = Object.hasOwn(last.data, 'repairStagnation')
+          ? await inspectLatestNativeRepairDecision(options.paths, state, options.maxVerifyFailures)
+          : null;
+        const repairFindings =
+          repair && repair.disposition !== 'continue'
+            ? structureNativeFindings({
+                paths: options.paths,
+                state,
+                findings: [repairFinding(repair)],
+              })
+            : [];
+        const stopped =
+          repair?.disposition === 'manual-stop' || repair?.disposition === 'hard-stop';
+        return {
+          change: state,
+          previousPhase: (last.data.previousPhase as NativePhase) ?? state.phase,
+          next: stopped ? 'manual' : 'auto',
+          nextCommand: stopped
+            ? null
+            : state.phase === 'archive'
+              ? `comet native archive ${state.name} --dry-run`
+              : null,
           findings: repairFindings,
-          archiveReady: state.phase === 'archive' && state.verification_result === 'pass',
-        }),
-        ...(repair ? { repair } : {}),
-      };
+          continuation: nativeContinuation({
+            state,
+            findings: repairFindings,
+            archiveReady: state.phase === 'archive' && state.verification_result === 'pass',
+            clarificationMode: options.clarificationMode,
+          }),
+          ...(repair ? { repair } : {}),
+        };
+      }
     }
   }
 
@@ -386,6 +458,7 @@ async function advanceNativeChangeLocked(
     paths: options.paths,
     state: candidate,
     evidence: options.evidence,
+    clarificationMode: options.clarificationMode,
   });
   if (!guard.valid) {
     const findings = structureNativeFindings({
@@ -399,7 +472,11 @@ async function advanceNativeChangeLocked(
       next: 'manual',
       nextCommand: null,
       findings,
-      continuation: nativeContinuation({ state, findings }),
+      continuation: nativeContinuation({
+        state,
+        findings,
+        clarificationMode: options.clarificationMode,
+      }),
     };
   }
 
@@ -456,7 +533,11 @@ async function advanceNativeChangeLocked(
       next: 'manual',
       nextCommand: null,
       findings,
-      continuation: nativeContinuation({ state, findings }),
+      continuation: nativeContinuation({
+        state,
+        findings,
+        clarificationMode: options.clarificationMode,
+      }),
     };
   }
   const preparedScope = buildEvidence
@@ -490,7 +571,11 @@ async function advanceNativeChangeLocked(
       next: 'manual',
       nextCommand: null,
       findings,
-      continuation: nativeContinuation({ state, findings }),
+      continuation: nativeContinuation({
+        state,
+        findings,
+        clarificationMode: options.clarificationMode,
+      }),
       preparedScope,
     };
   }
@@ -502,6 +587,7 @@ async function advanceNativeChangeLocked(
       paths: options.paths,
       state,
       currentImplementationScope: buildEvidence.bundle,
+      maxVerifyFailures: options.maxVerifyFailures,
       ...(options.evidence.repairOverrideSignature && options.evidence.repairOverrideSummary
         ? {
             override: {
@@ -543,7 +629,11 @@ async function advanceNativeChangeLocked(
         next: 'manual',
         nextCommand: null,
         findings,
-        continuation: nativeContinuation({ state, findings }),
+        continuation: nativeContinuation({
+          state,
+          findings,
+          clarificationMode: options.clarificationMode,
+        }),
         preparedScope: preparedScope
           ? { ...preparedScope, partialAllowanceRef: null }
           : preparedScope,
@@ -552,34 +642,56 @@ async function advanceNativeChangeLocked(
     repairEventProjection = repairGuard.eventProjection;
   }
 
-  const verificationEvidence =
+  let verificationEvidence =
     state.phase === 'verify'
       ? await inspectNativeVerificationEvidence({
           paths: options.paths,
           state: candidate,
           result: options.evidence.verificationResult!,
           reportRef: options.evidence.verificationReport!,
-          receiptRef: options.evidence.verificationReceipt ?? null,
+          receiptRef: null,
+          requireReceipt: false,
+          preflightOnly: options.evidence.verificationResult === 'pass',
           now: options.now,
         })
       : null;
+
+  // Validate the report, acceptance matrix, and acceptance receipts before
+  // running the required check. Invalid Agent-authored evidence must not
+  // trigger an expensive check that cannot make the report valid.
   if (verificationEvidence && !verificationEvidence.ready) {
-    const findings = structureNativeFindings({
+    return nativeVerificationFindingResult({
       paths: options.paths,
       state,
-      findings: verificationEvidence.findingCodes.map((code) => ({
-        code,
-        message: `Native verification evidence is not current: ${code}`,
-      })),
-    });
-    return {
-      change: state,
       previousPhase,
-      next: 'manual',
-      nextCommand: null,
-      findings,
-      continuation: nativeContinuation({ state, findings }),
-    };
+      clarificationMode: options.clarificationMode,
+      preparation: verificationEvidence,
+    });
+  }
+
+  if (state.phase === 'verify' && options.evidence.verificationResult === 'pass') {
+    const verificationReceipt = (
+      await checkNativeChangeLocked({ paths: options.paths, name: state.name })
+    ).ref;
+    verificationEvidence = await inspectNativeVerificationEvidence({
+      paths: options.paths,
+      state: candidate,
+      result: options.evidence.verificationResult,
+      reportRef: options.evidence.verificationReport!,
+      receiptRef: verificationReceipt,
+      preflight: verificationEvidence?.preflight,
+      now: options.now,
+    });
+  }
+
+  if (verificationEvidence && !verificationEvidence.ready) {
+    return nativeVerificationFindingResult({
+      paths: options.paths,
+      state,
+      previousPhase,
+      clarificationMode: options.clarificationMode,
+      preparation: verificationEvidence,
+    });
   }
 
   let repairDecision: NativeRepairDecisionProjection | null = null;
@@ -593,12 +705,7 @@ async function advanceNativeChangeLocked(
       paths: options.paths,
       state,
       envelope: verificationEvidence.envelope,
-      ...(options.evidence.repairFailureCategories
-        ? { categories: options.evidence.repairFailureCategories }
-        : {}),
-      ...(options.evidence.repairFailedCheckIds
-        ? { failedCheckIds: options.evidence.repairFailedCheckIds }
-        : {}),
+      maxVerifyFailures: options.maxVerifyFailures,
     });
     repairEventProjection = repairResult.eventProjection;
     repairScopeHashForEvent = repairResult.facts.implementationScopeHash;
@@ -647,11 +754,7 @@ async function advanceNativeChangeLocked(
     ...candidate,
     revision: state.revision + 1,
     phase: advanced.currentStep as NativePhase,
-    approval: options.evidence.confirmed
-      ? ('confirmed' as const)
-      : state.phase === 'shape' && state.approval === null
-        ? ('implicit' as const)
-        : state.approval,
+    approval: options.evidence.confirmed ? ('confirmed' as const) : state.approval,
     approved_contract_hash:
       state.phase === 'shape'
         ? shapeContract!.contract.contractHash
@@ -756,6 +859,7 @@ async function advanceNativeChangeLocked(
       state: persisted,
       findings: repairFindings,
       archiveReady: persisted.phase === 'archive' && persisted.verification_result === 'pass',
+      clarificationMode: options.clarificationMode,
     }),
     ...(preparedScope ? { preparedScope } : {}),
     ...(repairDecision ? { repair: repairDecision } : {}),

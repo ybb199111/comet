@@ -21,8 +21,13 @@ import {
   parseNativePartialAllowance,
   parseNativeVerificationEvidenceEnvelope,
   type NativePartialAllowance,
+  type NativeReadableVerificationEvidenceEnvelope,
   type NativeVerificationEvidenceEnvelope,
 } from './native-verification-evidence.js';
+import {
+  parseNativeVerificationReceipt,
+  type NativeVerificationReceipt,
+} from './native-verification-receipt.js';
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 export const MAX_NATIVE_EVIDENCE_DOCUMENT_BYTES = MAX_NATIVE_IMPLEMENTATION_EVIDENCE_DOCUMENT_BYTES;
@@ -34,12 +39,19 @@ export type NativeEvidenceKind =
   | 'scopes'
   | 'allowances'
   | 'verifications'
-  | 'reports';
+  | 'reports'
+  | 'receipts';
 
 export interface NativeEvidenceReadHooks {
   afterParentChainCaptured?: () => void | Promise<void>;
   afterOpen?: () => void | Promise<void>;
   beforeFinalCheck?: () => void | Promise<void>;
+}
+
+export interface NativeVerificationAcceptanceCounts {
+  total: number;
+  evidenced: number;
+  skipped: number;
 }
 
 interface DirectoryIdentity {
@@ -253,9 +265,18 @@ export async function readNativeVerificationReportSnapshot(
   paths: NativeProjectPaths,
   name: string,
   hash: string,
+  hooks?: NativeEvidenceReadHooks,
+  changeDir?: string,
 ): Promise<string> {
   if (!HASH_PATTERN.test(hash)) throw new Error('Native report evidence hash is invalid');
-  const value = await readEvidenceDocument({ paths, name, kind: 'reports', hash });
+  const value = await readEvidenceDocument({
+    paths,
+    name,
+    kind: 'reports',
+    hash,
+    hooks,
+    changeDir,
+  });
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Native report evidence must be an object');
   }
@@ -274,7 +295,7 @@ export async function readNativeVerificationReportSnapshot(
 
 function parseEvidenceRef(ref: string, expectedKind: NativeEvidenceKind): string {
   const match =
-    /^runtime\/evidence\/(snapshots|scopes|allowances|verifications|reports)\/([a-f0-9]{64})\.json$/u.exec(
+    /^runtime\/evidence\/(snapshots|scopes|allowances|verifications|reports|receipts)\/([a-f0-9]{64})\.json$/u.exec(
       ref,
     );
   if (!match || match[1] !== expectedKind) {
@@ -288,8 +309,12 @@ function evidenceFile(
   name: string,
   kind: NativeEvidenceKind,
   hash: string,
+  changeDir?: string,
 ): string {
-  return path.join(nativeChangeDir(paths, name), ...nativeEvidenceRef(kind, hash).split('/'));
+  return path.join(
+    changeDir ?? nativeChangeDir(paths, name),
+    ...nativeEvidenceRef(kind, hash).split('/'),
+  );
 }
 
 async function readEvidenceDocument(options: {
@@ -298,10 +323,12 @@ async function readEvidenceDocument(options: {
   kind: NativeEvidenceKind;
   hash: string;
   hooks?: NativeEvidenceReadHooks;
+  changeDir?: string;
 }): Promise<unknown> {
-  const file = evidenceFile(options.paths, options.name, options.kind, options.hash);
+  const changeDir = options.changeDir ?? nativeChangeDir(options.paths, options.name);
+  const file = evidenceFile(options.paths, options.name, options.kind, options.hash, changeDir);
   await resolveContainedNativePath(options.paths.nativeRoot, file);
-  return readBoundedEvidenceJson(file, nativeChangeDir(options.paths, options.name), options.hooks);
+  return readBoundedEvidenceJson(file, changeDir, options.hooks);
 }
 
 async function writeEvidenceDocument(options: {
@@ -369,7 +396,7 @@ function parseEnvelope(
   value: unknown,
   expectedName: string,
   expectedHash: string,
-): NativeVerificationEvidenceEnvelope {
+): NativeReadableVerificationEvidenceEnvelope {
   const evidence = parseNativeVerificationEvidenceEnvelope(value);
   if (evidence.change !== expectedName || evidence.envelopeHash !== expectedHash) {
     throw new Error('Native verification evidence ref/hash/change mismatch');
@@ -377,15 +404,75 @@ function parseEnvelope(
   return evidence;
 }
 
+function acceptanceCounts(trace: {
+  total: number;
+  evidenced: number;
+  skipped: number;
+}): NativeVerificationAcceptanceCounts {
+  return {
+    total: trace.total,
+    evidenced: trace.evidenced,
+    skipped: trace.skipped,
+  };
+}
+
+function parseLegacyArchivedAcceptanceCounts(
+  value: unknown,
+  expectedName: string,
+  expectedHash: string,
+): NativeVerificationAcceptanceCounts | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const envelope = value as Record<string, unknown>;
+  if (envelope.schema !== 'comet.native.verification-evidence.v1') return null;
+  if (envelope.change !== expectedName || envelope.envelopeHash !== expectedHash) {
+    throw new Error('Legacy Native verification evidence ref/hash/change mismatch');
+  }
+  const trace = envelope.acceptanceTrace;
+  if (!trace || typeof trace !== 'object' || Array.isArray(trace)) {
+    throw new Error('Legacy Native acceptance trace is invalid');
+  }
+  const counts = trace as Record<string, unknown>;
+  const { total, evidenced, skipped } = counts;
+  const totalCount = typeof total === 'number' ? total : Number.NaN;
+  const evidencedCount = typeof evidenced === 'number' ? evidenced : Number.NaN;
+  const skippedCount = typeof skipped === 'number' ? skipped : Number.NaN;
+  if (
+    counts.schema !== 'comet.native.acceptance-trace.v1' ||
+    !Number.isSafeInteger(totalCount) ||
+    !Number.isSafeInteger(evidencedCount) ||
+    !Number.isSafeInteger(skippedCount) ||
+    totalCount < 0 ||
+    evidencedCount < 0 ||
+    skippedCount < 0 ||
+    evidencedCount + skippedCount > totalCount
+  ) {
+    throw new Error('Legacy Native acceptance trace is invalid');
+  }
+  return { total: totalCount, evidenced: evidencedCount, skipped: skippedCount };
+}
+
 async function assertEnvelopeDependencies(
   paths: NativeProjectPaths,
   name: string,
-  evidence: NativeVerificationEvidenceEnvelope,
+  evidence: NativeReadableVerificationEvidenceEnvelope,
   requireReportSnapshot = false,
+  changeDir?: string,
 ): Promise<void> {
-  const scope = await readNativeImplementationScope(paths, name, evidence.implementationScopeRef);
+  const scope = await readNativeImplementationScope(
+    paths,
+    name,
+    evidence.implementationScopeRef,
+    undefined,
+    changeDir,
+  );
   if (requireReportSnapshot) {
-    await readNativeVerificationReportSnapshot(paths, name, evidence.reportHash);
+    await readNativeVerificationReportSnapshot(
+      paths,
+      name,
+      evidence.reportHash,
+      undefined,
+      changeDir,
+    );
   }
   if (
     scope.scopeHash !== evidence.implementationScopeHash ||
@@ -395,7 +482,13 @@ async function assertEnvelopeDependencies(
     throw new Error('Native verification evidence does not match its implementation scope');
   }
   if (evidence.partialAllowanceRef === null) return;
-  const allowance = await readNativePartialAllowance(paths, name, evidence.partialAllowanceRef);
+  const allowance = await readNativePartialAllowance(
+    paths,
+    name,
+    evidence.partialAllowanceRef,
+    undefined,
+    changeDir,
+  );
   if (
     allowance.allowanceHash !== evidence.partialAllowanceHash ||
     allowance.scopeHash !== scope.scopeHash ||
@@ -445,20 +538,21 @@ export async function readNativeImplementationScopeBundle(
   name: string,
   ref: string,
   hooks?: NativeEvidenceReadHooks,
+  changeDir?: string,
 ): Promise<NativeImplementationScopeBundle> {
   const hash = parseEvidenceRef(ref, 'scopes');
   const scope = parseScope(
-    await readEvidenceDocument({ paths, name, kind: 'scopes', hash, hooks }),
+    await readEvidenceDocument({ paths, name, kind: 'scopes', hash, hooks, changeDir }),
     hash,
   );
   const baselineHash = parseEvidenceRef(scope.baselineProjectionRef, 'snapshots');
   const currentHash = parseEvidenceRef(scope.currentProjectionRef, 'snapshots');
   const [baseline, current] = await Promise.all([
-    readEvidenceDocument({ paths, name, kind: 'snapshots', hash: baselineHash }).then((value) =>
-      parseSnapshot(value, baselineHash),
+    readEvidenceDocument({ paths, name, kind: 'snapshots', hash: baselineHash, changeDir }).then(
+      (value) => parseSnapshot(value, baselineHash),
     ),
-    readEvidenceDocument({ paths, name, kind: 'snapshots', hash: currentHash }).then((value) =>
-      parseSnapshot(value, currentHash),
+    readEvidenceDocument({ paths, name, kind: 'snapshots', hash: currentHash, changeDir }).then(
+      (value) => parseSnapshot(value, currentHash),
     ),
   ]);
   return rebuildNativeImplementationScopeBundle({ baseline, current, scope });
@@ -469,8 +563,9 @@ export async function readNativeImplementationScope(
   name: string,
   ref: string,
   hooks?: NativeEvidenceReadHooks,
+  changeDir?: string,
 ): Promise<NativeImplementationScope> {
-  return (await readNativeImplementationScopeBundle(paths, name, ref, hooks)).scope;
+  return (await readNativeImplementationScopeBundle(paths, name, ref, hooks, changeDir)).scope;
 }
 
 export async function writeNativePartialAllowance(options: {
@@ -505,13 +600,75 @@ export async function readNativePartialAllowance(
   name: string,
   ref: string,
   hooks?: NativeEvidenceReadHooks,
+  changeDir?: string,
 ): Promise<NativePartialAllowance> {
   const hash = parseEvidenceRef(ref, 'allowances');
   return parseAllowance(
-    await readEvidenceDocument({ paths, name, kind: 'allowances', hash, hooks }),
+    await readEvidenceDocument({ paths, name, kind: 'allowances', hash, hooks, changeDir }),
     name,
     hash,
   );
+}
+
+export async function writeNativeVerificationReceipt(options: {
+  paths: NativeProjectPaths;
+  name: string;
+  receipt: NativeVerificationReceipt;
+}): Promise<string> {
+  const receipt = parseNativeVerificationReceipt(options.receipt);
+  if (receipt.bindings.change !== options.name) {
+    throw new Error('Native verification receipt change mismatch');
+  }
+  return writeEvidenceDocument({
+    paths: options.paths,
+    name: options.name,
+    kind: 'receipts',
+    hash: receipt.receiptHash,
+    value: receipt,
+  });
+}
+
+export async function readNativeVerificationReceipt(
+  paths: NativeProjectPaths,
+  name: string,
+  ref: string,
+  hooks?: NativeEvidenceReadHooks,
+  changeDir?: string,
+): Promise<NativeVerificationReceipt> {
+  const hash = parseEvidenceRef(ref, 'receipts');
+  const receipt = parseNativeVerificationReceipt(
+    await readEvidenceDocument({ paths, name, kind: 'receipts', hash, hooks, changeDir }),
+  );
+  if (receipt.bindings.change !== name || receipt.receiptHash !== hash) {
+    throw new Error('Native verification receipt ref/hash/change mismatch');
+  }
+  return receipt;
+}
+
+/**
+ * List persisted typed receipt refs without trusting arbitrary directory names.
+ * Callers still read each document through readNativeVerificationReceipt, which
+ * performs the full bounded and symlink-safe validation.
+ */
+export async function listNativeVerificationReceiptRefs(
+  paths: NativeProjectPaths,
+  name: string,
+): Promise<string[]> {
+  const directory = path.join(nativeChangeDir(paths, name), 'runtime', 'evidence', 'receipts');
+  await resolveContainedNativePath(paths.nativeRoot, directory);
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => /^([a-f0-9]{64})\.json$/u.exec(entry.name)?.[1])
+    .filter((hash): hash is string => hash !== undefined)
+    .sort()
+    .map((hash) => nativeEvidenceRef('receipts', hash));
 }
 
 export async function writeNativeVerificationEvidence(options: {
@@ -520,6 +677,9 @@ export async function writeNativeVerificationEvidence(options: {
   evidence: NativeVerificationEvidenceEnvelope;
 }): Promise<string> {
   const evidence = parseEnvelope(options.evidence, options.name, options.evidence.envelopeHash);
+  if (evidence.schema !== 'comet.native.verification-evidence.v2') {
+    throw new Error('Native active verification evidence must use v2');
+  }
   await assertEnvelopeDependencies(options.paths, options.name, evidence, true);
   return writeEvidenceDocument({
     ...options,
@@ -534,13 +694,40 @@ export async function readNativeVerificationEvidence(
   name: string,
   ref: string,
   hooks?: NativeEvidenceReadHooks,
-): Promise<NativeVerificationEvidenceEnvelope> {
+  changeDir?: string,
+): Promise<NativeReadableVerificationEvidenceEnvelope> {
   const hash = parseEvidenceRef(ref, 'verifications');
   const evidence = parseEnvelope(
-    await readEvidenceDocument({ paths, name, kind: 'verifications', hash, hooks }),
+    await readEvidenceDocument({ paths, name, kind: 'verifications', hash, hooks, changeDir }),
     name,
     hash,
   );
-  await assertEnvelopeDependencies(paths, name, evidence);
+  await assertEnvelopeDependencies(paths, name, evidence, false, changeDir);
   return evidence;
+}
+
+/**
+ * Reads the compact acceptance counters for an archived change. Archived v1
+ * envelopes predate the current receipt-bound v2 parser, but still carry their
+ * immutable acceptance trace and must remain visible in the read-only Dashboard.
+ */
+export async function readArchivedNativeVerificationAcceptanceCounts(
+  paths: NativeProjectPaths,
+  name: string,
+  ref: string,
+  changeDir: string,
+): Promise<NativeVerificationAcceptanceCounts> {
+  const hash = parseEvidenceRef(ref, 'verifications');
+  const value = await readEvidenceDocument({
+    paths,
+    name,
+    kind: 'verifications',
+    hash,
+    changeDir,
+  });
+  const legacy = parseLegacyArchivedAcceptanceCounts(value, name, hash);
+  if (legacy) return legacy;
+  const evidence = parseEnvelope(value, name, hash);
+  await assertEnvelopeDependencies(paths, name, evidence, false, changeDir);
+  return acceptanceCounts(evidence.acceptanceTrace);
 }

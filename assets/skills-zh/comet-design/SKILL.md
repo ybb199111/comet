@@ -5,6 +5,8 @@ description: "仅在用户明确调用 /comet-design，或由 Comet 根 Skill/ru
 
 # Comet 阶段 2：深度设计（Design）
 
+开始或恢复前必须先读取并执行 `comet/reference/classic-layout.md`；本文件中的 OpenSpec CLI 调用必须使用 adapter，文件路径必须使用该协议绑定的 `<classic-*>` 逻辑根。
+
 ## 前置条件
 
 - 活跃 change 已存在（proposal.md、design.md、tasks.md）
@@ -16,7 +18,7 @@ description: "仅在用户明确调用 /comet-design，或由 Comet 根 Skill/ru
 
 ### 0. 入口状态验证（Entry Check）
 
-按 `comet/reference/scripts.md` 定位脚本（定位 `comet-env.mjs`），然后执行入口验证；从任意入口恢复时先按 `comet/reference/context-recovery.md` 运行恢复检查：
+按 `comet/reference/scripts.md` 运行公开 Comet CLI 命令，然后执行入口验证；从任意入口恢复时先按 `comet/reference/context-recovery.md` 运行恢复检查：
 
 ```bash
 comet state select <change-name>
@@ -40,21 +42,21 @@ comet handoff <change-name> design --write
 默认 `context_compression: off` 时生成：
 
 ```text
-openspec/changes/<name>/.comet/handoff/design-context.json
-openspec/changes/<name>/.comet/handoff/design-context.md
+<classic-change-dir>/.comet/handoff/design-context.json
+<classic-change-dir>/.comet/handoff/design-context.md
 ```
 
 启用 beta（项目 `.comet/config.yaml` 中 `classic.context_compression: beta`，创建 change 时快照进入 `.comet.yaml`）时生成：
 
 ```text
-openspec/changes/<name>/.comet/handoff/spec-context.json
-openspec/changes/<name>/.comet/handoff/spec-context.md
+<classic-change-dir>/.comet/handoff/spec-context.json
+<classic-change-dir>/.comet/handoff/spec-context.md
 ```
 
 并在 `.comet.yaml` 写入：
 
 ```yaml
-handoff_context: openspec/changes/<name>/.comet/handoff/design-context.json
+handoff_context: <classic-change-dir>/.comet/handoff/design-context.json
 handoff_hash: <sha256>
 ```
 
@@ -94,12 +96,12 @@ Language: 使用 `comet state get <name> language` 读取到的 Comet 配置产�
 
 ```text
 Change: <change-name>
-OpenSpec Context Pack: openspec/changes/<name>/.comet/handoff/design-context.md
-Machine handoff: openspec/changes/<name>/.comet/handoff/design-context.json
+OpenSpec Context Pack: <classic-change-dir>/.comet/handoff/design-context.md
+Machine handoff: <classic-change-dir>/.comet/handoff/design-context.json
 
 如 context_compression: beta，则使用：
-OpenSpec Context Pack: openspec/changes/<name>/.comet/handoff/spec-context.md
-Machine handoff: openspec/changes/<name>/.comet/handoff/spec-context.json
+OpenSpec Context Pack: <classic-change-dir>/.comet/handoff/spec-context.md
+Machine handoff: <classic-change-dir>/.comet/handoff/spec-context.json
 
 OpenSpec 产物是上游事实源，但不得用“跳过重复上下文探索”削弱 Superpowers `brainstorming` 的澄清流程。
 你的任务是基于交接包做深度技术设计：实现方案、技术风险、测试策略、边界条件。
@@ -147,9 +149,9 @@ brainstorming 产出设计方案后，**必须按 `comet/reference/decision-poin
 
 用户确认设计方案后，在创建 Design Doc 前，创建或更新已增量维护的检查点文件，将其定稿为确认后的设计方案摘要：
 
-使用当前平台的文件能力确保 `openspec/changes/<name>/.comet/handoff/` 存在；不要依赖 POSIX 专用目录命令。
+使用文件工具确保 `<classic-change-dir>/.comet/handoff/` 存在；不要依赖 POSIX 专用目录命令。
 
-`openspec/changes/<name>/.comet/handoff/brainstorm-summary.md` 结构：
+`<classic-change-dir>/.comet/handoff/brainstorm-summary.md` 结构：
 
 ```markdown
 # Brainstorm Summary
@@ -175,9 +177,9 @@ brainstorming 产出设计方案后，**必须按 `comet/reference/decision-poin
 ```
 
 **上下文压缩说明**：每次增量更新 `brainstorm-summary.md` 后，都是相对安全的压缩恢复点。Brainstorming 完成后，如上下文窗口紧张，应优先在此处进行压缩。压缩后重新加载以下文件继续 Step 2：
-- `openspec/changes/<name>/.comet/handoff/brainstorm-summary.md`
-- `openspec/changes/<name>/.comet/handoff/design-context.md`（或 beta 模式的 `spec-context.md`）
-- `openspec/changes/<name>/.comet/handoff/design-context.json`（或 beta 模式的 `spec-context.json`）
+- `<classic-change-dir>/.comet/handoff/brainstorm-summary.md`
+- `<classic-change-dir>/.comet/handoff/design-context.md`（或 beta 模式的 `spec-context.md`）
+- `<classic-change-dir>/.comet/handoff/design-context.json`（或 beta 模式的 `spec-context.json`）
 
 ### 1e. 压缩策略（此处不阻塞）
 
@@ -223,9 +225,9 @@ comet guard <change-name> design --apply
 
 只在 **Design Doc 和状态证据落盘后**、进入 Build 前考虑主动式压缩。先确认 `design_doc`、最新 handoff、`handoff_hash` 和 design guard 均已成功持久化；这样压缩后可从文件恢复，不会丢失尚未写入的设计判断。
 
-- 当前平台提供可由 agent 调用的原生压缩机制，且上下文窗口确有压力时，可以触发一次，并在恢复提示中列出 change、下一步和需重新加载的 Design Doc/handoff 文件
-- 当前平台只能由用户手动压缩时，给出一次非阻塞建议并继续；**无法程序化触发时不得阻塞**、不得额外制造确认点
-- 不得用 shell 命令或摘要替代宿主平台的真实压缩机制
+- 上下文窗口确有压力且存在可调用的原生压缩机制时，可以触发一次，并在恢复提示中列出 change、下一步和需重新加载的 Design Doc/handoff 文件
+- 压缩只能由用户手动触发时，给出一次非阻塞建议并继续；**不得阻塞**、不得额外制造确认点
+- 不得用 shell 命令或摘要伪造上下文压缩
 
 ## 退出条件
 

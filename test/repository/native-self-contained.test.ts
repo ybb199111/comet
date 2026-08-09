@@ -15,7 +15,7 @@ async function typescriptFiles(root: string): Promise<string[]> {
 }
 
 describe('Native self-contained runtime boundary', () => {
-  it('keeps process execution inside the bounded Native snapshot provider', async () => {
+  it('keeps process execution inside the bounded snapshot and receipt providers', async () => {
     const root = path.resolve('domains', 'comet-native');
     const files = await typescriptFiles(root);
     const sources = new Map(
@@ -33,26 +33,37 @@ describe('Native self-contained runtime boundary', () => {
       .filter(([, source]) => /(?:node:)?child_process/u.test(source))
       .map(([file]) => file);
     const snapshot = sources.get('native-snapshot.ts');
+    const receiptRuntime = sources.get('native-verification-receipt-runtime.ts');
 
-    expect(processFiles).toEqual(['native-snapshot.ts']);
+    expect(processFiles).toEqual(['native-snapshot.ts', 'native-verification-receipt-runtime.ts']);
     expect(snapshot).toBeDefined();
+    expect(receiptRuntime).toBeDefined();
     expect(snapshot).toContain("import { spawn, type ChildProcess } from 'node:child_process';");
     expect(snapshot).not.toMatch(/\b(?:execFile|execSync|execFileSync|fork|spawnSync)\s*\(/u);
+    expect(receiptRuntime).toContain('env: { ...process.env }');
+    expect(receiptRuntime).toContain('shell: false');
+    expect(receiptRuntime).toContain('COMET_NATIVE_COMMAND_PAYLOAD');
+    expect(receiptRuntime).toContain('resolveWindowsCommand');
+    expect(receiptRuntime).not.toContain('sanitizedAutomatedCommandEnvironment');
+    expect(receiptRuntime).toContain('terminateProcessTree(child)');
 
-    const sourcesOutsideSnapshot = [...sources]
-      .filter(([file]) => file !== 'native-snapshot.ts')
+    const sourcesOutsideProcessProviders = [...sources]
+      .filter(
+        ([file]) =>
+          file !== 'native-snapshot.ts' && file !== 'native-verification-receipt-runtime.ts',
+      )
       .map(([, source]) => source)
       .join('\n');
-    expect(sourcesOutsideSnapshot).not.toMatch(
+    expect(sourcesOutsideProcessProviders).not.toMatch(
       /\b(?:spawn|execFile|execSync|execFileSync|fork|spawnSync)\s*\(/u,
     );
-    expect(sourcesOutsideSnapshot).not.toContain('gitProcess');
+    expect(sourcesOutsideProcessProviders).not.toContain('gitProcess');
 
     const combined = [...sources.values()].join('\n');
-    expect(combined).not.toMatch(/(?:^|[,{]\s*)shell\s*:/mu);
+    expect(sourcesOutsideProcessProviders).not.toMatch(/(?:^|[,{]\s*)shell\s*:/mu);
     expect(combined).not.toMatch(/runSafeCommand|inspectGitRepository|GitRepositoryInspection/iu);
     expect(combined).not.toMatch(
-      /platform\/process|(?:^|[/'"])(?:comet-classic|openspec)(?:[/'"]|$)|superpowers|assets\/skills|\.agents\/skills|\.comet\/skills/imu,
+      /(?:^|[/'"])(?:comet-classic|openspec)(?:[/'"]|$)|superpowers|assets\/skills|\.agents\/skills|\.comet\/skills/imu,
     );
   });
 
@@ -83,13 +94,19 @@ describe('Native self-contained runtime boundary', () => {
 
     // These counts include each helper declaration. Every actual Git invocation below is
     // therefore accounted for by one of the fixed, read-only argument vectors.
-    expect(occurrences(/\brunGitNullRecords\s*\(/gu)).toBe(5);
-    expect(occurrences(/\brunGitBoundedOutput\s*\(/gu)).toBe(3);
+    expect(occurrences(/\brunGitNullRecords\s*\(/gu)).toBe(6);
+    expect(occurrences(/\brunGitBoundedOutput\s*\(/gu)).toBe(5);
     expect(occurrences(/\brunGitHasOutput\s*\(/gu)).toBe(2);
-    expect(literalOccurrences("['ls-files', '--stage', '-z']")).toBe(2);
+    expect(literalOccurrences("['ls-files', '--stage', '-z', ...pathspecs]")).toBe(2);
     expect(
-      literalOccurrences("['ls-files', '--cached', '--others', '--exclude-standard', '-z']"),
+      literalOccurrences(
+        "['ls-files', '--cached', '--others', '--exclude-standard', '-z', ...pathspecs]",
+      ),
     ).toBe(1);
+    // Snapshot capture checks unstaged modifications before reuse and again at
+    // the final fence so a concurrently dirtied reused file is invalidated.
+    expect(literalOccurrences("['ls-files', '--modified', '-z']")).toBe(2);
+    expect(literalOccurrences("['ls-files', '-v', '-z']")).toBe(1);
     expect(literalOccurrences("['check-ignore', '--no-index', '-z', '--stdin']")).toBe(1);
     expect(literalOccurrences("['rev-parse', '--is-inside-work-tree']")).toBe(1);
     expect(literalOccurrences("['rev-parse', '--verify', 'HEAD']")).toBe(1);
