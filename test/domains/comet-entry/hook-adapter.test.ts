@@ -48,6 +48,14 @@ const PLATFORM_FIXTURES = [
     single: { tool_name: 'Write', tool_input: { file_path: 'src/codebuddy.ts' } },
   },
   {
+    id: 'workbuddy',
+    single: { tool_name: 'Write', tool_input: { file_path: 'src/workbuddy.ts' } },
+  },
+  {
+    id: 'oh-my-pi',
+    single: { tool_name: 'write', tool_input: { path: 'src/oh-my-pi.ts' } },
+  },
+  {
     id: 'qoder',
     single: { tool_name: 'Write', tool_input: { file_path: 'src/qoder.ts' } },
   },
@@ -59,11 +67,26 @@ const PLATFORM_FIXTURES = [
     id: 'trae-cn',
     single: { tool_name: 'Write', tool_input: { file_path: 'src/trae-cn.ts' } },
   },
+  {
+    id: 'grok',
+    single: { toolName: 'write', toolInput: { file_path: 'src/grok.ts' } },
+  },
 ] as const;
 
 describe('Comet Hook platform adapter', () => {
   it('keeps the fixture matrix aligned with every declared Hook platform', () => {
     expect(PLATFORM_FIXTURES.map(({ id }) => id)).toEqual([...COMET_HOOK_PLATFORM_IDS]);
+  });
+
+  it('parses a payload carrying a leading UTF-8 BOM', () => {
+    const source =
+      String.fromCharCode(0xfeff) +
+      JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'src/a.ts' } });
+    expect(parseCometHookRequest(source)).toEqual({
+      intent: 'write',
+      targets: ['src/a.ts'],
+      toolName: 'Write',
+    });
   });
 
   it.each(PLATFORM_FIXTURES)('normalizes the $id native single-file payload', ({ id, single }) => {
@@ -87,6 +110,14 @@ describe('Comet Hook platform adapter', () => {
         }),
       ),
     ).toEqual({ intent: 'write', targets: ['src/b.ts'], toolName: 'apply_patch' });
+    expect(
+      parseCometHookRequest(
+        JSON.stringify({
+          toolName: 'search_replace',
+          toolInput: { file_path: 'src/c.ts' },
+        }),
+      ),
+    ).toEqual({ intent: 'write', targets: ['src/c.ts'], toolName: 'search_replace' });
   });
 
   it('normalizes raw Codex apply_patch input from Hook stdin', () => {
@@ -135,6 +166,27 @@ describe('Comet Hook platform adapter', () => {
         }),
       ),
     ).toEqual({ intent: 'write', targets: ['src/a.ts'], toolName: 'Write' });
+  });
+
+  it('recognizes an agent-start task as a context request', () => {
+    const cwd = path.resolve('omp-project');
+    expect(
+      parseCometHookRequest(
+        JSON.stringify({
+          hook_event_name: 'before_agent_start',
+          task: 'Implement the dashboard',
+          cwd,
+          session_id: 'session-file',
+        }),
+      ),
+    ).toEqual({
+      intent: 'context',
+      targets: [],
+      toolName: null,
+      task: 'Implement the dashboard',
+      cwd,
+      sessionId: 'session-file',
+    });
   });
 
   it('collects every target atomically and fails unknown writes closed', () => {

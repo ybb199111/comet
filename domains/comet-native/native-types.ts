@@ -48,6 +48,7 @@ export interface NativeProjectPaths {
   changesDir: string;
   archiveDir: string;
   runtimeDir: string;
+  changesRuntimeDir: string;
   locksDir: string;
   transactionsDir: string;
 }
@@ -272,6 +273,16 @@ export type NativeContinuationAction =
   | 'archive'
   | 'none';
 
+export interface NativeContinuationInputOption {
+  input: string;
+  flags: string[];
+  required: boolean;
+  placeholder: string | null;
+  choices?: string[];
+  repeatable?: boolean;
+  alternativeGroup?: string;
+}
+
 export interface NativeContinuation {
   schema: 'comet.native.continuation.v1';
   skill: 'comet-native';
@@ -281,8 +292,11 @@ export interface NativeContinuation {
   disposition: NativeContinuationDisposition;
   action: NativeContinuationAction;
   command: string | null;
+  /** Full executable plus argv template. Placeholders are explicit angle-bracket tokens. */
+  commandArgs: string[] | null;
   requiresUserDecision: boolean;
   requiredInputs: string[];
+  inputOptions: NativeContinuationInputOption[];
 }
 
 export interface NativeCheckpointArtifact {
@@ -379,6 +393,7 @@ export interface NativeArtifactValidation {
 
 export interface NativeAdvanceEvidence {
   summary: string;
+  returnToBuild?: boolean;
   confirmed?: boolean;
   artifacts?: string[];
   noCodeReason?: string;
@@ -412,6 +427,8 @@ export interface NativeAcceptancePageProjection {
   failedCheckIds: string[];
   failedCheckIdsTruncated: boolean;
   nextCursor: string | null;
+  nextPageCommand?: string | null;
+  nextPageArgs?: string[] | null;
   limits: {
     maxItems: number;
     maxTextBytes: number;
@@ -420,6 +437,17 @@ export interface NativeAcceptancePageProjection {
     maxFailedCheckIds: number;
     maxSerializedBytes: number;
   };
+}
+
+export interface NativeWorkspaceProjection {
+  projectRoot: string;
+  currentBranch: string | null;
+  isSecondaryWorktree: boolean;
+  bindingState: 'missing' | 'legacy' | 'aligned' | 'drifted' | 'invalid';
+  isolation: 'current' | 'branch' | 'worktree' | null;
+  changeBranch: string | null;
+  targetBranch: string | null;
+  finish: 'merge' | 'push' | 'pull-request' | 'keep' | null;
 }
 
 export interface NativeRepairDecisionProjection {
@@ -481,7 +509,11 @@ interface NativeTransitionJournalFields<TState extends NativeReadableChangeState
   eventData: Record<string, unknown>;
 }
 
-export type NativeTransitionOperation = 'advance' | 'spec-rebase' | 'evidence-retreat';
+export type NativeTransitionOperation =
+  | 'advance'
+  | 'spec-rebase'
+  | 'evidence-retreat'
+  | 'runtime-rebuild';
 
 export interface NativeLegacyTransitionJournal extends NativeTransitionJournalFields<NativeLegacyChangeState> {
   schema: typeof NATIVE_LEGACY_TRANSITION_SCHEMA;
@@ -528,6 +560,13 @@ export interface NativeStatusProjection {
   detailsCommand: string | null;
   checkpoint: NativeCheckpointCompactView | null;
   continuation: NativeContinuation | null;
+  workspace: NativeWorkspaceProjection;
+  runtime: {
+    status: 'available' | 'missing' | 'invalid';
+    layout: 'project-local' | 'legacy' | 'missing';
+    path: string;
+    message?: string;
+  };
   repair?: NativeRepairStatusProjection | null;
   acceptancePage?: NativeAcceptancePageProjection;
   findings?: NativeStructuredFinding[];
@@ -553,6 +592,8 @@ export interface NativeStatusPageProjection {
   offset: number;
   items: NativeStatusProjection[];
   nextCursor: string | null;
+  nextPageCommand: string | null;
+  nextPageArgs: string[] | null;
   limits: {
     maxItems: number;
     maxChanges: number;

@@ -464,6 +464,54 @@ describe('Native implementation scope', () => {
     expect(parseNativeImplementationScopeBundle(first)).toEqual(first);
   });
 
+  it('keeps a large fully attributed scope complete when only detail pages are compacted', () => {
+    const entries = Array.from({ length: 500 }, (_, index) =>
+      entry(`generated/${String(index).padStart(4, '0')}.ts`, HASH_A),
+    );
+    const largeManifest = (values: NativeSnapshotEntry[]): NativeContentSnapshotManifest => ({
+      ...manifest(),
+      limits: {
+        maxFiles: 1_000,
+        maxFileBytes: 1_000,
+        maxTotalBytes: 1_000_000,
+        maxManifestBytes: 1_000_000,
+      },
+      entries: values,
+    });
+    const bundle = buildNativeImplementationScopeBundle({
+      baseline: largeManifest([]),
+      current: largeManifest(entries),
+      contractHash: HASH_B,
+      declaredArtifacts: [{ path: 'generated', kind: 'directory' }],
+    });
+
+    expect(bundle.scope.changes.length).toBeLessThan(entries.length);
+    expect(bundle.scope.complete).toBe(true);
+    expect(bundle.scope.unattributed).toEqual([]);
+    expect(bundle.scope.unresolvedScopes).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: 'scope-detail-overflow' })]),
+    );
+    expect(parseNativeImplementationScopeBundle(bundle)).toEqual(bundle);
+  });
+
+  it('rejects malformed external Git commit identities', () => {
+    expect(() =>
+      buildNativeImplementationScopeBundle({
+        baseline: manifest(),
+        current: manifest({ entries: [entry('parallel.ts', HASH_A)] }),
+        contractHash: HASH_B,
+        declaredArtifacts: [],
+        externalDrift: {
+          provider: 'git',
+          baseCommit: 'a'.repeat(41),
+          targetBranch: 'main',
+          targetCommit: 'b'.repeat(40),
+          paths: ['parallel.ts'],
+        },
+      }),
+    ).toThrow('base commit');
+  });
+
   it('bounds long omission details by serialized bytes and folds the remainder stably', () => {
     const omitted = Array.from({ length: 1_000 }, (_, index) => ({
       path: `generated/omitted-${String(index).padStart(4, '0')}-${'x'.repeat(450)}.bin`,
@@ -932,5 +980,127 @@ describe('Native implementation scope', () => {
         declaredArtifacts: [],
       }),
     ).toThrow('duplicate paths');
+  });
+
+  it('covers persisted scope parser validation branches', () => {
+    const valid = buildNativeImplementationScope({
+      baseline: manifest({ entries: [entry('src/changed.ts', HASH_A)] }),
+      current: manifest({ entries: [entry('src/changed.ts', HASH_B)] }),
+      contractHash: HASH_C,
+      declaredArtifacts: [{ path: 'src/changed.ts', kind: 'file' }],
+    });
+    const change = valid.changes[0]!;
+    const cases: Array<[string, unknown, string]> = [
+      ['non-object', null, 'must be an object'],
+      ['unknown field', { ...valid, extra: true }, 'unknown field'],
+      ['schema', { ...valid, schema: 'wrong' }, 'schema'],
+      ['contract hash', { ...valid, contractHash: 'bad' }, 'contractHash'],
+      [
+        'baseline projection hash',
+        { ...valid, baselineProjectionHash: 'bad' },
+        'baselineProjectionHash',
+      ],
+      [
+        'baseline projection ref',
+        { ...valid, baselineProjectionRef: 'wrong' },
+        'baseline projection',
+      ],
+      [
+        'current projection hash',
+        { ...valid, currentProjectionHash: 'bad' },
+        'currentProjectionHash',
+      ],
+      ['current projection ref', { ...valid, currentProjectionRef: 'wrong' }, 'current projection'],
+      ['complete flag', { ...valid, complete: 'true' }, 'complete flag'],
+      ['collections', { ...valid, changes: null }, 'collections'],
+      [
+        'declaration kind',
+        { ...valid, declaredArtifacts: [{ path: 'src/changed.ts', kind: 'other' }] },
+        'kind is invalid',
+      ],
+      [
+        'declaration path',
+        { ...valid, declaredArtifacts: [{ path: '../outside', kind: 'file' }] },
+        'project root',
+      ],
+      [
+        'unsorted declarations',
+        {
+          ...valid,
+          declaredArtifacts: [
+            { path: 'z.ts', kind: 'file' },
+            { path: 'a.ts', kind: 'file' },
+          ],
+        },
+        'sorted and unique',
+      ],
+      ['change kind', { ...valid, changes: [{ ...change, kind: 'other' }] }, 'kind is invalid'],
+      [
+        'change attribution',
+        { ...valid, changes: [{ ...change, attributedTo: null }] },
+        'attributedTo',
+      ],
+      [
+        'change before state',
+        { ...valid, changes: [{ ...change, before: null }] },
+        'before/after state',
+      ],
+      [
+        'change after state',
+        { ...valid, changes: [{ ...change, after: null }] },
+        'before/after state',
+      ],
+      ['duplicate changes', { ...valid, changes: [change, change] }, 'sorted and unique'],
+      ['unattributed collection', { ...valid, unattributed: null }, 'collections'],
+      ['unresolved collection', { ...valid, unresolvedScopes: null }, 'collections'],
+      ['unattributed mismatch', { ...valid, unattributed: [change] }, 'unattributed changes'],
+      ['no-code reason', { ...valid, noCodeReason: '  ' }, 'no-code reason'],
+      ['git advisory object', { ...valid, gitAdvisory: null }, 'must be an object'],
+      [
+        'git advisory flag',
+        {
+          ...valid,
+          gitAdvisory: {
+            advisoryOnly: false,
+            changedPaths: [],
+            pathsPresentInSnapshotChanges: [],
+            pathsAbsentFromSnapshotChanges: [],
+          },
+        },
+        'advisory-only',
+      ],
+      [
+        'git advisory paths',
+        {
+          ...valid,
+          gitAdvisory: {
+            advisoryOnly: true,
+            changedPaths: ['z.ts', 'a.ts'],
+            pathsPresentInSnapshotChanges: [],
+            pathsAbsentFromSnapshotChanges: ['a.ts', 'z.ts'],
+          },
+        },
+        'sorted and unique',
+      ],
+      ['external drift object', { ...valid, externalDrift: null }, 'must be an object'],
+      [
+        'external drift provider',
+        {
+          ...valid,
+          externalDrift: {
+            provider: 'other',
+            baseCommit: 'a'.repeat(40),
+            targetBranch: 'main',
+            targetCommit: 'b'.repeat(40),
+            paths: [],
+          },
+        },
+        'provider is invalid',
+      ],
+    ];
+
+    for (const [label, value, message] of cases) {
+      expect(() => parseNativeImplementationScope(value), label).toThrow(message);
+    }
   });
 });

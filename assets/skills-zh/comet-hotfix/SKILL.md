@@ -1,13 +1,13 @@
 ---
 name: comet-hotfix
-description: "仅在用户明确调用 /comet-hotfix，或由 Comet 根 Skill/runtime 路由到 hotfix preset 时使用；修复已有行为 bug，不用于普通的未托管 bugfix。"
+description: "Comet 预设 —— 通过 open-build-verify-archive 短流程修复已有行为 bug。"
 ---
 
 # Comet 预设路径：Hotfix
 
-开始或恢复前必须先读取并执行 `comet/reference/classic-layout.md`；本文件中的 OpenSpec CLI 调用必须使用 adapter，文件路径必须使用该协议绑定的 `<classic-*>` 逻辑根。
+开始或恢复前必须先读取并执行 `comet-classic/reference/classic-layout.md`；本文件中的 OpenSpec CLI 调用必须使用 adapter，文件路径必须使用该协议绑定的 `<classic-*>` 逻辑根。
 
-快速 bug fix 工作流：open → build → verify → archive。跳过 brainstorming 和完整 plan，适用于行为修复、不涉及新 capability 设计的场景。
+快速 bug fix 工作流：open → build → 根因消除检查 → verify → archive。跳过 brainstorming 和完整 plan，适用于行为修复、不涉及新 capability 设计的场景。
 
 **适用条件**（必须全部满足）：
 1. 修复已有功能的 bug，不新增 capability
@@ -24,11 +24,13 @@ description: "仅在用户明确调用 /comet-hotfix，或由 Comet 根 Skill/ru
 
 精简版 OpenSpec 产物必须使用 Comet 配置产物语言。`.comet.yaml` 尚不存在时依次读取项目 `.comet/config.yaml` 和全局 `~/.comet/config.yaml` 的 `classic.language`，初始化后使用 `comet state get <name> language` 读取。
 
-执行链路：open → build → verify → archive。Hotfix 为每个阶段提供默认决策：精简开启、直接构建、按规模验证、验证通过后进入归档前最终确认。
+执行链路：open → build → 根因消除检查 → verify → archive。Hotfix 为每个阶段提供默认决策：精简开启、直接构建、根因确认、按规模验证、验证通过后进入归档前最终确认。
 
-开始前按 `comet/reference/scripts.md` 运行公开 Comet CLI 命令；从任意入口恢复时先按 `comet/reference/context-recovery.md` 检查 phase/workflow。
+开始前按 `comet-classic/reference/scripts.md` 运行公开 Comet CLI 命令；从任意入口恢复时先按 `comet-classic/reference/context-recovery.md` 检查 phase/workflow。
 
 恢复已有 hotfix change 时，第一项状态操作必须是 `comet state select <change-name>`；创建新 change 时，在 `.comet.yaml` 初始化成功后立即运行该命令，再进入源码写入步骤。
+
+进入 hotfix 工作区并读取当前状态 `phase` 后，运行 `comet task <project-root> --task "<用户原始请求>" --phase "<phase>" --session "<本次任务稳定标识>" --json`。只注入返回的 `text`；Context Manifest（`manifest` / `<context_manifest>`）只含摘要、应用原因和稳定 ID，需要正文、来源或验证方式时增加 `--expand-context "<id>"`，路径、操作或阶段变化时以同一 `--session` 重新选择。用户明确要求长期记住时调用 `comet memory remember ... --scope global|project`；仅对隐式但可复用的稳定协作方式调用 `comet memory observe`，不得保存任务摘要、进展、命令输出或测试结果。实际使用条目且结果明确后，用 `applications[].applicationId`（Hook 文本中的 `application_id`）运行 `comet task <project-root> --task "<用户原始请求>" --application "<application-id>" --outcome used-successfully|ignored|overridden|corrected|contributed-to-failure --json`。任务结束仍运行带 `--complete --workflow <workflow> --change <change-id>` 的 `comet task`。无 Hook 时由本 Skill 使用相同接口，`comet memory context` 只作为兼容入口；插件失败不阻断修复。
 
 ### 1. 快速开启（预设 open）
 
@@ -47,9 +49,9 @@ comet state select <name>
 comet state check <name> open
 ```
 
-若上述 `select` / `check` 输出 `BLOCKED`，且原因是 `bound_branch` 与当前分支不一致，立即按 `comet/reference/decision-point.md` 暂停，让用户单选：切回绑定分支后重新运行入口验证，或在用户明确确认当前分支应接管该 change 后运行 `comet state rebind <change-name>` 并重新入口验证。不得自行切换分支，不得自行换绑。
+若上述 `select` / `check` 输出 `BLOCKED`，且原因是 `bound_branch` 与当前分支不一致，立即按 `comet-classic/reference/decision-point.md` 暂停，让用户单选：切回绑定分支后重新运行入口验证，或在用户明确确认当前分支应接管该 change 后运行 `comet state rebind <change-name>` 并重新入口验证。不得自行切换分支，不得自行换绑。
 
-入口工作区隔离是用户决策点，不再把 `current` 当作默认隔离模式写入。按 `comet/reference/decision-point.md` 暂停让用户单选：
+入口工作区隔离是用户决策点，不再把 `current` 当作默认隔离模式写入。按 `comet-classic/reference/decision-point.md` 暂停让用户单选：
 
 - A. 当前分支直接工作：运行 `comet state set <name> isolation current`，如实绑定当前分支
 - B. 创建分支：先创建并切换到 `hotfix/YYYYMMDD/<change-name>`，再运行 `comet state set <name> isolation branch`
@@ -86,7 +88,7 @@ comet state next <name>
 
 使用 hotfix 默认值：`build_mode: direct`、`tdd_mode: direct`、`review_mode: off`。`isolation` 必须沿用 Step 1 中用户已确认的入口工作区隔离方式，不得自行改回 `current`。`direct` 表示不进入完整规划/TDD 编排，不表示可以跳过复现、回归测试或验证。跳过 Superpowers `brainstorming` 和 `writing-plans`；**任务数量本身不触发 `/comet-build`**，任务较多时仍在当前 hotfix 的 tasks.md 中按顺序执行，只有命中后文质变信号或范围 tripwire 才交给用户决定是否升级 full。
 
-继续或开始修改前，按 `comet/reference/dirty-worktree.md` 协议处理未提交改动。若归因后发现修复命中质变信号或文件数 tripwire，按本文件「升级判定」处理。
+继续或开始修改前，按 `comet-classic/reference/dirty-worktree.md` 协议处理未提交改动。若归因后发现修复命中质变信号或文件数 tripwire，按本文件「升级判定」处理。
 
 修改实现前，必须**先复现问题并记录失败证据**：
 
@@ -107,7 +109,7 @@ comet state next <name>
 
 执行 hotfix 期间，只要运行程序、测试、构建或手动验证时出现崩溃、异常行为、测试失败或构建失败，必须使用 Skill 工具加载 Superpowers `systematic-debugging` 技能。在完成根因调查前，不得提出或实施源码修复。
 
-具体调查、最小失败测试、修复验证和保持当前 change 验证闭环的要求，按 `comet/reference/debug-gate.md` 执行。
+具体调查、最小失败测试、修复验证和保持当前 change 验证闭环的要求，按 `comet-classic/reference/debug-gate.md` 执行。
 
 **如修复影响已有 spec 验收场景**：
 - 在 `<classic-change-dir>/specs/<capability>/spec.md` 创建 delta spec
@@ -159,7 +161,7 @@ Hotfix 流程默认 **一次性连续执行**。调用 `/comet-hotfix` 后，age
 
 1. 遇到升级判定信号（见「升级判定」章节），**必须暂停、展示选择并等待用户明确选择**：继续 hotfix 流程，还是升级为完整 `/comet-classic` 流程
 2. 验证阶段（comet-verify）接受 WARNING/SUGGESTION 偏差、处理 Spec 漂移或超过自动修复上限后的策略决策；前 3 次明确可修复失败自动闭环
-3. 归档前最终确认，以及归档提交后的分支处理决策
+3. 归档前在一个最终确认中选择是否归档及归档提交的交付方式
 
 执行顺序：快速开启 → 直接构建 → 根因消除检查 → 验证 → 归档 → 完成
 
@@ -178,7 +180,7 @@ hotfix 的升级判定只决定是否从预设流程转为 full；文件数不�
 
 文件数 tripwire 仅作提示：改动文件数超过提示阈值（如 > 4 个文件）时，也交给用户决定继续 hotfix 还是升级 full；文件数多不等于质变。bug 修复通常聚焦在 1-3 个文件，超过阈值说明改动面偏大、值得让用户复核是否仍属预设范围。
 
-命中质变信号或文件数 tripwire 时，**必须按 `comet/reference/decision-point.md` 的协议暂停并等待用户明确选择**。不得直接进入 `/comet-design`，不得自动补充 Design Doc。
+命中质变信号或文件数 tripwire 时，**必须按 `comet-classic/reference/decision-point.md` 的协议暂停并等待用户明确选择**。不得直接进入 `/comet-design`，不得自动补充 Design Doc。
 
 用户选择升级（选项 B）后，使用状态机合法的升级通道，单条命令完成预设流程 → full 转换并回退到 design 阶段：
 
@@ -201,7 +203,7 @@ comet state transition <name> preset-escalate
 
 ## 自动衔接下一阶段
 
-按 `comet/reference/auto-transition.md` 执行。关键命令：
+按 `comet-classic/reference/auto-transition.md` 执行。关键命令：
 
 ```bash
 comet state next <name>

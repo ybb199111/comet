@@ -11,6 +11,7 @@ import {
   builtinCometNativeWorkflow,
   defaultWorkflowProjectConfig,
   hashWorkflowProtocol,
+  mergeWorkflowProjectConfigDocument,
   normalizeClassicArtifactLayout,
   parseWorkflowProjectConfigDocument,
   readWorkflowProjectConfigIdentity,
@@ -19,6 +20,7 @@ import {
   normalizeWorkflowRelativePath,
   inspectProtectedProjectPath,
   validateWorkflowDefinition,
+  workflowProjectConfigManagedValue,
   workflowProjectConfigRuntimeHelperScript,
   inspectWorkflowProjectConfigTransaction,
   repairWorkflowProjectConfigTransaction,
@@ -29,6 +31,180 @@ import {
 } from '../../../domains/workflow-contract/project-config-writer.js';
 
 describe('workflow contract normalization', () => {
+  it('normalizes the optional project memory policy with enabled defaults', () => {
+    const withoutMemory = parseWorkflowProjectConfigDocument(
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows: [native]',
+        'native:',
+        '  artifact_root: docs',
+        '',
+      ].join('\n'),
+    );
+    expect((withoutMemory.config as unknown as { memory: unknown }).memory).toEqual({
+      learning: true,
+      retrieval: true,
+    });
+
+    const disabled = parseWorkflowProjectConfigDocument(
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows: [native]',
+        'memory:',
+        '  learning: false',
+        '  retrieval: true',
+        'native:',
+        '  artifact_root: docs',
+        '',
+      ].join('\n'),
+    );
+    expect((disabled.config as unknown as { memory: unknown }).memory).toEqual({
+      learning: false,
+      retrieval: true,
+    });
+
+    expect(() =>
+      parseWorkflowProjectConfigDocument(
+        [
+          'schema: comet.project.v1',
+          'default_workflow: native',
+          'workflows: [native]',
+          'memory: false',
+          'native:',
+          '  artifact_root: docs',
+          '',
+        ].join('\n'),
+      ),
+    ).toThrow('memory must be a mapping');
+    expect(() =>
+      parseWorkflowProjectConfigDocument(
+        [
+          'schema: comet.project.v1',
+          'default_workflow: native',
+          'workflows: [native]',
+          'memory:',
+          '  learning: yes',
+          'native:',
+          '  artifact_root: docs',
+          '',
+        ].join('\n'),
+      ),
+    ).toThrow('memory.learning must be true or false');
+  });
+
+  it('includes memory policy in managed config writes without dropping extensions', () => {
+    const parsed = parseWorkflowProjectConfigDocument(
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows: [native]',
+        'native:',
+        '  artifact_root: docs',
+        'extension:',
+        '  keep: true',
+        '',
+      ].join('\n'),
+    );
+    const config = {
+      ...parsed.config!,
+      memory: { learning: false, retrieval: true },
+    };
+    const merged = mergeWorkflowProjectConfigDocument(parsed.value, config);
+
+    expect(merged.memory).toEqual({ learning: false, retrieval: true });
+    expect(merged.extension).toEqual({ keep: true });
+  });
+
+  it('normalizes and round-trips custom local project knowledge include patterns', () => {
+    const parsed = parseWorkflowProjectConfigDocument(
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows: [native]',
+        'knowledge:',
+        '  provider: local',
+        '  local:',
+        '    include:',
+        '      - docs/architecture/**/*.md',
+        '      - docs/architecture/**/*.md',
+        '      - packages/*/README.MD',
+        'native:',
+        '  artifact_root: docs',
+        '',
+      ].join('\n'),
+    );
+
+    expect(parsed.config?.knowledge).toEqual({
+      provider: 'local',
+      local: { include: ['docs/architecture/**/*.md', 'packages/*/README.MD'] },
+    });
+    expect(mergeWorkflowProjectConfigDocument(parsed.value, parsed.config!).knowledge).toEqual({
+      provider: 'local',
+      local: { include: ['docs/architecture/**/*.md', 'packages/*/README.MD'] },
+    });
+  });
+
+  it.each([
+    ['absolute', '/docs/**/*.md'],
+    ['parent traversal', '../docs/**/*.md'],
+    ['backslash', 'docs\\**\\*.md'],
+    ['empty', ''],
+    ['non-markdown', 'docs/**/*.txt'],
+  ])('rejects unsafe custom knowledge include pattern: %s', (_label, pattern) => {
+    expect(() =>
+      parseWorkflowProjectConfigDocument(
+        [
+          'schema: comet.project.v1',
+          'default_workflow: native',
+          'workflows: [native]',
+          'knowledge:',
+          '  provider: local',
+          '  local:',
+          '    include:',
+          pattern.includes('\\') ? `      - ${pattern}` : `      - "${pattern}"`,
+          'native:',
+          '  artifact_root: docs',
+          '',
+        ].join('\n'),
+      ),
+    ).toThrow(/knowledge\.local\.include\[0\]/u);
+  });
+
+  it('normalizes project-local Hook allow paths and rejects unsafe paths', () => {
+    const parsed = parseWorkflowProjectConfigDocument(
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows: [native]',
+        'native:',
+        '  artifact_root: docs',
+        'hook:',
+        '  allow_paths:',
+        '    - docs/team-notes',
+        '    - .agents\\rules',
+        '',
+      ].join('\n'),
+    );
+
+    expect(parsed.config?.hook).toEqual({ allow_paths: ['docs/team-notes', '.agents/rules'] });
+    expect(() =>
+      parseWorkflowProjectConfigDocument(
+        [
+          'schema: comet.project.v1',
+          'default_workflow: native',
+          'workflows: [native]',
+          'native:',
+          '  artifact_root: docs',
+          'hook:',
+          '  allow_paths: [../outside]',
+          '',
+        ].join('\n'),
+      ),
+    ).toThrow('hook.allow_paths[0] must stay inside its declared path base');
+  });
+
   it('keeps generated project-file reads bounded and rejects a post-inspection symlink swap', async () => {
     const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-generated-config-race-'));
     const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'comet-generated-config-outside-'));
@@ -148,6 +324,97 @@ describe('workflow contract normalization', () => {
       owners: ['platform', 'workflow'],
       note: 'value: with # content',
     });
+  });
+
+  it('normalizes repository-owned pull request finish providers and fails closed on invalid commands', () => {
+    const parsed = parseWorkflowProjectConfigDocument(
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows: [native]',
+        'native:',
+        '  artifact_root: docs',
+        '  finish:',
+        '    pull_request:',
+        '      provider: repository-command',
+        '      command: [pwsh, -NoProfile, -File, scripts/comet-create-pr.ps1]',
+        '      timeout_ms: 120000',
+        '',
+      ].join('\n'),
+    );
+
+    expect(parsed.config?.native?.finish?.pull_request).toEqual({
+      provider: 'repository-command',
+      command: ['pwsh', '-NoProfile', '-File', 'scripts/comet-create-pr.ps1'],
+      timeout_ms: 120_000,
+    });
+    expect(workflowProjectConfigManagedValue(parsed.config!)).toHaveProperty(
+      'native.finish.pull_request.command',
+      ['pwsh', '-NoProfile', '-File', 'scripts/comet-create-pr.ps1'],
+    );
+
+    for (const invalid of [
+      'provider: github-fill\ncommand: [pwsh]',
+      'provider: repository-command\ncommand: []',
+      'provider: repository-command\ncommand: [pwsh]\ntimeout_ms: 600001',
+      "provider: repository-command\ncommand: ['/usr/bin/provider']",
+      "provider: repository-command\ncommand: ['C:\\\\tools\\\\provider.ps1']",
+      "provider: repository-command\ncommand: ['\\\\\\\\server\\\\share\\\\provider']",
+    ]) {
+      expect(() =>
+        parseWorkflowProjectConfigDocument(
+          [
+            'schema: comet.project.v1',
+            'default_workflow: native',
+            'workflows: [native]',
+            'native:',
+            '  artifact_root: docs',
+            '  finish:',
+            '    pull_request:',
+            ...invalid.split('\n').map((line) => `      ${line}`),
+            '',
+          ].join('\n'),
+        ),
+      ).toThrow(/native\.finish\.pull_request/u);
+    }
+  });
+
+  it('keeps legacy snapshot parsing internal while omitting it from managed writes', () => {
+    const config = defaultWorkflowProjectConfig('docs');
+    config.native.snapshot.exclude = ['legacy/generated/**'];
+
+    expect(workflowProjectConfigManagedValue(config)).not.toHaveProperty('native.snapshot');
+
+    const merged = mergeWorkflowProjectConfigDocument(
+      {
+        hook: {
+          allow_paths: ['docs/team-notes'],
+        },
+        native: {
+          artifact_root: 'legacy-root',
+          snapshot: {
+            include: ['**/*'],
+            snapshot_extension: 'remove-with-retired-block',
+          },
+          finish: {
+            pull_request: { provider: 'retired-provider' },
+            future_provider: { enabled: true },
+          },
+          custom_extension: 'keep',
+        },
+      },
+      config,
+    );
+    expect(merged).not.toHaveProperty('native.snapshot');
+    expect(merged).not.toHaveProperty('native.finish.pull_request');
+    expect(merged).toHaveProperty('native.finish.future_provider', { enabled: true });
+    expect(merged).toHaveProperty('native.custom_extension', 'keep');
+    expect(merged).toHaveProperty('hook.allow_paths', ['docs/team-notes']);
+
+    const parsed = parseWorkflowProjectConfigDocument(
+      'schema: comet.project.v1\ndefault_workflow: native\nnative:\n  artifact_root: docs\n',
+    );
+    expect(parsed.config?.native?.snapshot).toEqual(defaultWorkflowProjectConfig().native.snapshot);
   });
 
   it.each([

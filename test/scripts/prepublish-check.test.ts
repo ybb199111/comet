@@ -52,7 +52,17 @@ async function makePublishFixture(): Promise<string> {
   await writeFile(root, 'package.json', JSON.stringify(packageJson, null, 2));
   await writeFile(root, 'README.md', '# Comet publish fixture\n');
   await writeFile(root, 'eval/pyproject.toml', '[project]\nname = "comet-eval-fixture"\n');
+  for (const relativePath of ['eval/.npmignore', 'eval/local/.npmignore']) {
+    await writeFile(root, relativePath, await fs.readFile(relativePath, 'utf-8'));
+  }
+  await writeFile(
+    root,
+    'eval/schemas/comet.eval/v1alpha1.schema.json',
+    '{"$schema":"https://json-schema.org/draft/2020-12/schema"}\n',
+  );
   await writeFile(root, 'eval/local/tests/tasks/test_tasks.py', 'def test_fixture(): pass\n');
+  await writeFile(root, 'eval/scaffold/shell/agent-runtime-config.sh', '#!/usr/bin/env bash\n');
+  await writeFile(root, 'eval/scaffold/shell/run-agent-runtime.sh', '#!/usr/bin/env bash\n');
   await writeFile(root, 'eval/.env', 'API_KEY=must-not-pack\n');
   await writeFile(root, 'eval/.envrc', 'export API_KEY=must-not-pack\n');
   await writeFile(root, 'eval/local/.env.test', 'API_KEY=must-not-pack\n');
@@ -92,7 +102,10 @@ describe('prepublish security check', () => {
     const published = packed.files.map((file) => `package/${file.path}`);
 
     expect(published).toContain('package/eval/pyproject.toml');
+    expect(published).toContain('package/eval/schemas/comet.eval/v1alpha1.schema.json');
     expect(published).toContain('package/eval/local/tests/tasks/test_tasks.py');
+    expect(published).toContain('package/eval/scaffold/shell/agent-runtime-config.sh');
+    expect(published).toContain('package/eval/scaffold/shell/run-agent-runtime.sh');
     expect(published.some((file) => /\/(?:\.env)(?:[^/]*)$/u.test(file))).toBe(false);
     expect(published.some((file) => file.startsWith('package/eval/.venv/'))).toBe(false);
     expect(published.some((file) => file.startsWith('package/eval/.uv-cache/'))).toBe(false);
@@ -120,6 +133,49 @@ describe('prepublish security check', () => {
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.stderr).not.toContain('[SECURITY]');
+  });
+
+  it('does not traverse directories excluded by nested .npmignore files', async () => {
+    const root = await makePackageFixture();
+    const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf-8'));
+    packageJson.files = ['eval/local'];
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify(packageJson, null, 2));
+    await writeFile(root, 'eval/local/.npmignore', 'logs/\n');
+    await writeFile(
+      root,
+      'eval/local/logs/pytest-basetemp-final/credentials.txt',
+      'const api_key = "abcdefghijklmnopqrstuvwxyz";\n',
+    );
+    await writeFile(root, 'eval/local/tests/safe.js', 'export const safe = true;\n');
+
+    const result = spawnSync(process.execPath, [prepublishCheck], {
+      cwd: root,
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(result.stdout).toContain('[SECURITY] No secrets detected. Safe to publish.');
+  });
+
+  it('scans explicit package files even when a root .npmignore pattern matches them', async () => {
+    const root = await makePackageFixture();
+    const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf-8'));
+    packageJson.files = ['eval/.env.example.md'];
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify(packageJson, null, 2));
+    await writeFile(root, '.npmignore', '.env*\n');
+    await writeFile(
+      root,
+      'eval/.env.example.md',
+      'const api_key = "abcdefghijklmnopqrstuvwxyz";\n',
+    );
+
+    const result = spawnSync(process.execPath, [prepublishCheck], {
+      cwd: root,
+      encoding: 'utf-8',
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('[SECURITY] Possible API key found in eval/.env.example.md');
   });
 
   it('does not stat excluded directories while expanding included package paths', async () => {
@@ -164,5 +220,29 @@ describe('prepublish security check', () => {
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.stdout).toContain('[SECURITY] No secrets detected. Safe to publish.');
+  });
+
+  it('does not use a broad eval package entry that traverses derived pytest directories', async () => {
+    const packageJson = JSON.parse(await fs.readFile('package.json', 'utf-8')) as {
+      files?: string[];
+    };
+
+    expect(packageJson.files).not.toContain('eval');
+    expect(packageJson.files?.some((entry) => entry.startsWith('!eval'))).toBe(false);
+    expect(packageJson.files).toEqual(
+      expect.arrayContaining([
+        'eval/.env.example',
+        'eval/CLAUDE.md',
+        'eval/README.md',
+        'eval/pyproject.toml',
+        'eval/report-html-config.json',
+        'eval/simulator-instruction.md',
+        'eval/langfuse',
+        'eval/langsmith',
+        'eval/local',
+        'eval/scaffold',
+        'eval/schemas',
+      ]),
+    );
   });
 });

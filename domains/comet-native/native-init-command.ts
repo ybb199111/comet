@@ -1,4 +1,10 @@
-import { defaultProjectConfig, readProjectConfig, writeProjectConfig } from './native-config.js';
+import {
+  defaultProjectConfig,
+  mergeNativeSnapshotExcludes,
+  readProjectConfig,
+  writeProjectConfig,
+} from './native-config.js';
+import { ensureCometProjectGitignore } from '../workflow-contract/project-gitignore.js';
 import {
   ensureNativeDirectories,
   nativeProjectPaths,
@@ -32,10 +38,21 @@ export async function nativeInitCommand(
     );
   }
   const config = existing
-    ? { ...existing, native: { ...existing.native, language } }
+    ? {
+        ...existing,
+        native: {
+          ...existing.native,
+          language,
+          snapshot: {
+            ...existing.native.snapshot,
+            exclude: mergeNativeSnapshotExcludes(existing.native.snapshot.exclude),
+          },
+        },
+      }
     : defaultProjectConfig(artifactRoot, language);
   const paths = await nativeProjectPaths(projectRoot, config.native.artifact_root);
   await ensureNativeDirectories(paths);
+  await ensureCometProjectGitignore(projectRoot);
   await writeProjectConfig(projectRoot, config);
   return success(
     'init',

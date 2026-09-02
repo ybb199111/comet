@@ -1,4 +1,5 @@
 import path from 'path';
+import { readFile } from 'fs/promises';
 
 import {
   getPlatformConfigDir,
@@ -11,10 +12,16 @@ import {
   buildHookCommand,
   computeRuleDestPath,
   isManagedHookCommand,
+  buildHookInvocation,
+  OMP_HOOK_MARKER,
+  OMP_HOOK_RELATIVE_PATH,
   readManifest,
+  renderOmpHookModule,
+  resolveInstalledHookMatcher,
 } from './platform-install.js';
 import { readJsonObjectFile } from './json-object.js';
 import type { InitWorkflowSelection } from '../comet-entry/types.js';
+import { dshInstructionPath, hasDshCordisPatch } from './dsh-adapter.js';
 
 export interface HookInspectionResult {
   present: boolean;
@@ -22,6 +29,8 @@ export interface HookInspectionResult {
   managedPresent?: boolean;
   legacyPresent?: boolean;
   duplicatePresent?: boolean;
+  /** dsh has the config/patch, but the active profile still needs the bridge loaded. */
+  activationRequired?: boolean;
   error?: string;
 }
 
@@ -52,6 +61,9 @@ export async function getPlatformRuleDestinations(
   scope: InstallScope,
   _workflowSelection: InitWorkflowSelection = 'classic',
 ): Promise<string[]> {
+  if (platform.rulesFormat === 'dsh') {
+    return [dshInstructionPath(baseDir, platform, scope)];
+  }
   if (!platform.rulesDir || !platform.rulesFormat) return [];
 
   const manifest = await readManifest();
@@ -72,6 +84,7 @@ export function getLegacyPlatformRuleDestinations(
   platform: Platform,
   scope: InstallScope,
 ): string[] {
+  if (platform.rulesFormat === 'dsh') return [];
   if (!platform.rulesDir || !platform.rulesFormat) return [];
   const rulesDestDir = path.join(getRulesBaseDir(baseDir, platform, scope), platform.rulesDir);
   return LEGACY_RULE_FILE_NAMES.map((fileName) =>
@@ -91,7 +104,13 @@ async function readHookJson(filePath: string): Promise<JsonReadResult> {
 interface ExpectedHookDescriptor {
   scriptRelPath: string;
   command: string;
+  args?: string[];
   matcher: string;
+}
+
+interface CollectedHookCommand {
+  command: unknown;
+  args?: unknown;
 }
 
 function collectGroupedCommands(config: Record<string, unknown>, groupName: string): unknown[] {
@@ -104,12 +123,22 @@ function collectGroupedCommands(config: Record<string, unknown>, groupName: stri
     if (!group || typeof group !== 'object' || Array.isArray(group)) return [];
     const handlers = (group as Record<string, unknown>).hooks;
     if (!Array.isArray(handlers)) return [];
-    return handlers.map((handler) =>
-      handler && typeof handler === 'object' && !Array.isArray(handler)
-        ? (handler as Record<string, unknown>).command
-        : undefined,
-    );
+    return handlers.map((handler): CollectedHookCommand => {
+      if (!handler || typeof handler !== 'object' || Array.isArray(handler)) {
+        return { command: undefined };
+      }
+      const record = handler as Record<string, unknown>;
+      return { command: record.command, args: record.args };
+    });
   });
+}
+
+function equalStringArray(actual: unknown, expected: readonly string[]): boolean {
+  return (
+    Array.isArray(actual) &&
+    actual.length === expected.length &&
+    actual.every((value, index) => value === expected[index])
+  );
 }
 
 function countGroupedHookMatches(
@@ -121,7 +150,9 @@ function countGroupedHookMatches(
     handler: Record<string, unknown>,
     expected: ExpectedHookDescriptor,
   ) => boolean = (handler, descriptor) =>
-    handler.type === 'command' && handler.command === descriptor.command,
+    handler.type === 'command' &&
+    handler.command === descriptor.command &&
+    (descriptor.args === undefined || equalStringArray(handler.args, descriptor.args)),
 ): number {
   const hooks = config.hooks;
   if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return 0;
@@ -226,8 +257,17 @@ function containsExtraManagedCommandCopies(
   expectedCopiesPerHook: number,
 ): boolean {
   return expectedHooks.some(
-    ({ command }) =>
-      commands.filter((candidate) => candidate === command).length > expectedCopiesPerHook,
+    (expected) =>
+      commands.filter((candidate) => {
+        const record =
+          candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+            ? (candidate as CollectedHookCommand)
+            : { command: candidate };
+        return (
+          record.command === expected.command &&
+          (expected.args === undefined || equalStringArray(record.args, expected.args))
+        );
+      }).length > expectedCopiesPerHook,
   );
 }
 
@@ -240,12 +280,21 @@ function containsAllManagedHooks(
 }
 
 function containsLegacyManagedCommand(commands: unknown[]): boolean {
-  return commands.some(
-    (command) =>
-      typeof command === 'string' &&
-      isManagedHookCommand(command, [...LEGACY_HOOK_SCRIPT_PATHS]) &&
-      LEGACY_HOOK_SCRIPT_NAMES.some((scriptName) => command.includes(scriptName)),
-  );
+  return commands.some((candidate) => {
+    const record =
+      candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+        ? (candidate as CollectedHookCommand)
+        : { command: candidate };
+    const commandText = [record.command, ...(Array.isArray(record.args) ? record.args : [])].filter(
+      (value): value is string => typeof value === 'string',
+    );
+    return (
+      isManagedHookCommand(record.command, [...LEGACY_HOOK_SCRIPT_PATHS], record.args) &&
+      LEGACY_HOOK_SCRIPT_NAMES.some((scriptName) =>
+        commandText.some((value) => value.includes(scriptName)),
+      )
+    );
+  });
 }
 
 async function inspectSingleHookJson(
@@ -265,9 +314,13 @@ async function inspectSingleHookJson(
       ...LEGACY_HOOK_SCRIPT_PATHS,
     ]),
   ];
-  const managedPresent = managedCommands.some((command) =>
-    isManagedHookCommand(command, managedScriptPaths),
-  );
+  const managedPresent = managedCommands.some((candidate) => {
+    const record =
+      candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+        ? (candidate as CollectedHookCommand)
+        : { command: candidate };
+    return isManagedHookCommand(record.command, managedScriptPaths, record.args);
+  });
   const legacyPresent = containsLegacyManagedCommand(managedCommands);
   const duplicatePresent =
     containsDuplicateManagedHook(result.value, expectedHooks, countMatches) ||
@@ -374,14 +427,20 @@ export async function inspectCometHooksForPlatform(
 
   const skillsDir = getPlatformSkillsDir(platform, scope);
   const expectedHooks: ExpectedHookDescriptor[] = Object.entries(hooksConfig).map(
-    ([scriptRelPath, config]) => ({
-      scriptRelPath,
-      command: buildHookCommand(baseDir, skillsDir, scriptRelPath, {
-        platformId: platform.id,
-        scope,
-      }),
-      matcher: config.matcher,
-    }),
+    ([scriptRelPath, config]) => {
+      const context = { platformId: platform.id, scope };
+      const invocation =
+        platform.id === 'claude'
+          ? buildHookInvocation(baseDir, skillsDir, scriptRelPath, context)
+          : undefined;
+      return {
+        scriptRelPath,
+        command:
+          invocation?.command ?? buildHookCommand(baseDir, skillsDir, scriptRelPath, context),
+        ...(invocation ? { args: invocation.args } : {}),
+        matcher: config.matcher,
+      };
+    },
   );
 
   const platformBase = path.join(baseDir, getPlatformConfigDir(platform, scope));
@@ -392,14 +451,20 @@ export async function inspectCometHooksForPlatform(
         path.join(platformBase, platform.hookConfigFile ?? 'settings.local.json'),
         expectedHooks,
         (config) => collectGroupedCommands(config, 'PreToolUse'),
-        (config, expected) => countGroupedHookMatches(config, 'PreToolUse', expected),
+        (config, expected) =>
+          countGroupedHookMatches(config, 'PreToolUse', expected, (matcher) =>
+            resolveInstalledHookMatcher(platform, matcher),
+          ),
       );
       for (const legacyFile of platform.legacyHookConfigFiles ?? []) {
         const legacy = await inspectSingleHookJson(
           path.join(platformBase, legacyFile),
           expectedHooks,
           (config) => collectGroupedCommands(config, 'PreToolUse'),
-          (config, expected) => countGroupedHookMatches(config, 'PreToolUse', expected),
+          (config, expected) =>
+            countGroupedHookMatches(config, 'PreToolUse', expected, (matcher) =>
+              resolveInstalledHookMatcher(platform, matcher),
+            ),
         );
         if (legacy.error) {
           inspection = { ...inspection, present: false, error: legacy.error };
@@ -415,6 +480,28 @@ export async function inspectCometHooksForPlatform(
         }
       }
       break;
+    case 'dsh': {
+      inspection = await inspectSingleHookJson(
+        path.join(platformBase, platform.hookConfigFile ?? 'hooks.json'),
+        expectedHooks,
+        (config) => collectGroupedCommands(config, 'PreToolUse'),
+        (config, expected) => countGroupedHookMatches(config, 'PreToolUse', expected),
+      );
+      if (inspection.present && !(await hasDshCordisPatch(baseDir, platform, scope))) {
+        inspection = {
+          ...inspection,
+          present: false,
+          managedPresent: true,
+          error: 'dsh Cordis patch is missing the Comet Hook bridge row',
+        };
+      } else if (inspection.present) {
+        inspection = {
+          ...inspection,
+          activationRequired: true,
+        };
+      }
+      break;
+    }
     case 'qwen':
     case 'qoder':
     case 'codebuddy':
@@ -479,6 +566,33 @@ export async function inspectCometHooksForPlatform(
     case 'kiro':
       inspection = await inspectKiroHooks(platformBase, expectedHooks);
       break;
+    case 'omp': {
+      const hookPath = path.join(platformBase, ...OMP_HOOK_RELATIVE_PATH);
+      try {
+        if (!(await fileExists(hookPath))) {
+          inspection = { present: false };
+          break;
+        }
+        const content = await readFile(hookPath, 'utf8');
+        if (content === renderOmpHookModule()) {
+          inspection = { present: true };
+        } else if (content.includes(OMP_HOOK_MARKER)) {
+          inspection = {
+            present: false,
+            managedPresent: true,
+            error: `managed Oh My Pi Hook is outdated at ${hookPath}`,
+          };
+        } else {
+          inspection = { present: false };
+        }
+      } catch (error) {
+        inspection = {
+          present: false,
+          error: `Unable to inspect Oh My Pi Hook at ${hookPath}: ${(error as Error).message}`,
+        };
+      }
+      break;
+    }
   }
 
   if (!inspection.present) return inspection;

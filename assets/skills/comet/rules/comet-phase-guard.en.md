@@ -1,8 +1,9 @@
 # Comet Phase Awareness (Anti-Drift Rules)
 
-> This rule is injected every round to prevent forgetting Comet workflow state during long context.
-> The Hook platform additionally executes `comet-hook-guard.mjs` for hard interception;
-> this Rule is a universal soft defense line for all platforms.
+> Internal Classic authoring reference; it is not installed by the current manifest. User environments use `comet-workflow-guard.en.md`.
+>
+> This reference maintains Classic Skill, Runtime, and old-install cleanup contracts; it is not injected as a persistent Rule.
+> Current platforms install `comet-workflow-guard.en.md`, and Hook platforms route the Classic Guard through the Hook Router.
 
 ## Global Rules
 
@@ -73,9 +74,9 @@ The following decision points must pause to wait for explicit user selection; do
 
 - **open**: Final artifact review, which also confirms the change name and scope. Add an earlier decision only for unresolved target/scope alternatives or a large-PRD split
 - **design**: brainstorming proposal confirmation (Design Doc cannot be created before confirmation)
-- **build**: After capability preflight, use one joint decision for a plan-ready pause or every executable `isolation` / `build_mode` / `tdd_mode` / `review_mode`; include the branch name when branch is selected, plus large spec-change and preset-upgrade decisions
+- **build**: After the plan is written, provide one joint decision that collects whether to continue, the execution method, TDD mode, and code-review mode; the workspace was prepared and bound by Open, and missing isolation returns to Open. Scope expansion requiring redesign/splitting and preset upgrades remain separate user decisions
 - **verify**: Accepting WARNING/SUGGESTION deviations, handling Spec drift, or choosing continue/stop after the automatic repair limit
-- **archive**: Final confirmation before archiving, plus branch-handling selection after the archive commit
+- **archive**: One final pre-archive confirmation that chooses both whether to archive and how to deliver the archive commit
 
 ## Design Phase Specifics
 
@@ -87,7 +88,7 @@ The following decision points must pause to wait for explicit user selection; do
 
 ## Build Phase Specifics
 
-1. After plan creation, ask one joint question with every workflow-supported choice: pause, or submit workspace/execution/TDD/review settings and any conditional branch name together
+1. After plan creation, use `comet-build`'s joint-decision protocol to present the pause option, execution method, TDD mode, and code-review mode together. Write `build_mode`, `tdd_mode`, and `review_mode` only after the user chooses to continue with a complete configuration; write `build_pause: plan-ready` when the user chooses to pause
 2. After each task acceptance, must: tasks.md checkmark → git commit (do not accumulate). `subagent-driven-development` must complete acceptance according to the current `review_mode`, then the coordinator performs targeted verification by unique task text; do not use an incomplete task summary table to replace current task verification
 3. When encountering failures, must load **systematic-debugging** skill; do not propose source code fixes before root cause is located
 4. spec change grading: small changes edit directly | medium changes load brainstorming | large changes pause and wait for user confirmation to split
@@ -113,7 +114,7 @@ After recovery, first re-run the "Phase-Entry Self-Consistency Check" table: if 
 
 **Special attention to `build_mode`**: If recovery script outputs `build_mode: subagent-driven-development`, you are the coordinator, not the executor. Must:
 1. Use the Skill tool to reload the Superpowers `subagent-driven-development` skill
-2. Re-read `comet/reference/subagent-dispatch.md` for Comet-specific extensions
+2. Re-read `comet-classic/reference/subagent-dispatch.md` for Comet-specific extensions
 3. Read `<classic-change-dir>/.comet/subagent-progress.md` to recover the exact stage, evidence, and review-fix round
 4. Do not execute tasks directly in the main session
 5. Resume from the checkpoint; start from the first unchecked task only when it is missing or mismatched

@@ -38,6 +38,10 @@ describe('repository layout registry', () => {
     expect(resolveRepositoryPath(layout.nativeRuntime.outputs.runtime)).toBe(
       path.resolve('assets', 'skills', 'comet-native', 'scripts', 'comet-native-runtime.mjs'),
     );
+    for (const retired of ['checkpoint', 'check', 'evidence', 'receipt']) {
+      expect(layout.nativeRuntime.entries).not.toHaveProperty(retired);
+      expect(layout.nativeRuntime.outputs).not.toHaveProperty(retired);
+    }
     expect(layout.entryRuntime).toEqual({
       entries: {
         runtime: 'domains/comet-entry/entry-runtime-entry.ts',
@@ -59,19 +63,30 @@ describe('repository layout registry', () => {
     expect(layout.sourceRoots).toEqual(['app', 'domains', 'platform']);
     expect(layout.appModules).toEqual(['cli', 'commands']);
     expect(layout.domainModules).toEqual([
+      'agent-learning',
       'bundle',
       'comet-classic',
       'comet-entry',
+      'comet-memory',
       'comet-native',
+      'comet-plugin',
       'dashboard',
       'engine',
       'eval',
       'factory',
       'integrations',
+      'project-knowledge',
       'skill',
       'workflow-contract',
     ]);
-    expect(layout.platformModules).toEqual(['fs', 'install', 'paths', 'process', 'version']);
+    expect(layout.platformModules).toEqual([
+      'fs',
+      'http',
+      'install',
+      'paths',
+      'process',
+      'version',
+    ]);
     expect(layout.scriptModules).toEqual([
       'benchmark',
       'build',

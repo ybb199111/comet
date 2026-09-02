@@ -1,5 +1,6 @@
 import { promises as fs, readFileSync } from 'fs';
 import path from 'path';
+import { stripUtf8Bom } from '../../platform/fs/strip-bom.js';
 import { memoizedHookRead } from '../../platform/process/hook-read-cache.js';
 import {
   assertClassicLayoutWritable,
@@ -11,6 +12,7 @@ import { inspectClassicActiveChangeDirectory, openSpecChangeNameError } from './
 import { inspectClassicProjectTarget } from './classic-protected-path.js';
 import type { CometHookDecision, CometHookRequest } from '../comet-entry/hook-types.js';
 import { scopeCometHookTargets } from '../workflow-contract/hook-target-scope.js';
+import { configuredHookWritePath } from '../workflow-contract/hook-write-policy.js';
 import type { ClassicCommandHandler, ClassicCommandResult } from './classic-cli.js';
 import {
   driftStaleReason,
@@ -18,6 +20,7 @@ import {
   unboundDetachedMessage,
 } from './classic-branch-binding.js';
 import { resolveCurrentChange } from './classic-current-change.js';
+import { classicGuardUserMessage, classicLocale } from './classic-output-language.js';
 import { readClassicState, readLegacyState } from './classic-store.js';
 import type { ClassicPhase, ClassicState } from './classic-state.js';
 import {
@@ -36,7 +39,7 @@ function allowed(message: string): ClassicCommandResult {
 function inputTarget(): string {
   if (process.env.FILE_PATH) return process.env.FILE_PATH;
   if (process.stdin.isTTY) return '';
-  const input = readFileSync(0, 'utf8');
+  const input = stripUtf8Bom(readFileSync(0, 'utf8'));
   if (!input) return '';
   try {
     const parsed = JSON.parse(input) as { tool_input?: { file_path?: unknown } };
@@ -546,8 +549,8 @@ function openSpecAllowed(
   if (phase === 'build' && (relativePath.endsWith('/tasks.md') || stateFile || specs)) {
     return `${relativePath} (phase: build, spec/tasks)`;
   }
-  if (phase === 'verify' && (relativePath.endsWith('/tasks.md') || stateFile)) {
-    return `${relativePath} (phase: verify, tasks/state)`;
+  if (phase === 'verify' && stateFile) {
+    return `${relativePath} (phase: verify, state)`;
   }
   if (phase === 'archive' && stateFile) {
     return `${relativePath} (phase: archive, state)`;
@@ -555,7 +558,11 @@ function openSpecAllowed(
   return null;
 }
 
-function blocked(relativePath: string, phase: ClassicPhase): ClassicCommandResult {
+function blocked(
+  relativePath: string,
+  phase: ClassicPhase,
+  locale: ReturnType<typeof classicLocale>,
+): ClassicCommandResult {
   const guidance =
     phase === 'open'
       ? [
@@ -571,11 +578,28 @@ function blocked(relativePath: string, phase: ClassicPhase): ClassicCommandResul
             '  ALLOWED: run brainstorming, create the Design Doc, and run guard',
             '  NEXT: finish the Design Doc, then run comet guard <change-name> design --apply to enter build',
           ]
-        : [
-            '  BLOCKED: source writes are not allowed during archive',
-            '  This phase does not allow source writes',
-            '  ALLOWED: confirm archive state and run the archive script',
-          ];
+        : phase === 'verify'
+          ? [
+              '  BLOCKED: implementation writes are not allowed during verify',
+              '  This phase allows verification reports and state updates only',
+              '  NEXT: run verify-fail and return to build before repairing implementation',
+            ]
+          : [
+              '  BLOCKED: source writes are not allowed during archive',
+              '  This phase does not allow source writes',
+              '  ALLOWED: confirm archive state and run the archive script',
+            ];
+  return blockedBanner(relativePath, phase, phase, locale, guidance);
+}
+
+function blockedBanner(
+  relativePath: string,
+  phase: string,
+  phaseLabel: string,
+  locale: ReturnType<typeof classicLocale>,
+  guidance: readonly string[],
+): ClassicCommandResult {
+  const user = classicGuardUserMessage(phaseLabel, locale);
   return result(
     2,
     [
@@ -587,29 +611,29 @@ function blocked(relativePath: string, phase: ClassicPhase): ClassicCommandResul
       `  Current phase: ${phase}`,
       `  Target file: ${relativePath}`,
       '',
+      `  ${user.summary}`,
+      `  RELAY TO USER: ${user.user_message}`,
+      '',
       ...guidance,
       '',
     ].join('\n'),
   );
 }
 
-function blockedMissingDesignDoc(relativePath: string): ClassicCommandResult {
-  return result(
-    2,
+function blockedMissingDesignDoc(
+  relativePath: string,
+  locale: ReturnType<typeof classicLocale>,
+): ClassicCommandResult {
+  return blockedBanner(
+    relativePath,
+    'build (workflow: full), but design_doc is empty',
+    'build',
+    locale,
     [
-      '',
-      '╔══════════════════════════════════════════╗',
-      '║     COMET PHASE GUARD — WRITE BLOCKED    ║',
-      '╚══════════════════════════════════════════╝',
-      '',
-      '  Current phase: build (workflow: full), but design_doc is empty',
-      `  Target file: ${relativePath}`,
-      '',
       '  BLOCKED: full workflow source writes require a recorded Design Doc',
       '  This phase does not allow source writes until design_doc is recorded',
       '  NEXT: return to design, create/link the Design Doc, then run guard again',
-      '',
-    ].join('\n'),
+    ],
   );
 }
 
@@ -817,6 +841,13 @@ async function inspectClassicHookTarget(
     return allowed(`${relativePath} (whitelist: root markdown)`);
   }
 
+  const configuredAllowPath = await configuredHookWritePath(projectRoot, target, [
+    path.join(projectRoot, '.comet'),
+    layout.openSpecRoot,
+    layout.superpowersRoot,
+  ]);
+  if (configuredAllowPath) return allowed(configuredAllowPath);
+
   let governing: GoverningResolution;
   try {
     governing = await governingChange(relativePath, projectRoot, layout, selectedChangeName);
@@ -853,7 +884,7 @@ async function inspectClassicHookTarget(
     );
   }
   if (phase === 'build' && governing.classic?.workflow === 'full' && !governing.classic.designDoc) {
-    return blockedMissingDesignDoc(relativePath);
+    return blockedMissingDesignDoc(relativePath, classicLocale(governing.classic?.language));
   }
   if (phase === 'build' && governing.classic?.workflow === 'full') {
     const planReadiness = await hookPlanReadiness(projectRoot, governing.classic.plan);
@@ -861,10 +892,10 @@ async function inspectClassicHookTarget(
       return blockedPlanNotReady(relativePath, governing, planReadiness, projectRoot, layout);
     }
   }
-  if (phase === 'build' || phase === 'verify') {
+  if (phase === 'build') {
     return allowed(`${relativePath} (phase: ${phase})`);
   }
-  return blocked(relativePath, phase);
+  return blocked(relativePath, phase, classicLocale(governing.classic?.language));
 }
 
 export async function inspectClassicHookGuard(
@@ -918,6 +949,7 @@ export async function inspectClassicHookGuard(
     };
   }
 
+  let configuredTarget = false;
   for (const target of request.targets) {
     const inspected = await inspectClassicHookTarget(
       projectRoot,
@@ -934,10 +966,13 @@ export async function inspectClassicHookGuard(
         phase: selected.phase,
       };
     }
+    if (inspected.stderr?.includes('configured Hook allow path')) configuredTarget = true;
   }
   return {
     allowed: true,
-    reason: `Classic write allowed in ${selected.phase}`,
+    reason: configuredTarget
+      ? 'Classic write allowed by configured Hook allow path'
+      : `Classic write allowed in ${selected.phase}`,
     workflow: 'classic',
     change: changeName,
     phase: selected.phase,

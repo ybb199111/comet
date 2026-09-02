@@ -402,6 +402,13 @@ describe('uninstall', () => {
   describe('removeCometSkillsForPlatform', () => {
     const claudePlatform: Platform = PLATFORMS.find((p) => p.id === 'claude')!;
 
+    const retiredNativeBundles = [
+      'comet-native/scripts/comet-native-checkpoint.mjs',
+      'comet-native/scripts/comet-native-check.mjs',
+      'comet-native/scripts/comet-native-evidence.mjs',
+      'comet-native/scripts/comet-native-receipt.mjs',
+    ] as const;
+
     it('removes installed Comet skills', async () => {
       await copyCometSkillsForPlatform(tmpDir, claudePlatform, true, 'skills', 'project');
 
@@ -422,6 +429,37 @@ describe('uninstall', () => {
       const result = await removeCometSkillsForPlatform(tmpDir, claudePlatform, 'project');
       expect(result.removed).toBe(0);
       expect(result.failed).toBe(0);
+    });
+
+    it('removes retired Native bundles from copy and central stores without deleting user files', async () => {
+      const roots = [
+        path.join(tmpDir, '.claude', 'skills'),
+        path.join(tmpDir, '.comet', 'skills', 'skills'),
+      ];
+      for (const root of roots) {
+        const userFile = path.join(root, 'comet-native', 'scripts', 'user-helper.mjs');
+        await fs.mkdir(path.dirname(userFile), { recursive: true });
+        await fs.writeFile(userFile, 'keep user content\n', 'utf8');
+        for (const relativePath of retiredNativeBundles) {
+          const target = path.join(root, ...relativePath.split('/'));
+          await fs.writeFile(target, 'legacy bundle\n', 'utf8');
+        }
+      }
+
+      const result = await removeCometSkillsForPlatform(tmpDir, claudePlatform, 'project');
+
+      expect(result.failed).toBe(0);
+      expect(result.removed).toBe(retiredNativeBundles.length * roots.length);
+      for (const root of roots) {
+        for (const relativePath of retiredNativeBundles) {
+          await expect(
+            fs.access(path.join(root, ...relativePath.split('/'))),
+          ).rejects.toMatchObject({ code: 'ENOENT' });
+        }
+        await expect(
+          fs.readFile(path.join(root, 'comet-native', 'scripts', 'user-helper.mjs'), 'utf8'),
+        ).resolves.toBe('keep user content\n');
+      }
     });
 
     it('removes only the selected workflow Skills and keeps their shared entry', async () => {
@@ -575,6 +613,130 @@ describe('uninstall', () => {
       await expect(
         fs.access(path.join(tmpDir, '.agents', 'skills', 'brainstorming')),
       ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('removes standard Superpowers Skills from dsh without a Skills CLI agent', async () => {
+      const dshPlatform = PLATFORMS.find((platform) => platform.id === 'dsh')!;
+      for (const name of ['brainstorming', 'writing-plans', 'using-superpowers', 'personal']) {
+        await fs.mkdir(path.join(tmpDir, '.dsh', 'skills', name), { recursive: true });
+      }
+      await fs.writeFile(
+        path.join(tmpDir, '.dsh', 'skills', '.comet-ownership.json'),
+        JSON.stringify({
+          version: 1,
+          openspec: [],
+          superpowers: ['skills/brainstorming', 'skills/writing-plans', 'skills/using-superpowers'],
+        }),
+        'utf8',
+      );
+
+      const result = await removeSuperpowersSkillsForPlatforms(tmpDir, [dshPlatform], 'project', {
+        removeSharedStorage: true,
+      });
+
+      expect(result).toEqual({ removed: 3, failed: 0 });
+      await expect(
+        fs.access(path.join(tmpDir, '.dsh', 'skills', 'personal')),
+      ).resolves.toBeUndefined();
+      await expect(
+        fs.access(path.join(tmpDir, '.dsh', 'skills', 'brainstorming')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('preserves a user-owned dsh Skill when discovery data has the same name', async () => {
+      const dshPlatform = PLATFORMS.find((platform) => platform.id === 'dsh')!;
+      const skillPath = path.join(tmpDir, '.dsh', 'skills', 'brainstorming');
+      await fs.mkdir(skillPath, { recursive: true });
+      await fs.writeFile(path.join(skillPath, 'SKILL.md'), '# User-owned brainstorming\n', 'utf8');
+      await fs.writeFile(
+        path.join(tmpDir, '.dsh', 'skills', '.comet-ownership.json'),
+        JSON.stringify({ version: 1, openspec: [], superpowers: [] }),
+        'utf8',
+      );
+      await fs.writeFile(
+        path.join(tmpDir, 'skills-lock.json'),
+        JSON.stringify({ version: 1, skills: { brainstorming: { source: 'obra/superpowers' } } }),
+        'utf8',
+      );
+      mockedExecFileSync.mockImplementation((_command, args) => {
+        if (args[1] === 'list') {
+          return JSON.stringify([{ name: 'brainstorming', source: 'obra/superpowers' }]) as never;
+        }
+        return '' as never;
+      });
+
+      const result = await removeSuperpowersSkillsForPlatforms(tmpDir, [dshPlatform], 'project', {
+        removeSharedStorage: true,
+      });
+
+      expect(result).toEqual({ removed: 0, failed: 0 });
+      await expect(fs.access(skillPath)).resolves.toBeUndefined();
+    });
+
+    it('removes staged Superpowers from a Grok-only project install without CLI list or lockfile', async () => {
+      const grokPlatform = PLATFORMS.find((platform) => platform.id === 'grok')!;
+      mockedExecFileSync.mockImplementation(() => {
+        throw new Error('skills CLI is not registered in the target project');
+      });
+      await fs.mkdir(path.join(tmpDir, '.grok', 'skills', 'brainstorming'), { recursive: true });
+      await fs.writeFile(
+        path.join(tmpDir, '.grok', 'skills', 'brainstorming', 'SKILL.md'),
+        '# Brainstorming\n',
+        'utf8',
+      );
+      await fs.writeFile(
+        path.join(tmpDir, '.grok', '.comet-superpowers.json'),
+        JSON.stringify({ source: 'obra/superpowers', skills: ['brainstorming'] }),
+        'utf8',
+      );
+
+      const result = await removeSuperpowersSkillsForPlatforms(tmpDir, [grokPlatform], 'project');
+
+      expect(result).toEqual({ removed: 1, failed: 0 });
+      await expect(
+        fs.access(path.join(tmpDir, '.grok', 'skills', 'brainstorming')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(
+        fs.access(path.join(tmpDir, '.grok', '.comet-superpowers.json')),
+      ).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
+    it('removes staged Superpowers from a Grok-only global install without CLI list or lockfile', async () => {
+      const grokPlatform = PLATFORMS.find((platform) => platform.id === 'grok')!;
+      const fakeHome = path.join(tmpDir, 'grok-global-home');
+      const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+      mockedExecFileSync.mockImplementation(() => {
+        throw new Error('skills CLI is not registered in the target location');
+      });
+      try {
+        await fs.mkdir(path.join(fakeHome, '.grok', 'skills', 'writing-plans'), {
+          recursive: true,
+        });
+        await fs.writeFile(
+          path.join(fakeHome, '.grok', 'skills', 'writing-plans', 'SKILL.md'),
+          '# Writing Plans\n',
+          'utf8',
+        );
+        await fs.writeFile(
+          path.join(fakeHome, '.grok', '.comet-superpowers.json'),
+          JSON.stringify({ source: 'obra/superpowers', skills: ['writing-plans'] }),
+          'utf8',
+        );
+
+        const result = await removeSuperpowersSkillsForPlatforms(tmpDir, [grokPlatform], 'global');
+
+        expect(result).toEqual({ removed: 1, failed: 0 });
+        await expect(
+          fs.access(path.join(fakeHome, '.grok', 'skills', 'writing-plans')),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(
+          fs.access(path.join(fakeHome, '.grok', '.comet-superpowers.json')),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        homedirSpy.mockRestore();
+      }
     });
   });
 
@@ -1463,6 +1625,40 @@ describe('uninstallCommand interactive selection', () => {
     await expect(
       fs.access(path.join(fakeHome, '.agents', 'skills', 'comet')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('uninstalls Oh My Pi Skills, Rule, and managed Hook while preserving user Hooks', async () => {
+    const omp = PLATFORMS.find((platform) => platform.id === 'oh-my-pi')!;
+    const userHook = path.join(tmpDir, '.omp', 'hooks', 'pre', 'user-hook.ts');
+    await copyCometSkillsForPlatform(tmpDir, omp, true, 'skills', 'project');
+    await copyCometRulesForPlatform(tmpDir, omp, true, 'en', 'project');
+    await installCometHooksForPlatform(tmpDir, omp, 'project');
+    await fs.writeFile(userHook, 'export default function userHook() {}\n', 'utf8');
+
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let jsonOutput: string;
+    try {
+      await uninstallCommand(tmpDir, { force: true, json: true });
+      jsonOutput = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(JSON.parse(jsonOutput).targets).toEqual([
+      expect.objectContaining({
+        scope: 'project',
+        platform: 'oh-my-pi',
+        hooksRemoved: 1,
+        rulesRemoved: 1,
+      }),
+    ]);
+    await expect(fs.access(path.join(tmpDir, '.omp', 'skills', 'comet'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(
+      fs.access(path.join(tmpDir, '.omp', 'rules', 'comet-workflow-guard.mdc')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.readFile(userHook, 'utf8')).resolves.toContain('userHook');
   });
 
   it('does not apply project registry recovery targets to an explicit global uninstall', async () => {

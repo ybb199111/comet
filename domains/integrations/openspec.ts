@@ -2,7 +2,12 @@ import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { PLATFORMS, getPlatformSkillsDir } from '../../platform/install/platforms.js';
+import {
+  PLATFORMS,
+  getOpenSpecGeneratorPlatform,
+  getOpenSpecMirrorPlatforms,
+  getPlatformSkillsDir,
+} from '../../platform/install/platforms.js';
 import { printCommandErrorDetails } from '../../platform/process/command-error.js';
 import { quoteArgsForShell } from '../../platform/process/shell-quote.js';
 import { atomicWriteContainedBytes } from '../workflow-contract/contained-atomic-write.js';
@@ -10,11 +15,13 @@ import {
   ensureProtectedProjectDirectory,
   inspectProtectedProjectPath,
 } from '../workflow-contract/protected-project-path.js';
+import { addDshOwnedPaths, dshRootPath, readDshOwnedPaths } from '../skill/dsh-adapter.js';
 
 import type { InstallScope } from '../../platform/install/types.js';
 
 const VALID_TOOL_IDS = new Set(PLATFORMS.map((p) => p.openspecToolId));
 const MINIMUM_OPENSPEC_VERSION = '1.5.0';
+const OH_MY_PI_MINIMUM_OPENSPEC_VERSION = '1.6.0';
 const ALL_OPENSPEC_WORKFLOWS = [
   'propose',
   'explore',
@@ -32,6 +39,17 @@ const ALL_OPENSPEC_WORKFLOWS = [
 type ProjectMutationGuard = () => void | Promise<void>;
 type OpenSpecFailureObserver = (error: Error) => void;
 
+export interface OpenSpecInstallOptions {
+  shouldInstallCli?: boolean;
+  mirrorPlatformIds?: readonly string[];
+  artifactLayout?: 'legacy' | 'docs';
+  projectMutationGuard?: ProjectMutationGuard;
+  failureObserver?: OpenSpecFailureObserver;
+  extraMirrorPlatformIds?: readonly string[];
+  moreMirrorPlatformIds?: readonly string[];
+  selectedPlatformIds?: readonly string[];
+}
+
 class ProjectMutationGuardError extends Error {
   override readonly name = 'ProjectMutationGuardError';
 }
@@ -46,7 +64,7 @@ function getNpmExecutable(platform: NodeJS.Platform = process.platform): string 
 
 function buildOpenSpecInitInvocation(
   projectPath: string,
-  toolIds: string[],
+  toolIds: readonly string[],
   scope: InstallScope,
   homeDir = os.homedir(),
   includeProfileFlag = true,
@@ -82,7 +100,7 @@ async function assertProjectMutationAllowed(
 
 async function runOpenSpecInit(
   targetPath: string,
-  toolIds: string[],
+  toolIds: readonly string[],
   env: NodeJS.ProcessEnv,
   projectMutationGuard?: ProjectMutationGuard,
   projectMutationAlreadyStarted = false,
@@ -165,6 +183,26 @@ function projectRelativePath(projectPath: string, target: string, label: string)
   return relative.split(path.sep).join('/');
 }
 
+/**
+ * Whether a staged OpenSpec tool directory contains any files (recursively).
+ *
+ * The staging project is a private temporary directory freshly written by the
+ * OpenSpec CLI, so the tree is small and bounded; walking it is cheap. This
+ * distinguishes "no output at all" from "only empty directories" so a missing
+ * or empty staged tool output fails the update instead of reporting success.
+ */
+async function hasGeneratedToolFiles(dir: string): Promise<boolean> {
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (await hasGeneratedToolFiles(path.join(dir, entry.name))) return true;
+    } else {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function copyGeneratedToolDirectory(
   stagingProject: string,
   source: string,
@@ -233,48 +271,94 @@ async function copyGeneratedToolDirectory(
   }
 }
 
-async function mergeGeneratedToolDirectories(
+interface GeneratedToolCopy {
+  source: string;
+  destination: string;
+}
+
+async function resolveGeneratedToolCopies(
   stagingProject: string,
-  projectPath: string,
+  destBase: string,
+  scope: InstallScope,
   toolIds: readonly string[],
-  mirrorOpenCodePlatformIds: readonly string[],
+  mirrorPlatformIds: readonly string[] = [],
+  selectedPlatformIds: readonly string[] = [],
+): Promise<GeneratedToolCopy[]> {
+  const copies: GeneratedToolCopy[] = [];
+  const mergedDestinations = new Set<string>();
+  for (const toolId of toolIds) {
+    const generator = getOpenSpecGeneratorPlatform(toolId);
+    if (!generator) continue;
+    const candidateDirs = [
+      generator.openspecSkillsDir ?? generator.skillsDir,
+      ...(generator.legacySkillsDirs ?? []),
+    ];
+    const sourceDir = candidateDirs.find((dir) => fs.existsSync(path.join(stagingProject, dir)));
+    if (!sourceDir) {
+      throw new Error(
+        `OpenSpec generated no tool output for ${generator.id}: expected one of ${candidateDirs.join(', ')} under the staging project`,
+      );
+    }
+    const source = path.join(stagingProject, sourceDir);
+    if (!(await hasGeneratedToolFiles(source))) {
+      throw new Error(
+        `OpenSpec generated an empty tool output for ${generator.id}: ${sourceDir} contains no skills or commands`,
+      );
+    }
+    const mirrors = getOpenSpecMirrorPlatforms(mirrorPlatformIds, generator.id);
+    const writeGenerator =
+      selectedPlatformIds.length > 0
+        ? selectedPlatformIds.includes(generator.id)
+        : mirrors.length === 0;
+    const destinations = [
+      ...(writeGenerator ? [path.join(destBase, getPlatformSkillsDir(generator, scope))] : []),
+      ...mirrors.map((platform) => path.join(destBase, getPlatformSkillsDir(platform, scope))),
+    ];
+    for (const destination of destinations) {
+      if (mergedDestinations.has(destination)) continue;
+      copies.push({ source, destination });
+      mergedDestinations.add(destination);
+    }
+  }
+  return copies;
+}
+
+/**
+ * Validates that every requested platform produced non-empty staged tool output
+ * before any project file is written. Runs after the staging `openspec init`
+ * and before the artifact-root init/merge, so a missing or empty later platform
+ * cannot leave partially written artifacts or Skills behind.
+ */
+async function preflightGeneratedToolDirectories(
+  stagingProject: string,
+  destBase: string,
+  scope: InstallScope,
+  toolIds: readonly string[],
+  mirrorPlatformIds: readonly string[] = [],
+  selectedPlatformIds: readonly string[] = [],
+): Promise<GeneratedToolCopy[]> {
+  return resolveGeneratedToolCopies(
+    stagingProject,
+    destBase,
+    scope,
+    toolIds,
+    mirrorPlatformIds,
+    selectedPlatformIds,
+  );
+}
+
+async function mergeGeneratedToolDirectories(
+  copies: readonly GeneratedToolCopy[],
+  stagingProject: string,
+  destBase: string,
   projectMutationGuard?: ProjectMutationGuard,
 ): Promise<void> {
-  const skillDirs = new Set(
-    toolIds.flatMap((toolId) => {
-      const platform = PLATFORMS.find((candidate) => candidate.openspecToolId === toolId);
-      return platform ? [platform.openspecSkillsDir ?? platform.skillsDir] : [];
-    }),
-  );
-  for (const skillsDir of skillDirs) {
-    const source = path.join(stagingProject, skillsDir);
-    if (!fs.existsSync(source)) continue;
-    const platform = PLATFORMS.find(
-      (candidate) => (candidate.openspecSkillsDir ?? candidate.skillsDir) === skillsDir,
-    );
-    if (!platform) continue;
+  for (const copy of copies) {
     await copyGeneratedToolDirectory(
       stagingProject,
-      source,
-      projectPath,
-      path.join(projectPath, platform.skillsDir),
-      projectMutationGuard,
-    );
-  }
-
-  if (!toolIds.includes('opencode') || mirrorOpenCodePlatformIds.length === 0) return;
-  const opencodePlatform = PLATFORMS.find((platform) => platform.id === 'opencode');
-  if (!opencodePlatform) return;
-  const source = path.join(stagingProject, opencodePlatform.skillsDir);
-  if (!fs.existsSync(source)) return;
-  for (const platformId of new Set(mirrorOpenCodePlatformIds)) {
-    const platform = PLATFORMS.find((candidate) => candidate.id === platformId);
-    if (!platform || platform.id === 'opencode') continue;
-    await copyGeneratedToolDirectory(
-      stagingProject,
-      source,
-      projectPath,
-      path.join(projectPath, getPlatformSkillsDir(platform, 'project')),
+      copy.source,
+      destBase,
+      copy.destination,
       projectMutationGuard,
     );
   }
@@ -412,9 +496,12 @@ function parseSemanticVersion(value: string): SemanticVersion | null {
   };
 }
 
-function isOpenSpecVersionCompatible(versionOutput: string): boolean {
+function isOpenSpecVersionCompatible(
+  versionOutput: string,
+  minimumVersion = MINIMUM_OPENSPEC_VERSION,
+): boolean {
   const actual = parseSemanticVersion(versionOutput);
-  const minimum = parseSemanticVersion(MINIMUM_OPENSPEC_VERSION);
+  const minimum = parseSemanticVersion(minimumVersion);
   if (!actual || !minimum) return false;
   for (const field of ['major', 'minor', 'patch'] as const) {
     if (actual[field] > minimum[field]) return true;
@@ -447,14 +534,15 @@ export function isOpenSpecCliCompatible(): boolean {
 async function ensureOpenSpecCli(
   projectPath: string,
   shouldInstall = true,
+  minimumVersion = MINIMUM_OPENSPEC_VERSION,
 ): Promise<'ready' | 'missing' | 'incompatible' | 'failed'> {
   const alreadyInstalled = isCommandAvailable('openspec');
   if (!shouldInstall) {
     if (!alreadyInstalled) return 'missing';
     const version = getOpenSpecVersion();
-    if (version && isOpenSpecVersionCompatible(version)) return 'ready';
+    if (version && isOpenSpecVersionCompatible(version, minimumVersion)) return 'ready';
     console.error(
-      `    OpenSpec ${version || 'version unknown'} is incompatible; Comet requires >= ${MINIMUM_OPENSPEC_VERSION}. The OpenSpec upgrade was not selected; rerun comet init and select OpenSpec, or run: npm install -g @fission-ai/openspec@latest`,
+      `    OpenSpec ${version || 'version unknown'} is incompatible; Comet requires >= ${minimumVersion}. The OpenSpec upgrade was not selected; rerun comet init and select OpenSpec, or run: npm install -g @fission-ai/openspec@latest`,
     );
     return 'incompatible';
   }
@@ -478,14 +566,14 @@ async function ensureOpenSpecCli(
   } catch (error) {
     if (alreadyInstalled) {
       const version = getOpenSpecVersion();
-      if (version && isOpenSpecVersionCompatible(version)) {
+      if (version && isOpenSpecVersionCompatible(version, minimumVersion)) {
         console.warn(
           `    OpenSpec upgrade failed, using compatible existing version ${version}: ${(error as Error).message}`,
         );
         return 'ready';
       }
       console.error(
-        `    OpenSpec upgrade failed and existing ${version || 'version could not be read'} is incompatible; Comet requires >= ${MINIMUM_OPENSPEC_VERSION}.`,
+        `    OpenSpec upgrade failed and existing ${version || 'version could not be read'} is incompatible; Comet requires >= ${minimumVersion}.`,
       );
       printCommandErrorDetails(error);
       return 'incompatible';
@@ -605,23 +693,76 @@ function copyOpenSpecPaths(srcDir: string, destDir: string): void {
         fs.cpSync(srcPath, destPath, { recursive: true, force: true });
       }
     } catch (error) {
-      console.error(
-        `    Warning: failed to copy OpenSpec ${label} from ${from} to ${to}: ${(error as Error).message}`,
+      throw new Error(
+        `Failed to copy OpenSpec ${label} from ${from} to ${to}: ${(error as Error).message}`,
+        { cause: error },
       );
     }
   }
 }
 
+async function copyDshOpenSpecPaths(
+  sourceBaseDir: string,
+  destinationBaseDir: string,
+  scope: InstallScope,
+  projectMutationGuard?: ProjectMutationGuard,
+): Promise<void> {
+  const dshPlatform = PLATFORMS.find((platform) => platform.id === 'dsh');
+  const claudePlatform = PLATFORMS.find((platform) => platform.id === 'claude');
+  if (!dshPlatform || !claudePlatform) return;
+
+  const sourceRoot = path.join(sourceBaseDir, getPlatformSkillsDir(claudePlatform, scope));
+  const destinationRoot = dshRootPath(destinationBaseDir, dshPlatform, scope);
+  const owned = await readDshOwnedPaths(destinationBaseDir, dshPlatform, scope, 'openspec');
+  const copied: string[] = [];
+
+  for (const directory of ['skills', 'commands']) {
+    const sourceDirectory = path.join(sourceRoot, directory);
+    if (!fs.existsSync(sourceDirectory)) continue;
+    for (const entry of fs.readdirSync(sourceDirectory, { withFileTypes: true })) {
+      const relative = `${directory}/${entry.name}`;
+      const source = path.join(sourceDirectory, entry.name);
+      const destination = path.join(destinationRoot, directory, entry.name);
+      if (fs.existsSync(destination) && !owned.has(relative)) continue;
+
+      if (scope === 'project') {
+        await copyGeneratedToolDirectory(
+          sourceBaseDir,
+          source,
+          destinationBaseDir,
+          destination,
+          projectMutationGuard,
+        );
+      } else {
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.cpSync(source, destination, { recursive: true, force: true });
+      }
+      copied.push(relative);
+    }
+  }
+
+  await addDshOwnedPaths(destinationBaseDir, dshPlatform, scope, 'openspec', copied);
+}
+
 async function installOpenSpec(
   projectPath: string,
-  toolIds: string[],
+  toolIds: readonly string[],
   scope: InstallScope,
-  shouldInstallCli = true,
-  mirrorOpenCodePlatformIds: string[] = [],
-  artifactLayout: 'legacy' | 'docs' = 'legacy',
-  projectMutationGuard?: ProjectMutationGuard,
-  failureObserver?: OpenSpecFailureObserver,
+  options: OpenSpecInstallOptions = {},
 ): Promise<'installed' | 'failed' | 'skipped'> {
+  const {
+    shouldInstallCli = true,
+    mirrorPlatformIds = [],
+    artifactLayout = 'legacy',
+    projectMutationGuard,
+    failureObserver,
+    extraMirrorPlatformIds = [],
+    moreMirrorPlatformIds = [],
+    selectedPlatformIds = [],
+  } = options;
+  const allMirrorPlatformIds = [
+    ...new Set([...mirrorPlatformIds, ...extraMirrorPlatformIds, ...moreMirrorPlatformIds]),
+  ];
   if (scope === 'project') {
     try {
       await assertProjectMutationAllowed(projectMutationGuard, 'before');
@@ -630,7 +771,10 @@ async function installOpenSpec(
       throw error;
     }
   }
-  const cliStatus = await ensureOpenSpecCli(projectPath, shouldInstallCli);
+  const minimumVersion = toolIds.includes('oh-my-pi')
+    ? OH_MY_PI_MINIMUM_OPENSPEC_VERSION
+    : MINIMUM_OPENSPEC_VERSION;
+  const cliStatus = await ensureOpenSpecCli(projectPath, shouldInstallCli, minimumVersion);
   if (cliStatus === 'failed' || cliStatus === 'incompatible') {
     return 'failed';
   }
@@ -646,24 +790,38 @@ async function installOpenSpec(
   let configHome: string | undefined;
   let configBackup: ConfigBackup | null = null;
   let stagingProject: string | undefined;
+  let generatedToolCopies: GeneratedToolCopy[] | undefined;
+  const dshSelected = selectedPlatformIds.includes('dsh') && toolIds.includes('claude');
   try {
     const openspecEnv = createOpenSpecAllWorkflowsEnv();
     configHome = openspecEnv.configHome;
 
     configBackup = writeAllWorkflowsToDefaultConfig();
+    const destBase = scope === 'global' ? os.homedir() : projectPath;
+    const usesStagedToolCopy =
+      toolIds.length > 0 && (scope === 'project' || allMirrorPlatformIds.length > 0 || dshSelected);
+
+    if (usesStagedToolCopy) {
+      stagingProject = fs.mkdtempSync(path.join(os.tmpdir(), 'comet-openspec-tools-'));
+      await runOpenSpecInit(
+        stagingProject,
+        toolIds,
+        openspecEnv.env,
+        scope === 'project' ? projectMutationGuard : undefined,
+        false,
+        false,
+      );
+      generatedToolCopies = await preflightGeneratedToolDirectories(
+        stagingProject,
+        destBase,
+        scope,
+        toolIds,
+        allMirrorPlatformIds,
+        selectedPlatformIds,
+      );
+    }
 
     if (scope === 'project') {
-      if (toolIds.length > 0) {
-        stagingProject = fs.mkdtempSync(path.join(os.tmpdir(), 'comet-openspec-tools-'));
-        await runOpenSpecInit(
-          stagingProject,
-          toolIds,
-          openspecEnv.env,
-          projectMutationGuard,
-          false,
-          false,
-        );
-      }
       await assertProjectMutationAllowed(projectMutationGuard, 'before');
       const artifactBase = artifactLayout === 'docs' ? path.join(projectPath, 'docs') : projectPath;
       let artifactMutationGuard = projectMutationGuard;
@@ -680,35 +838,33 @@ async function installOpenSpec(
         };
       }
       await runOpenSpecInit(artifactBase, ['none'], openspecEnv.env, artifactMutationGuard, true);
-      if (stagingProject) {
+      if (stagingProject && generatedToolCopies) {
         await assertProjectMutationAllowed(projectMutationGuard, 'before', true);
         await mergeGeneratedToolDirectories(
+          generatedToolCopies,
           stagingProject,
-          projectPath,
-          toolIds,
-          mirrorOpenCodePlatformIds,
+          destBase,
           projectMutationGuard,
         );
       }
+      if (dshSelected && stagingProject) {
+        await copyDshOpenSpecPaths(stagingProject, projectPath, 'project', projectMutationGuard);
+      }
       await assertProjectMutationAllowed(projectMutationGuard, 'after-external', true);
+    } else if (
+      (allMirrorPlatformIds.length > 0 || dshSelected) &&
+      stagingProject &&
+      generatedToolCopies
+    ) {
+      await mergeGeneratedToolDirectories(generatedToolCopies, stagingProject, destBase);
+      if (dshSelected) {
+        await copyDshOpenSpecPaths(stagingProject, destBase, scope);
+      }
     } else {
       await runOpenSpecInit(os.homedir(), toolIds, openspecEnv.env);
     }
 
-    const openspecWritesGlobal = scope === 'global';
-    const openspecTargetBase = openspecWritesGlobal ? os.homedir() : projectPath;
-
-    // Mirror OpenCode-compatible platforms first, before the opencode global
-    // migration potentially moves the source away.
-    if (
-      scope === 'global' &&
-      mirrorOpenCodePlatformIds.length > 0 &&
-      toolIds.includes('opencode')
-    ) {
-      mirrorOpenCodeCompatibleOpenSpecPaths(openspecTargetBase, scope, mirrorOpenCodePlatformIds);
-    }
-
-    if (openspecWritesGlobal && toolIds.includes('opencode')) {
+    if (scope === 'global' && toolIds.includes('opencode')) {
       migrateOpenCodeOpenSpecPaths(os.homedir());
     }
 

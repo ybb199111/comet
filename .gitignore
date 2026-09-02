@@ -15,6 +15,9 @@ coverage
 *.lcov
 .nyc_output
 
+# Local Product Design QA report
+/design-qa.md
+
 # Dependency directories
 node_modules/
 
@@ -120,9 +123,20 @@ eval/**/.pytest*/
 eval/**/.pytest-*/
 eval/**/.pytest_*/
 eval/local/logs/
+eval/langfuse/logs/
 eval/local/.pytest_docker_build.lock
 
 # Windows "nul" device-name mishaps (created when a shell redirects to nul
 # outside cmd.exe semantics); never track these.
 nul
 **/nul
+
+.zcode
+
+# Dashboard local cache snapshots must never enter the project repository.
+dashboard-installed-snapshot.json
+# >>> Comet managed project state >>>
+!/.comet/
+/.comet/*
+!/.comet/config.yaml
+# <<< Comet managed project state <<<

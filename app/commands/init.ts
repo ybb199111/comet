@@ -5,6 +5,7 @@ import { platformSelectPrompt } from './platform-select-prompt.js';
 import {
   PLATFORMS,
   getPlatformSkillsDir,
+  resolveOpenSpecMirrorPlatformIds,
   type Platform,
 } from '../../platform/install/platforms.js';
 import {
@@ -61,6 +62,7 @@ import {
   readWorkflowProjectConfigSnapshot,
 } from '../../domains/workflow-contract/project-config-reader.js';
 import { writeWorkflowProjectConfig } from '../../domains/workflow-contract/project-config-writer.js';
+import { ensureCometProjectGitignore } from '../../domains/workflow-contract/project-gitignore.js';
 import {
   readWorkflowGlobalConfig,
   writeWorkflowGlobalConfig,
@@ -73,7 +75,7 @@ import { installSuperpowersForPlatforms } from '../../domains/integrations/super
 import {
   hasCodegraphProjectIndex,
   initializeCodegraphProject,
-  inspectCodegraphIndex,
+  inspectCodegraphIntegration,
   installCodegraph,
   resolveCodegraphCommand,
 } from '../../domains/integrations/codegraph.js';
@@ -319,19 +321,22 @@ async function selectNpmDeps(
   spPlatformIds: string[],
   options: InitOptions,
   lang: string,
-  workflow: CometWorkflow,
+  workflowSelection: InitWorkflowSelection,
 ): Promise<Set<NpmDepId>> {
-  if (workflow === 'native') return new Set();
-
-  const openSpecInstalled = isCommandAvailable('openspec');
-  const openSpecRequired = workflow === 'classic' && !isOpenSpecCliCompatible();
+  const includesClassic = includesWorkflow(workflowSelection, 'classic');
+  const openSpecInstalled = includesClassic && isCommandAvailable('openspec');
+  const openSpecRequired = includesClassic && !isOpenSpecCliCompatible();
   const codegraphInstalled =
     hasCodegraphProjectIndex(projectPath) || resolveCodegraphCommand() !== null;
   const superpowersInstalled = spPlatformIds.length === 0 ? true : undefined;
 
   const states: NpmDepState[] = [
-    { id: 'openspec', installed: openSpecInstalled, required: openSpecRequired },
-    { id: 'superpowers', installed: Boolean(superpowersInstalled) },
+    ...(includesClassic
+      ? [
+          { id: 'openspec' as const, installed: openSpecInstalled, required: openSpecRequired },
+          { id: 'superpowers' as const, installed: Boolean(superpowersInstalled) },
+        ]
+      : []),
     { id: 'codegraph', installed: codegraphInstalled },
   ];
 
@@ -708,21 +713,17 @@ export async function initCommand(
 
   const spPlatformIds = plans.filter((p) => p.spAction !== 'skip').map((p) => p.platform.id);
 
-  // OpenCode-compatible platforms reuse the opencode OpenSpec tool id; mirror
-  // the opencode output into their platform-specific config directories.
   const selectedPlatformIdsForOs = plans
     .filter((p) => p.osAction !== 'skip')
     .map((p) => p.platform.id);
-  const mirrorOpenCodePlatformIds = selectedPlatformIdsForOs.filter((id) =>
-    ['zcode', 'mimocode'].includes(id),
-  );
+  const mirrorPlatformIds = resolveOpenSpecMirrorPlatformIds(selectedPlatformIdsForOs);
 
   const selectedNpmDeps = await selectNpmDeps(
     projectPath,
     spPlatformIds,
     options,
     lang,
-    includesWorkflow(workflowSelection, 'classic') ? 'classic' : 'native',
+    workflowSelection,
   );
   const shouldInstallOpenSpecCli = selectedNpmDeps.has('openspec');
   const shouldInstallSuperpowers = selectedNpmDeps.has('superpowers');
@@ -772,18 +773,16 @@ export async function initCommand(
       }`,
     );
     try {
-      osGlobalStatus = await installOpenSpec(
-        projectPath,
-        osToolIds,
-        scope,
-        shouldInstallOpenSpecCli,
-        mirrorOpenCodePlatformIds,
-        scope === 'project' ? workflowDecision?.classicArtifactLayout : 'legacy',
-        assertClassicProjectMutationAllowed,
-        (error) => {
+      osGlobalStatus = await installOpenSpec(projectPath, osToolIds, scope, {
+        shouldInstallCli: shouldInstallOpenSpecCli,
+        mirrorPlatformIds,
+        artifactLayout: scope === 'project' ? workflowDecision?.classicArtifactLayout : 'legacy',
+        projectMutationGuard: assertClassicProjectMutationAllowed,
+        failureObserver: (error: Error) => {
           osFailureReason = error.message;
         },
-      );
+        selectedPlatformIds: selectedPlatformIdsForOs,
+      });
       if (osGlobalStatus === 'installed' && requiresClassicArtifactRoot) {
         await assertClassicProjectMutationAllowed?.();
         await assertClassicOpenSpecRootHealthy(
@@ -940,6 +939,9 @@ export async function initCommand(
         if (status === 'installed') {
           if (scope === 'project') projectRouterInstalled = true;
           log(`  Comet hooks -> ${platform.name}: ${t(lang, 'hooksInstalled')}`);
+          if (reason) {
+            log(`  Comet hooks -> ${platform.name}: ${reason}`);
+          }
           if (cleanupFailed > 0) {
             cmStatus = 'failed';
             platformFailures.push({
@@ -1033,7 +1035,24 @@ export async function initCommand(
       options.codegraph === 'init'
         ? await initializeCodegraphProject(projectPath, true, options.json === true)
         : await installCodegraph(projectPath, scope, true, options.json === true);
-    log(`  CodeGraph: ${cgGlobalStatus}`);
+    if (!options.json) {
+      log(
+        `  CodeGraph CLI: ${
+          cgGlobalStatus === 'failed' ? 'failed' : 'installed or already available'
+        }`,
+      );
+      log(
+        `  CodeGraph MCP: ${
+          options.codegraph === 'init'
+            ? lang === 'zh'
+              ? '未修改（仅初始化项目索引）'
+              : 'unchanged (project index only)'
+            : lang === 'zh'
+              ? `已执行自动检测 Agent，范围：${scope}`
+              : `auto-detected Agents, scope: ${scope}`
+        }`,
+      );
+    }
     for (const r of results) {
       r.codegraph = cgGlobalStatus;
       if (cgGlobalStatus === 'failed') {
@@ -1056,26 +1075,36 @@ export async function initCommand(
       ? {
           requested: 'skip' as const,
           status: 'skipped' as const,
+          cliStatus: 'skipped' as const,
+          indexStatus: 'skipped' as const,
+          mcpStatus: 'not_detected' as const,
+          agents: [],
+          effectiveForAgent: {},
           repairable: false,
           remediation: null,
           detail: 'CodeGraph setup explicitly skipped',
         }
-      : scope === 'project'
-        ? {
-            requested: options.codegraph ?? ('auto' as const),
-            ...inspectCodegraphIndex(projectPath),
-          }
-        : {
-            requested: options.codegraph ?? ('auto' as const),
-            status: resolveCodegraphCommand() ? ('cli_ready' as const) : ('cli_missing' as const),
-            repairable: false,
-            remediation: resolveCodegraphCommand()
-              ? null
-              : 'npm install -g @colbymchenry/codegraph',
-            detail: resolveCodegraphCommand()
-              ? 'CodeGraph CLI is installed; project indexes are not part of global scope'
-              : 'CodeGraph CLI is not installed',
-          };
+      : {
+          requested: options.codegraph ?? ('auto' as const),
+          ...inspectCodegraphIntegration(projectPath, scope),
+        };
+
+  if (!options.json && options.codegraph !== 'skip') {
+    const agentSummary =
+      codegraph.agents.length === 0
+        ? lang === 'zh'
+          ? '未检测到受支持的 Agent 配置'
+          : 'no supported Agent configuration detected'
+        : codegraph.agents
+            .map(
+              (agent) =>
+                `${agent.name}: ${agent.registered ? 'registered' : 'not registered'} (${agent.scope})`,
+            )
+            .join('; ');
+    log(`  CodeGraph CLI: ${codegraph.cliStatus}`);
+    log(`  CodeGraph project index: ${codegraph.indexStatus}`);
+    log(`  CodeGraph MCP: ${codegraph.mcpStatus} — ${agentSummary}`);
+  }
 
   let projectConfigCreated = false;
   let projectConfigUpdated = false;
@@ -1121,8 +1150,7 @@ export async function initCommand(
       await syncCometProjectInstructions(
         projectPath,
         language.id,
-        includesWorkflow(workflowSelection, 'native') &&
-          (initialProjectConfigDocument?.ambient_resume ?? true),
+        initialProjectConfigDocument?.ambient_resume ?? true,
       );
 
       const successfulCometPlatforms = new Set(
@@ -1230,6 +1258,7 @@ export async function initCommand(
             classicLayoutInitializationPermit,
           );
         }
+        await ensureCometProjectGitignore(projectPath);
         await writeWorkflowProjectConfig(projectPath, config, {
           expectedIdentity: initialProjectConfigSnapshot?.identity,
         });
@@ -1252,7 +1281,13 @@ export async function initCommand(
         default_workflow: workflow,
         workflows: [...selectedWorkflows],
         ambient_resume: existingGlobalConfig?.ambient_resume ?? true,
-        ...(includesWorkflow(workflowSelection, 'native') ? { native: defaults.native } : {}),
+        ...(includesWorkflow(workflowSelection, 'native')
+          ? {
+              native: existingGlobalConfig?.native
+                ? { ...existingGlobalConfig.native }
+                : defaults.native,
+            }
+          : {}),
         ...(includesWorkflow(workflowSelection, 'classic')
           ? {
               classic: {

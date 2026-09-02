@@ -14,7 +14,10 @@ import {
   NATIVE_STATUS_PAGE_LIMITS,
 } from '../../../domains/comet-native/native-diagnostics.js';
 import { nativeContinuation } from '../../../domains/comet-native/native-continuation.js';
-import { nativeProjectPaths } from '../../../domains/comet-native/native-paths.js';
+import {
+  nativeChangeRuntimeDir,
+  nativeProjectPaths,
+} from '../../../domains/comet-native/native-paths.js';
 import { selectNativeChange } from '../../../domains/comet-native/native-selection.js';
 import type {
   NativeChangeState,
@@ -104,6 +107,23 @@ describe('Native status diagnostics', () => {
     });
   });
 
+  it('keeps a failed workspace finish blocked after Archive has moved the change', () => {
+    const continuation = nativeContinuation({
+      state: {
+        name: 'finish-blocked',
+        phase: 'archive',
+        revision: 4,
+      } as NativeChangeState,
+      archiveReady: false,
+    });
+
+    expect(continuation).toMatchObject({
+      disposition: 'blocked',
+      action: 'none',
+      command: null,
+    });
+  });
+
   it('blocks status when a workspace binding cannot be parsed safely', async () => {
     const state = await createNativeChange({
       paths,
@@ -112,7 +132,7 @@ describe('Native status diagnostics', () => {
       workspaceBinding: { isolation: 'current', changeBranch: null, targetBranch: null },
     });
     await fs.writeFile(
-      path.join(nativeChangeDir(paths, state.name), 'runtime', 'workspace.json'),
+      path.join(nativeChangeRuntimeDir(paths, state.name), 'workspace.json'),
       '{"schema":"comet.native.workspace.v3","isolation":"invalid"}\n',
     );
 
@@ -179,6 +199,14 @@ describe('Native status diagnostics', () => {
       disposition: 'continue',
       action: 'archive',
       command: `comet native archive ready-change --expect-preflight ${preflightHash}`,
+      commandArgs: [
+        'comet',
+        'native',
+        'archive',
+        'ready-change',
+        '--expect-preflight',
+        preflightHash,
+      ],
       requiresUserDecision: false,
       requiredInputs: [],
     });
@@ -193,9 +221,83 @@ describe('Native status diagnostics', () => {
       disposition: 'await-user',
       action: 'archive',
       command: null,
+      commandArgs: [
+        'comet',
+        'native',
+        'archive',
+        'ready-change',
+        '--expect-preflight',
+        preflightHash,
+        '--confirmed',
+      ],
       requiresUserDecision: true,
       requiredInputs: ['archive-confirmation'],
+      inputOptions: [
+        expect.objectContaining({
+          input: 'archive-confirmation',
+          flags: ['--confirmed'],
+          choices: ['confirm', 'keep-active'],
+        }),
+      ],
     });
+  });
+
+  it('returns complete phase argv templates and alternative Build evidence', () => {
+    const build = nativeContinuation({
+      state: {
+        name: 'build-change',
+        phase: 'build',
+        revision: 3,
+        approval: 'confirmed',
+        verification_result: 'pending',
+      } as NativeChangeState,
+    });
+    expect(build).toMatchObject({
+      commandArgs: [
+        'comet',
+        'native',
+        'next',
+        'build-change',
+        '--summary',
+        '<summary>',
+        '--artifact',
+        '<project-relative-path>',
+      ],
+      requiredInputs: ['summary', 'artifact-or-no-code-reason'],
+      inputOptions: expect.arrayContaining([
+        expect.objectContaining({
+          input: 'artifact-or-no-code-reason',
+          flags: ['--artifact'],
+          repeatable: true,
+          alternativeGroup: 'build-evidence',
+        }),
+        expect.objectContaining({
+          input: 'artifact-or-no-code-reason',
+          flags: ['--no-code-reason'],
+          alternativeGroup: 'build-evidence',
+        }),
+      ]),
+    });
+
+    const verify = nativeContinuation({
+      state: {
+        name: 'verify-change',
+        phase: 'verify',
+        revision: 4,
+      } as NativeChangeState,
+    });
+    expect(verify.commandArgs).toEqual([
+      'comet',
+      'native',
+      'next',
+      'verify-change',
+      '--summary',
+      '<summary>',
+      '--result',
+      '<pass|fail>',
+      '--report',
+      '<change-relative-path>',
+    ]);
   });
 
   afterEach(async () => {
@@ -282,6 +384,7 @@ describe('Native status diagnostics', () => {
     });
     expect(first.items).toHaveLength(NATIVE_STATUS_PAGE_LIMITS.maxItems);
     expect(first.nextCursor).not.toBeNull();
+    expect(first.nextPageArgs).toEqual(['comet', 'native', 'status', '--cursor', first.nextCursor]);
     expect(Buffer.byteLength(JSON.stringify(first), 'utf8')).toBeLessThanOrEqual(
       NATIVE_STATUS_PAGE_LIMITS.maxSerializedBytes,
     );
@@ -421,11 +524,29 @@ describe('Native status diagnostics', () => {
       name: 'missing-run',
       evidence: { summary: 'shape is ready' },
     });
-    await fs.rm(path.join(nativeChangeDir(paths, 'missing-run'), 'runtime', 'run-state.json'));
+    await fs.rm(path.join(nativeChangeRuntimeDir(paths, 'missing-run'), 'run-state.json'));
 
     expect(await inspectNativeStatus(paths, 'missing-run')).toMatchObject({
       phase: 'build',
       error: 'Native change references a missing Run state',
+    });
+  });
+
+  it('keeps a change discoverable when its whole local Runtime is missing', async () => {
+    await validChange('missing-runtime');
+    await advanceNativeChange({
+      paths,
+      name: 'missing-runtime',
+      evidence: { summary: 'shape is ready' },
+    });
+    await fs.rm(nativeChangeRuntimeDir(paths, 'missing-runtime'), { recursive: true });
+
+    expect(await inspectNativeStatus(paths, 'missing-runtime', { details: true })).toMatchObject({
+      name: 'missing-runtime',
+      phase: 'build',
+      runtime: { status: 'missing', layout: 'missing' },
+      nextCommand: 'comet native next missing-runtime --summary "<summary>"',
+      findingSummary: { codes: ['runtime-missing'], warnings: 1, errors: 0 },
     });
   });
 });

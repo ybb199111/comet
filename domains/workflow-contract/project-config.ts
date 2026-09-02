@@ -6,6 +6,11 @@ import type {
   ParsedWorkflowProjectConfigDocument,
   ProjectConfigLanguage,
   WorkflowClassicProjectConfig,
+  WorkflowHookProjectConfig,
+  WorkflowKnowledgeProjectConfig,
+  WorkflowKnowledgeLocalConfig,
+  WorkflowKnowledgeRemoteConfig,
+  WorkflowMemoryProjectConfig,
   WorkflowNativeEnabledProjectConfig,
   WorkflowNativePendingRootMove,
   WorkflowNativeProjectConfig,
@@ -18,7 +23,18 @@ export type ProjectConfigCommentLanguage = 'en' | 'zh-CN';
 export const WORKFLOW_PROJECT_CONFIG_MAX_BYTES = 64 * 1024;
 export const MAX_WORKFLOW_SNAPSHOT_PATTERN_LENGTH = 1024;
 export const MAX_WORKFLOW_SNAPSHOT_PATTERN_WILDCARDS = 64;
+export const MAX_WORKFLOW_KNOWLEDGE_INCLUDE_PATTERN_LENGTH = 1024;
+export const MAX_WORKFLOW_KNOWLEDGE_INCLUDE_PATTERN_WILDCARDS = 64;
 export const DEFAULT_WORKFLOW_NATIVE_MAX_VERIFY_FAILURES = 5;
+export const DEFAULT_WORKFLOW_MEMORY_PROJECT_CONFIG: WorkflowMemoryProjectConfig = {
+  learning: true,
+  retrieval: true,
+};
+export const DEFAULT_WORKFLOW_KNOWLEDGE_PROJECT_CONFIG: WorkflowKnowledgeProjectConfig = {
+  provider: 'local',
+};
+export const DEFAULT_WORKFLOW_NATIVE_PULL_REQUEST_FINISH_TIMEOUT_MS = 120_000;
+export const MAX_WORKFLOW_NATIVE_PULL_REQUEST_FINISH_TIMEOUT_MS = 600_000;
 
 // `comet init` installs the built-in Skills into every supported platform's
 // project-local Skill directory. A Native baseline describes the project being
@@ -33,14 +49,17 @@ const DEFAULT_WORKFLOW_NATIVE_MANAGED_SKILL_EXCLUDES = [
   '.claude/skills/**',
   '.cline/skills/**',
   '.codebuddy/skills/**',
+  '.workbuddy/skills/**',
   '.continue/skills/**',
   '.cospec/skills/**',
   '.crush/skills/**',
   '.cursor/skills/**',
+  '.dsh/skills/**',
   '.factory/skills/**',
   '.forge/skills/**',
   '.gemini/skills/**',
   '.github/skills/**',
+  '.grok/skills/**',
   '.iflow/skills/**',
   '.junie/skills/**',
   '.kilocode/skills/**',
@@ -49,6 +68,7 @@ const DEFAULT_WORKFLOW_NATIVE_MANAGED_SKILL_EXCLUDES = [
   '.lingma/skills/**',
   '.mimocode/skills/**',
   '.opencode/skills/**',
+  '.omp/skills/**',
   '.pi/skills/**',
   '.qoder/skills/**',
   '.qwen/skills/**',
@@ -59,9 +79,74 @@ const DEFAULT_WORKFLOW_NATIVE_MANAGED_SKILL_EXCLUDES = [
   '.zcode/skills/**',
 ] as const;
 
+// Native snapshots describe source and project intent, not dependency trees,
+// IDE metadata, caches, test output, or compiler output. The generated-path
+// defaults below apply at every directory depth so monorepos do not pull
+// generated folders into a baseline just because they are nested below the
+// project root.
+const DEFAULT_WORKFLOW_NATIVE_GENERATED_EXCLUDES = [
+  '**/.idea/**',
+  '**/.vscode/**',
+  '.codex/skills/**',
+  '**/node_modules/**',
+  '**/.next/**',
+  '**/.nuxt/**',
+  '**/.output/**',
+  '**/.svelte-kit/**',
+  '**/.vite/**',
+  '**/.parcel-cache/**',
+  '**/.turbo/**',
+  '**/.nx/cache/**',
+  '**/dist/**',
+  '**/build/**',
+  '**/out/**',
+  '**/coverage/**',
+  '**/.nyc_output/**',
+  '**/target/**',
+  '**/.gradle/**',
+  '**/.cxx/**',
+  '**/.externalNativeBuild/**',
+  '**/captures/**',
+  '**/__pycache__/**',
+  '**/.pytest_cache/**',
+  '**/.mypy_cache/**',
+  '**/.ruff_cache/**',
+  '**/.tox/**',
+  '**/.nox/**',
+  '**/.venv/**',
+  '**/venv/**',
+  '**/obj/**',
+  '**/CMakeFiles/**',
+  '**/cmake-build-*/**',
+  '**/.cache/**',
+  '**/tmp/**',
+  '**/temp/**',
+  '**/logs/**',
+  '**/*.tsbuildinfo',
+  '**/*.log',
+  '**/.DS_Store',
+  '**/Thumbs.db',
+] as const;
+
+export const DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_EXCLUDES = [
+  ...DEFAULT_WORKFLOW_NATIVE_MANAGED_SKILL_EXCLUDES,
+  ...DEFAULT_WORKFLOW_NATIVE_GENERATED_EXCLUDES,
+].sort((left, right) => left.localeCompare(right, 'en'));
+
+export function mergeWorkflowNativeSnapshotExcludes(exclude: readonly string[]): string[] {
+  const merged = [...exclude];
+  const seen = new Set(exclude);
+  for (const pattern of DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_EXCLUDES) {
+    if (seen.has(pattern)) continue;
+    seen.add(pattern);
+    merged.push(pattern);
+  }
+  return merged;
+}
+
 export const DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG: WorkflowNativeSnapshotConfig = {
   include: ['**/*'],
-  exclude: [...DEFAULT_WORKFLOW_NATIVE_MANAGED_SKILL_EXCLUDES],
+  exclude: [...DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_EXCLUDES],
   max_files: 10_000,
   max_total_bytes: 256 * 1024 * 1024,
   max_duration_ms: 60_000,
@@ -72,12 +157,27 @@ type ProjectConfigCommentKey =
   | 'default_workflow'
   | 'workflows'
   | 'ambient_resume'
+  | 'memory'
+  | 'memory.learning'
+  | 'memory.retrieval'
+  | 'knowledge'
+  | 'knowledge.provider'
+  | 'knowledge.local'
+  | 'knowledge.local.include'
+  | 'knowledge.remote'
+  | 'knowledge.remote.endpoint'
+  | 'knowledge.remote.token_env'
+  | 'knowledge.remote.scope'
+  | 'knowledge.remote.timeout_ms'
+  | 'hook'
+  | 'hook.allow_paths'
   | 'native'
   | 'native.artifact_root'
   | 'native.language'
   | 'native.clarification_mode'
   | 'native.archive_confirmation'
   | 'native.max_verify_failures'
+  | 'native.finish'
   | 'native.snapshot'
   | 'native.snapshot.include'
   | 'native.snapshot.exclude'
@@ -98,17 +198,37 @@ const COMMENTS: Record<ProjectConfigCommentLanguage, Record<ProjectConfigComment
     workflows: '# Workflows enabled in this project: native, classic, or both.',
     ambient_resume:
       '# Enables automatic recovery through the read-only Ambient Resume probe for both Native and Classic. Set false to disable it.\n# ambient_resume: true | false',
+    memory: '# Project policy for automatic personal-memory learning and retrieval.',
+    'memory.learning':
+      '# Allows workflow events in this project to form new personal memories automatically.\n# learning: true | false',
+    'memory.retrieval':
+      '# Allows personal memories to be injected into Agent context for this project.\n# retrieval: true | false',
+    knowledge: '# Project knowledge retrieval provider used by ordinary Comet tasks.',
+    'knowledge.provider': '# Provider for project knowledge.\n# provider: local | remote',
+    'knowledge.local': '# Additional project-relative Markdown globs used by the local provider.',
+    'knowledge.local.include':
+      '# One project-relative Markdown glob per list item; appended to the built-in corpus.',
+    'knowledge.remote': '# Fixed Comet Retrieval API v1 settings used when provider is remote.',
+    'knowledge.remote.endpoint': '# HTTPS endpoint; loopback HTTP is allowed.',
+    'knowledge.remote.token_env': '# Optional environment variable containing the bearer token.',
+    'knowledge.remote.scope': '# Optional opaque remote knowledge scope.',
+    'knowledge.remote.timeout_ms': '# Remote request timeout in milliseconds (100-30000).',
+    hook: '# Hook write policy shared by Native and Classic. Paths are project-relative.',
+    'hook.allow_paths':
+      '# Project-relative directories allowed during guarded phases. Use one path per list item; empty by default.',
     native: '# Native workflow settings. They do not change Classic state or behavior.',
     'native.artifact_root':
-      '# Root directory where Native stores Comet specs, changes, and runtime data.',
+      '# Root directory where Native stores Comet specs and changes. Runtime data stays under .comet.',
     'native.language':
       '# Artifact language used by Native workflow documents.\n# language: en | zh-CN',
     'native.clarification_mode':
-      '# Controls whether Native asks one clarification at a time or every currently answerable question in a round.\n# clarification_mode: sequential | batch',
+      '# Controls how Native asks clarifying questions: batch asks every currently answerable question per round (default), sequential asks one at a time.\n# clarification_mode: batch | sequential',
     'native.archive_confirmation':
       '# Controls whether Native archives automatically after a successful preview or waits for explicit user confirmation.\n# archive_confirmation: automatic | required',
     'native.max_verify_failures':
-      '# Maximum failed Verify outcomes allowed for one confirmed contract before Native stops the completion loop.',
+      '# Maximum failed Verify outcomes allowed for one confirmed acceptance target before Native stops the completion loop.',
+    'native.finish':
+      '# Optional repository-owned finish providers. Native keeps commit, push, generic remote verification, and recovery ownership.',
     'native.snapshot':
       '# Controls the auditable project scope and bounded work used by Native content snapshots.',
     'native.snapshot.include':
@@ -139,15 +259,33 @@ const COMMENTS: Record<ProjectConfigCommentLanguage, Record<ProjectConfigComment
     workflows: '# 此项目启用的工作流，可填写 native、classic 或同时启用两者。',
     ambient_resume:
       '# 是否启用只读的环境感知恢复探针，同时作用于 Native 和 Classic；设为 false 可关闭自动工作流恢复。\n# ambient_resume: true | false',
+    memory: '# 当前项目的个人记忆自动学习与注入策略。',
+    'memory.learning':
+      '# 是否允许当前项目通过工作流事件自动沉淀新的个人记忆。\n# 可选值：true | false',
+    'memory.retrieval':
+      '# 是否允许当前项目把个人记忆自动注入 Agent 上下文。\n# 可选值：true | false',
+    knowledge: '# 普通 Comet 任务使用的项目知识检索 Provider。',
+    'knowledge.provider': '# 项目知识 Provider。\n# 可选值：local | remote',
+    'knowledge.local': '# Local Provider 额外加载的项目相对 Markdown 路径。',
+    'knowledge.local.include': '# 每项填写一个项目相对 Markdown glob；会追加到内置语料。',
+    'knowledge.remote': '# provider 为 remote 时使用的固定 Comet Retrieval API v1 配置。',
+    'knowledge.remote.endpoint': '# HTTPS 地址；loopback 地址允许使用 HTTP。',
+    'knowledge.remote.token_env': '# 可选的 Bearer Token 环境变量名。',
+    'knowledge.remote.scope': '# 可选的不透明远端知识库范围。',
+    'knowledge.remote.timeout_ms': '# 远端请求超时时间（毫秒，100-30000）。',
+    hook: '# Native 和 Classic 共享的 Hook 写入策略；路径必须是项目相对路径。',
+    'hook.allow_paths': '# 在受保护阶段允许写入的项目相对目录；每项填写一个目录，默认为空。',
     native: '# Native 工作流配置，不会改变 Classic 的状态或行为。',
-    'native.artifact_root': '# Native 产物的存放根目录，包括规格、change 和运行时数据。',
+    'native.artifact_root': '# Native 规格和 change 的存放根目录；运行时数据始终位于 .comet。',
     'native.language': '# Native 工作流文档使用的产物语言。\n# 可选值：en | zh-CN',
     'native.clarification_mode':
-      '# Native 每轮询问一个问题，或一次提出当前所有可回答的问题。\n# 可选值：sequential | batch',
+      '# Native 提问澄清问题的方式：batch 每轮一次提出当前所有可回答的问题（默认），sequential 每轮只问一个。\n# 可选值：batch | sequential',
     'native.archive_confirmation':
-      '# Native 归档预演成功后自动归档，或等待用户明确确认。\n# 可选值：automatic | required',
+      '# Native 归档检查成功后自动归档，或等待用户明确确认。\n# 可选值：automatic | required',
     'native.max_verify_failures':
-      '# 同一份已确认 contract 最多允许的 Verify 失败次数；达到上限后停止完成循环。',
+      '# 同一个已确认验收目标最多允许的 Verify 失败次数；达到上限后停止完成循环。',
+    'native.finish':
+      '# 可选的仓库自有收尾 provider；提交、推送、通用远端核验和恢复仍由 Native 负责。',
     'native.snapshot': '# Native 内容快照使用的可审计项目范围与有界工作预算。',
     'native.snapshot.include': '# Native 快照纳入的项目相对路径；模式使用 /，支持 *、** 和 ?。',
     'native.snapshot.exclude': '# 从纳入范围中排除路径；新 change 会把排除策略绑定到 baseline。',
@@ -177,8 +315,9 @@ export function projectConfigComment(
 
 function commentKey(
   line: string,
-  block: 'native' | 'classic' | null,
+  block: 'native' | 'classic' | 'hook' | 'memory' | 'knowledge' | null,
   nativeNested: 'snapshot' | null,
+  knowledgeNested: 'local' | 'remote' | null,
 ): ProjectConfigCommentKey | null {
   const match = /^(\s*)([a-z_]+):/u.exec(line);
   if (!match) return null;
@@ -188,6 +327,18 @@ function commentKey(
   if (indent === 2 && block) {
     const blockKey = `${block}.${key}` as ProjectConfigCommentKey;
     if (blockKey in COMMENTS.en) return blockKey;
+  }
+  if (indent === 4 && block === 'knowledge' && knowledgeNested === 'remote') {
+    const nestedKey = `knowledge.remote.${key}` as ProjectConfigCommentKey;
+    if (nestedKey in COMMENTS.en) return nestedKey;
+  }
+  if (indent === 4 && block === 'knowledge' && knowledgeNested === 'local') {
+    const nestedKey = `knowledge.local.${key}` as ProjectConfigCommentKey;
+    if (nestedKey in COMMENTS.en) return nestedKey;
+  }
+  if (indent === 2 && block === null && key === 'hook') return 'hook';
+  if (indent === 2 && block === 'hook' && key === 'allow_paths') {
+    return 'hook.allow_paths';
   }
   if (indent === 4 && block === 'native' && nativeNested === 'snapshot') {
     const nestedKey = `native.snapshot.${key}` as ProjectConfigCommentKey;
@@ -201,10 +352,11 @@ export function renderStructuredProjectConfig(
   language: ProjectConfigCommentLanguage,
 ): string {
   const output: string[] = [];
-  let block: 'native' | 'classic' | null = null;
+  let block: 'native' | 'classic' | 'hook' | 'memory' | 'knowledge' | null = null;
   let nativeNested: 'snapshot' | null = null;
+  let knowledgeNested: 'local' | 'remote' | null = null;
   for (const line of stringify(value).trimEnd().split('\n')) {
-    const key = commentKey(line, block, nativeNested);
+    const key = commentKey(line, block, nativeNested, knowledgeNested);
     if (key) {
       const indent = line.match(/^\s*/u)?.[0] ?? '';
       for (const comment of projectConfigComment(key, language).split('\n')) {
@@ -215,10 +367,21 @@ export function renderStructuredProjectConfig(
     if (/^[a-z_]+:/u.test(line)) {
       if (line.startsWith('native:')) block = 'native';
       else if (line.startsWith('classic:')) block = 'classic';
+      else if (line.startsWith('hook:')) block = 'hook';
+      else if (line.startsWith('memory:')) block = 'memory';
+      else if (line.startsWith('knowledge:')) block = 'knowledge';
       else block = null;
       nativeNested = null;
-    } else if (/^ {2}[a-z_]+:/u.test(line) && block === 'native') {
-      nativeNested = line.startsWith('  snapshot:') ? 'snapshot' : null;
+      knowledgeNested = null;
+    } else if (/^ {2}[a-z_]+:/u.test(line)) {
+      if (block === 'native') nativeNested = line.startsWith('  snapshot:') ? 'snapshot' : null;
+      if (block === 'knowledge') {
+        knowledgeNested = line.startsWith('  local:')
+          ? 'local'
+          : line.startsWith('  remote:')
+            ? 'remote'
+            : null;
+      }
     }
   }
   output.push('');
@@ -453,6 +616,60 @@ function normalizeWorkflowPendingRootMove(
   };
 }
 
+function normalizeWorkflowNativeFinish(
+  value: unknown,
+): WorkflowNativeProjectConfig['finish'] | undefined {
+  if (value === undefined) return undefined;
+  const finish = projectConfigRecord(value, 'native.finish');
+  if (finish.pull_request === undefined) return {};
+  const pullRequest = projectConfigRecord(finish.pull_request, 'native.finish.pull_request');
+  if (pullRequest.provider !== 'repository-command') {
+    throw new Error('native.finish.pull_request.provider must be repository-command');
+  }
+  if (!Array.isArray(pullRequest.command) || pullRequest.command.length === 0) {
+    throw new Error('native.finish.pull_request.command must be a non-empty array');
+  }
+  if (pullRequest.command.length > 64) {
+    throw new Error('native.finish.pull_request.command must contain at most 64 arguments');
+  }
+  const command = pullRequest.command.map((argument, index) => {
+    if (
+      typeof argument !== 'string' ||
+      argument.trim().length === 0 ||
+      argument.length > 4096 ||
+      /[\0\r\n]/u.test(argument)
+    ) {
+      throw new Error(
+        `native.finish.pull_request.command[${index}] must be a non-empty single-line string of at most 4096 characters`,
+      );
+    }
+    return argument;
+  });
+  if (path.posix.isAbsolute(command[0]) || path.win32.isAbsolute(command[0])) {
+    throw new Error(
+      'native.finish.pull_request.command[0] must be a bare executable name or a project-relative path',
+    );
+  }
+  const timeoutMs =
+    pullRequest.timeout_ms ?? DEFAULT_WORKFLOW_NATIVE_PULL_REQUEST_FINISH_TIMEOUT_MS;
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    (timeoutMs as number) < 1 ||
+    (timeoutMs as number) > MAX_WORKFLOW_NATIVE_PULL_REQUEST_FINISH_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `native.finish.pull_request.timeout_ms must be an integer between 1 and ${MAX_WORKFLOW_NATIVE_PULL_REQUEST_FINISH_TIMEOUT_MS}`,
+    );
+  }
+  return {
+    pull_request: {
+      provider: 'repository-command',
+      command,
+      timeout_ms: timeoutMs as number,
+    },
+  };
+}
+
 function normalizeWorkflowNativeProjectConfig(
   value: unknown,
   options: { allowMissingArtifactRoot?: boolean } = {},
@@ -463,7 +680,7 @@ function normalizeWorkflowNativeProjectConfig(
   if (typeof artifactRoot !== 'string') {
     throw new Error('native.artifact_root must be a string');
   }
-  const clarificationMode = native.clarification_mode ?? 'sequential';
+  const clarificationMode = native.clarification_mode ?? 'batch';
   if (clarificationMode !== 'sequential' && clarificationMode !== 'batch') {
     throw new Error('native.clarification_mode must be sequential or batch');
   }
@@ -477,6 +694,7 @@ function normalizeWorkflowNativeProjectConfig(
     throw new Error('native.max_verify_failures must be a positive integer');
   }
   const pending = normalizeWorkflowPendingRootMove(native.pending_root_move);
+  const finish = normalizeWorkflowNativeFinish(native.finish);
   return {
     artifact_root: normalizeWorkflowArtifactRoot(artifactRoot),
     language: projectConfigLanguage(native.language, 'en', 'native.language'),
@@ -484,6 +702,7 @@ function normalizeWorkflowNativeProjectConfig(
     archive_confirmation: archiveConfirmation,
     max_verify_failures: maxVerifyFailures as number,
     snapshot: normalizeWorkflowSnapshot(native.snapshot),
+    ...(finish ? { finish } : {}),
     ...(pending ? { pending_root_move: pending } : {}),
   };
 }
@@ -511,6 +730,165 @@ function normalizeWorkflowClassicProjectConfig(value: unknown): WorkflowClassicP
   };
 }
 
+function normalizeWorkflowHookProjectConfig(value: unknown): WorkflowHookProjectConfig {
+  const hook = projectConfigRecord(value, 'hook');
+  const allowPaths = hook.allow_paths ?? [];
+  if (!Array.isArray(allowPaths)) {
+    throw new Error('hook.allow_paths must be an array');
+  }
+  return {
+    allow_paths: [
+      ...new Set(
+        allowPaths.map((allowPath, index) =>
+          normalizeWorkflowRelativePath(allowPath, `hook.allow_paths[${index}]`),
+        ),
+      ),
+    ],
+  };
+}
+
+function normalizeWorkflowMemoryProjectConfig(value: unknown): WorkflowMemoryProjectConfig {
+  if (value === undefined) {
+    return { ...DEFAULT_WORKFLOW_MEMORY_PROJECT_CONFIG };
+  }
+  const memory = projectConfigRecord(value, 'memory');
+  const learning = memory.learning ?? DEFAULT_WORKFLOW_MEMORY_PROJECT_CONFIG.learning;
+  const retrieval = memory.retrieval ?? DEFAULT_WORKFLOW_MEMORY_PROJECT_CONFIG.retrieval;
+  if (typeof learning !== 'boolean') {
+    throw new Error('memory.learning must be true or false');
+  }
+  if (typeof retrieval !== 'boolean') {
+    throw new Error('memory.retrieval must be true or false');
+  }
+  return { learning, retrieval };
+}
+
+function projectKnowledgeRecord(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} must be a mapping`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeKnowledgeIncludePattern(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new Error(`${label} must be a string`);
+  const pattern = value.trim();
+  if (
+    pattern.length === 0 ||
+    pattern.includes('\\') ||
+    pattern.includes('\0') ||
+    path.posix.isAbsolute(pattern) ||
+    path.win32.isAbsolute(pattern) ||
+    pattern.startsWith('~') ||
+    pattern.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    throw new Error(`${label} must be a safe project-relative glob`);
+  }
+  if (!pattern.toLowerCase().endsWith('.md')) {
+    throw new Error(`${label} must target a Markdown file ending in .md`);
+  }
+  if (pattern.length > MAX_WORKFLOW_KNOWLEDGE_INCLUDE_PATTERN_LENGTH) {
+    throw new Error(`${label} exceeds ${MAX_WORKFLOW_KNOWLEDGE_INCLUDE_PATTERN_LENGTH} characters`);
+  }
+  let wildcardTokens = 0;
+  for (let index = 0; index < pattern.length; index += 1) {
+    if (pattern[index] === '?') {
+      wildcardTokens += 1;
+    } else if (pattern[index] === '*') {
+      wildcardTokens += 1;
+      if (pattern[index + 1] === '*') index += 1;
+    }
+  }
+  if (wildcardTokens > MAX_WORKFLOW_KNOWLEDGE_INCLUDE_PATTERN_WILDCARDS) {
+    throw new Error(
+      `${label} contains more than ${MAX_WORKFLOW_KNOWLEDGE_INCLUDE_PATTERN_WILDCARDS} wildcard tokens`,
+    );
+  }
+  return pattern;
+}
+
+function normalizeKnowledgeLocal(value: unknown): WorkflowKnowledgeLocalConfig {
+  const local = projectKnowledgeRecord(value, 'knowledge.local');
+  const include = local.include ?? [];
+  if (!Array.isArray(include)) throw new Error('knowledge.local.include must be an array');
+  return {
+    include: [
+      ...new Set(
+        include.map((pattern, index) =>
+          normalizeKnowledgeIncludePattern(pattern, `knowledge.local.include[${index}]`),
+        ),
+      ),
+    ],
+  };
+}
+
+function normalizeKnowledgeEndpoint(value: unknown): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error('knowledge.remote.endpoint must be a non-empty URL');
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('knowledge.remote.endpoint must be a valid URL');
+  }
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/gu, '');
+  const loopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
+    throw new Error('knowledge.remote.endpoint must use HTTPS (HTTP is allowed for loopback)');
+  }
+  return url.toString();
+}
+
+function normalizeKnowledgeRemote(value: unknown): WorkflowKnowledgeRemoteConfig {
+  const remote = projectKnowledgeRecord(value, 'knowledge.remote');
+  const endpoint = normalizeKnowledgeEndpoint(remote.endpoint);
+  const tokenEnv = remote.token_env;
+  if (
+    tokenEnv !== undefined &&
+    (typeof tokenEnv !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(tokenEnv))
+  ) {
+    throw new Error('knowledge.remote.token_env must be an environment variable name');
+  }
+  const scope = remote.scope;
+  if (scope !== undefined && (typeof scope !== 'string' || scope.length > 512)) {
+    throw new Error('knowledge.remote.scope must be a string of at most 512 characters');
+  }
+  const timeout = remote.timeout_ms ?? 5000;
+  if (
+    typeof timeout !== 'number' ||
+    !Number.isSafeInteger(timeout) ||
+    timeout < 100 ||
+    timeout > 30000
+  ) {
+    throw new Error('knowledge.remote.timeout_ms must be an integer between 100 and 30000');
+  }
+  return {
+    endpoint,
+    ...(tokenEnv === undefined ? {} : { token_env: tokenEnv }),
+    ...(scope === undefined ? {} : { scope }),
+    timeout_ms: timeout,
+  };
+}
+
+function normalizeWorkflowKnowledgeProjectConfig(value: unknown): WorkflowKnowledgeProjectConfig {
+  if (value === undefined) return { ...DEFAULT_WORKFLOW_KNOWLEDGE_PROJECT_CONFIG };
+  const knowledge = projectKnowledgeRecord(value, 'knowledge');
+  const provider = knowledge.provider ?? 'local';
+  if (provider !== 'local' && provider !== 'remote') {
+    throw new Error('knowledge.provider must be local or remote');
+  }
+  const local =
+    knowledge.local === undefined ? undefined : normalizeKnowledgeLocal(knowledge.local);
+  if (provider === 'local') return { provider, ...(local ? { local } : {}) };
+  const remote =
+    knowledge.remote === undefined ? undefined : normalizeKnowledgeRemote(knowledge.remote);
+  if (remote === undefined) {
+    throw new Error('knowledge.remote must be configured when knowledge.provider is remote');
+  }
+  return { provider, ...(local ? { local } : {}), remote };
+}
+
 function normalizeAmbientResume(value: unknown): boolean {
   const resolved = value ?? true;
   if (typeof resolved !== 'boolean') {
@@ -521,6 +899,9 @@ function normalizeAmbientResume(value: unknown): boolean {
 
 function normalizeWorkflowProjectConfig(
   root: Record<string, unknown>,
+  hook: WorkflowHookProjectConfig | undefined,
+  memory: WorkflowMemoryProjectConfig,
+  knowledge: WorkflowKnowledgeProjectConfig,
   native: WorkflowNativeProjectConfig | undefined,
   classic: WorkflowClassicProjectConfig | undefined,
   ambientResume: boolean,
@@ -560,6 +941,9 @@ function normalizeWorkflowProjectConfig(
     default_workflow: root.default_workflow,
     workflows,
     ambient_resume: ambientResume,
+    ...(hook ? { hook } : {}),
+    memory,
+    knowledge,
     ...(native ? { native } : {}),
     ...(classic ? { classic } : {}),
   };
@@ -587,6 +971,10 @@ export function parseWorkflowProjectConfigDocument(
   }
   const value = parsed as Record<string, unknown>;
   const ambientResume = normalizeAmbientResume(value.ambient_resume);
+  const hook =
+    value.hook === undefined ? undefined : normalizeWorkflowHookProjectConfig(value.hook);
+  const memory = normalizeWorkflowMemoryProjectConfig(value.memory);
+  const knowledge = normalizeWorkflowKnowledgeProjectConfig(value.knowledge);
   const native =
     value.native === undefined
       ? undefined
@@ -595,13 +983,25 @@ export function parseWorkflowProjectConfigDocument(
         });
   const classic =
     value.classic === undefined ? undefined : normalizeWorkflowClassicProjectConfig(value.classic);
-  const config = normalizeWorkflowProjectConfig(value, native, classic, ambientResume, {
-    allowPartialProject: options.allowPartialProject ?? false,
-  });
+  const config = normalizeWorkflowProjectConfig(
+    value,
+    hook,
+    memory,
+    knowledge,
+    native,
+    classic,
+    ambientResume,
+    {
+      allowPartialProject: options.allowPartialProject ?? false,
+    },
+  );
   return {
     value,
     config,
     ambient_resume: ambientResume,
+    memory,
+    knowledge,
+    ...(hook ? { hook } : {}),
     ...(native ? { native } : {}),
     ...(classic ? { classic } : {}),
   };
@@ -630,11 +1030,38 @@ function workflowPendingRootMoveValue(
 export function workflowProjectConfigManagedValue(
   config: WorkflowProjectConfig,
 ): Record<string, unknown> {
+  const knowledge = config.knowledge ?? { ...DEFAULT_WORKFLOW_KNOWLEDGE_PROJECT_CONFIG };
   return {
     schema: config.schema,
     default_workflow: config.default_workflow,
     workflows: config.workflows ?? [config.default_workflow],
     ambient_resume: config.ambient_resume,
+    memory: config.memory ?? { ...DEFAULT_WORKFLOW_MEMORY_PROJECT_CONFIG },
+    knowledge: {
+      provider: knowledge.provider,
+      ...(knowledge.local && knowledge.local.include.length > 0
+        ? { local: { include: [...knowledge.local.include] } }
+        : {}),
+      ...(knowledge.remote
+        ? {
+            remote: {
+              endpoint: knowledge.remote.endpoint,
+              timeout_ms: knowledge.remote.timeout_ms,
+              ...(knowledge.remote.token_env === undefined
+                ? {}
+                : { token_env: knowledge.remote.token_env }),
+              ...(knowledge.remote.scope === undefined ? {} : { scope: knowledge.remote.scope }),
+            },
+          }
+        : {}),
+    },
+    ...(config.hook
+      ? {
+          hook: {
+            allow_paths: [...config.hook.allow_paths],
+          },
+        }
+      : {}),
     ...(config.native
       ? {
           native: {
@@ -643,7 +1070,17 @@ export function workflowProjectConfigManagedValue(
             clarification_mode: config.native.clarification_mode,
             archive_confirmation: config.native.archive_confirmation,
             max_verify_failures: config.native.max_verify_failures,
-            snapshot: config.native.snapshot,
+            ...(config.native.finish?.pull_request
+              ? {
+                  finish: {
+                    pull_request: {
+                      provider: config.native.finish.pull_request.provider,
+                      command: [...config.native.finish.pull_request.command],
+                      timeout_ms: config.native.finish.pull_request.timeout_ms,
+                    },
+                  },
+                }
+              : {}),
             ...(config.native.pending_root_move
               ? {
                   pending_root_move: workflowPendingRootMoveValue(config.native.pending_root_move),
@@ -686,9 +1123,57 @@ export function mergeWorkflowProjectConfigDocument(
     workflows: validated.workflows,
     ambient_resume: validated.ambient_resume,
   };
+  if (validated.hook) {
+    output.hook = {
+      ...optionalRecord(existing.hook),
+      allow_paths: [...validated.hook.allow_paths],
+    };
+  }
+  if (validated.memory) {
+    const existingMemory = optionalRecord(existing.memory);
+    output.memory = {
+      ...existingMemory,
+      learning: validated.memory.learning,
+      retrieval: validated.memory.retrieval,
+    };
+  }
+  if (validated.knowledge) {
+    const existingKnowledge = optionalRecord(existing.knowledge);
+    const knowledge: Record<string, unknown> = {
+      ...existingKnowledge,
+      provider: validated.knowledge.provider,
+    };
+    if (validated.knowledge.local && validated.knowledge.local.include.length > 0) {
+      knowledge.local = {
+        ...optionalRecord(existingKnowledge.local),
+        include: [...validated.knowledge.local.include],
+      };
+    } else {
+      delete knowledge.local;
+    }
+    if (validated.knowledge.remote) {
+      const existingRemote = optionalRecord(existingKnowledge.remote);
+      const remote: Record<string, unknown> = {
+        ...existingRemote,
+        endpoint: validated.knowledge.remote.endpoint,
+        timeout_ms: validated.knowledge.remote.timeout_ms,
+        ...(validated.knowledge.remote.token_env === undefined
+          ? {}
+          : { token_env: validated.knowledge.remote.token_env }),
+        ...(validated.knowledge.remote.scope === undefined
+          ? {}
+          : { scope: validated.knowledge.remote.scope }),
+      };
+      if (validated.knowledge.remote.token_env === undefined) delete remote.token_env;
+      if (validated.knowledge.remote.scope === undefined) delete remote.scope;
+      knowledge.remote = remote;
+    } else {
+      delete knowledge.remote;
+    }
+    output.knowledge = knowledge;
+  }
   if (validated.native) {
     const existingNative = optionalRecord(existing.native);
-    const existingSnapshot = optionalRecord(existingNative.snapshot);
     const native: Record<string, unknown> = {
       ...existingNative,
       artifact_root: validated.native.artifact_root,
@@ -696,11 +1181,27 @@ export function mergeWorkflowProjectConfigDocument(
       clarification_mode: validated.native.clarification_mode,
       archive_confirmation: validated.native.archive_confirmation,
       max_verify_failures: validated.native.max_verify_failures,
-      snapshot: {
-        ...existingSnapshot,
-        ...validated.native.snapshot,
-      },
     };
+    if (validated.native.finish?.pull_request) {
+      const existingFinish = optionalRecord(existingNative.finish);
+      native.finish = {
+        ...existingFinish,
+        pull_request: {
+          ...optionalRecord(existingFinish.pull_request),
+          provider: validated.native.finish.pull_request.provider,
+          command: [...validated.native.finish.pull_request.command],
+          timeout_ms: validated.native.finish.pull_request.timeout_ms,
+        },
+      };
+    } else {
+      const remainingFinish = { ...optionalRecord(existingNative.finish) };
+      delete remainingFinish.pull_request;
+      if (Object.keys(remainingFinish).length > 0) native.finish = remainingFinish;
+      else delete native.finish;
+    }
+    // Snapshot settings are retained by the parser as a legacy v1-v3 runtime
+    // default, but Native v4 no longer persists them in user configuration.
+    delete native.snapshot;
     if (validated.native.pending_root_move) {
       const existingPending = optionalRecord(existingNative.pending_root_move);
       const pending = workflowPendingRootMoveValue(validated.native.pending_root_move);
@@ -737,10 +1238,12 @@ export function defaultWorkflowProjectConfig(
     schema: 'comet.project.v1',
     default_workflow: 'native',
     ambient_resume: true,
+    memory: { ...DEFAULT_WORKFLOW_MEMORY_PROJECT_CONFIG },
+    knowledge: { ...DEFAULT_WORKFLOW_KNOWLEDGE_PROJECT_CONFIG },
     native: {
       artifact_root: normalizeWorkflowArtifactRoot(artifactRoot),
       language,
-      clarification_mode: 'sequential',
+      clarification_mode: 'batch',
       archive_confirmation: 'automatic',
       max_verify_failures: DEFAULT_WORKFLOW_NATIVE_MAX_VERIFY_FAILURES,
       snapshot: {
@@ -796,6 +1299,100 @@ function normalizeClassicArtifactLayout(value, fallback = 'docs') {
     throw new Error('classic.artifact_layout must be legacy or docs');
   }
   return resolved;
+}
+
+function normalizeWorkflowMemoryProjectConfig(value) {
+  const memory = value === undefined ? {} : workflowConfigRecord(value, 'memory');
+  const learning = memory.learning ?? true;
+  const retrieval = memory.retrieval ?? true;
+  if (typeof learning !== 'boolean') {
+    throw new Error('memory.learning must be true or false');
+  }
+  if (typeof retrieval !== 'boolean') {
+    throw new Error('memory.retrieval must be true or false');
+  }
+  return { learning, retrieval };
+}
+
+function normalizeWorkflowKnowledgeIncludePattern(value, label) {
+  if (typeof value !== 'string') throw new Error(label + ' must be a string');
+  const pattern = value.trim();
+  if (
+    pattern.length === 0 ||
+    pattern.includes('\\') ||
+    pattern.includes('\0') ||
+    path.posix.isAbsolute(pattern) ||
+    path.win32.isAbsolute(pattern) ||
+    pattern.startsWith('~') ||
+    pattern.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    throw new Error(label + ' must be a safe project-relative glob');
+  }
+  if (!pattern.toLowerCase().endsWith('.md')) {
+    throw new Error(label + ' must target a Markdown file ending in .md');
+  }
+  if (pattern.length > 1024) throw new Error(label + ' exceeds 1024 characters');
+  let wildcardTokens = 0;
+  for (let index = 0; index < pattern.length; index += 1) {
+    if (pattern[index] === '?') wildcardTokens += 1;
+    else if (pattern[index] === '*') {
+      wildcardTokens += 1;
+      if (pattern[index + 1] === '*') index += 1;
+    }
+  }
+  if (wildcardTokens > 64) throw new Error(label + ' contains more than 64 wildcard tokens');
+  return pattern;
+}
+
+function normalizeWorkflowKnowledgeLocal(value) {
+  const local = workflowConfigRecord(value, 'knowledge.local');
+  const include = local.include ?? [];
+  if (!Array.isArray(include)) throw new Error('knowledge.local.include must be an array');
+  return {
+    include: [...new Set(include.map((pattern, index) => normalizeWorkflowKnowledgeIncludePattern(pattern, 'knowledge.local.include[' + index + ']')))],
+  };
+}
+
+function normalizeWorkflowKnowledgeProjectConfig(value) {
+  if (value === undefined) return { provider: 'local' };
+  const knowledge = workflowConfigRecord(value, 'knowledge');
+  const provider = knowledge.provider ?? 'local';
+  if (provider !== 'local' && provider !== 'remote') {
+    throw new Error('knowledge.provider must be local or remote');
+  }
+  const local = knowledge.local === undefined ? undefined : normalizeWorkflowKnowledgeLocal(knowledge.local);
+  if (provider === 'local') return { provider, ...(local === undefined ? {} : { local }) };
+  if (knowledge.remote === undefined) throw new Error('knowledge.remote must be configured when knowledge.provider is remote');
+  const remote = workflowConfigRecord(knowledge.remote, 'knowledge.remote');
+  if (typeof remote.endpoint !== 'string' || remote.endpoint.trim().length === 0) {
+    throw new Error('knowledge.remote.endpoint must be a non-empty URL');
+  }
+  let endpoint;
+  try { endpoint = new URL(remote.endpoint); } catch { throw new Error('knowledge.remote.endpoint must be a valid URL'); }
+  const loopback = ['localhost', '127.0.0.1', '::1'].includes(endpoint.hostname.toLowerCase().replace(/^\[|\]$/gu, ''));
+  if (endpoint.protocol !== 'https:' && !(endpoint.protocol === 'http:' && loopback)) {
+    throw new Error('knowledge.remote.endpoint must use HTTPS (HTTP is allowed for loopback)');
+  }
+  const timeout = remote.timeout_ms ?? 5000;
+  if (!Number.isSafeInteger(timeout) || timeout < 100 || timeout > 30000) {
+    throw new Error('knowledge.remote.timeout_ms must be an integer between 100 and 30000');
+  }
+  if (remote.token_env !== undefined && (typeof remote.token_env !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(remote.token_env))) {
+    throw new Error('knowledge.remote.token_env must be an environment variable name');
+  }
+  if (remote.scope !== undefined && (typeof remote.scope !== 'string' || remote.scope.length > 512)) {
+    throw new Error('knowledge.remote.scope must be a string of at most 512 characters');
+  }
+  return {
+    provider,
+    ...(local === undefined ? {} : { local }),
+    remote: {
+      endpoint: endpoint.toString(),
+      timeout_ms: timeout,
+      ...(remote.token_env === undefined ? {} : { token_env: remote.token_env }),
+      ...(remote.scope === undefined ? {} : { scope: remote.scope }),
+    },
+  };
 }
 
 function workflowPathInside(root, target) {
@@ -1659,6 +2256,8 @@ function managedWorkflowConfigFields(source) {
   if (root.ambient_resume !== undefined && typeof root.ambient_resume !== 'boolean') {
     throw new Error('ambient_resume must be true or false');
   }
+  const memory = normalizeWorkflowMemoryProjectConfig(root.memory);
+  const knowledge = normalizeWorkflowKnowledgeProjectConfig(root.knowledge);
 
   let nativeArtifactRoot = null;
   if (root.native !== undefined) {
@@ -1668,7 +2267,7 @@ function managedWorkflowConfigFields(source) {
     }
     nativeArtifactRoot = normalizeWorkflowArtifactRoot(native.artifact_root);
     workflowConfigLanguage(native.language, 'en', 'native.language');
-    const clarificationMode = native.clarification_mode ?? 'sequential';
+    const clarificationMode = native.clarification_mode ?? 'batch';
     if (clarificationMode !== 'sequential' && clarificationMode !== 'batch') {
       throw new Error('native.clarification_mode must be sequential or batch');
     }
@@ -1679,6 +2278,58 @@ function managedWorkflowConfigFields(source) {
     const maxVerifyFailures = native.max_verify_failures ?? 5;
     if (!Number.isSafeInteger(maxVerifyFailures) || maxVerifyFailures < 1) {
       throw new Error('native.max_verify_failures must be a positive integer');
+    }
+    if (native.finish !== undefined) {
+      const finish = workflowConfigRecord(native.finish, 'native.finish');
+      if (finish.pull_request !== undefined) {
+        const pullRequest = workflowConfigRecord(
+          finish.pull_request,
+          'native.finish.pull_request',
+        );
+        if (pullRequest.provider !== 'repository-command') {
+          throw new Error('native.finish.pull_request.provider must be repository-command');
+        }
+        if (!Array.isArray(pullRequest.command) || pullRequest.command.length === 0) {
+          throw new Error('native.finish.pull_request.command must be a non-empty array');
+        }
+        if (pullRequest.command.length > 64) {
+          throw new Error('native.finish.pull_request.command must contain at most 64 arguments');
+        }
+        for (let index = 0; index < pullRequest.command.length; index += 1) {
+          const argument = pullRequest.command[index];
+          if (
+            typeof argument !== 'string' ||
+            argument.trim().length === 0 ||
+            argument.length > 4096 ||
+            /[\0\r\n]/u.test(argument)
+          ) {
+            throw new Error(
+              'native.finish.pull_request.command[' +
+                index +
+                '] must be a non-empty single-line string of at most 4096 characters',
+            );
+          }
+        }
+        if (
+          path.posix.isAbsolute(pullRequest.command[0]) ||
+          path.win32.isAbsolute(pullRequest.command[0])
+        ) {
+          throw new Error(
+            'native.finish.pull_request.command[0] must be a bare executable name or a project-relative path',
+          );
+        }
+        const timeoutMs =
+          pullRequest.timeout_ms ?? ${DEFAULT_WORKFLOW_NATIVE_PULL_REQUEST_FINISH_TIMEOUT_MS};
+        if (
+          !Number.isSafeInteger(timeoutMs) ||
+          timeoutMs < 1 ||
+          timeoutMs > ${MAX_WORKFLOW_NATIVE_PULL_REQUEST_FINISH_TIMEOUT_MS}
+        ) {
+          throw new Error(
+            'native.finish.pull_request.timeout_ms must be an integer between 1 and ${MAX_WORKFLOW_NATIVE_PULL_REQUEST_FINISH_TIMEOUT_MS}',
+          );
+        }
+      }
     }
     validateWorkflowSnapshot(native.snapshot);
     validateWorkflowPendingRootMove(native.pending_root_move);
@@ -1713,7 +2364,16 @@ function managedWorkflowConfigFields(source) {
   if (classicEnabled && classicArtifactLayout === null) {
     classicArtifactLayout = 'legacy';
   }
-  return { nativeArtifactRoot, classicArtifactLayout, nativeEnabled, classicEnabled };
+  return {
+    nativeArtifactRoot,
+    classicArtifactLayout,
+    nativeEnabled,
+    classicEnabled,
+    memoryLearning: memory.learning,
+    memoryRetrieval: memory.retrieval,
+    knowledgeProvider: knowledge.provider,
+    knowledgeRemote: knowledge.remote ?? null,
+  };
 }
 
 async function readWorkflowProjectPathConfig(projectRoot) {
@@ -1733,6 +2393,10 @@ async function readWorkflowProjectPathConfig(projectRoot) {
         classicArtifactLayout: null,
         nativeEnabled: false,
         classicEnabled: false,
+        memoryLearning: true,
+        memoryRetrieval: true,
+        knowledgeProvider: 'local',
+        knowledgeRemote: null,
       };
     }
     throw error;
@@ -1743,6 +2407,10 @@ async function readWorkflowProjectPathConfig(projectRoot) {
       classicArtifactLayout: null,
       nativeEnabled: false,
       classicEnabled: false,
+      memoryLearning: true,
+      memoryRetrieval: true,
+      knowledgeProvider: 'local',
+      knowledgeRemote: null,
     };
   }
   const source = await readWorkflowProtectedFile(

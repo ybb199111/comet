@@ -9,10 +9,9 @@ vi.mock('../../../domains/integrations/openspec.js', () => ({
       projectRoot: string,
       _tools: string[],
       _scope: string,
-      _cli: boolean,
-      _mirrors: string[],
-      layout: string,
+      options: { artifactLayout?: string } = {},
     ) => {
+      const layout = options.artifactLayout ?? 'legacy';
       const root =
         layout === 'docs'
           ? path.join(projectRoot, 'docs', 'openspec')
@@ -72,6 +71,9 @@ describe('Comet project activation', () => {
     await expect(
       fs.readFile(path.join(projectRoot, '.comet', 'config.yaml'), 'utf8'),
     ).resolves.toContain('default_workflow: classic');
+    await expect(fs.readFile(path.join(projectRoot, '.gitignore'), 'utf8')).resolves.toContain(
+      '!/.comet/config.yaml',
+    );
   });
 
   it('projects a globally installed Codex Router before publishing project config', async () => {
@@ -108,6 +110,10 @@ describe('Comet project activation', () => {
     await fs.writeFile(sourceRouter, '// installed global Router\n', 'utf8');
 
     await resolveOrActivateCometEntry(projectRoot, { homeDir });
+
+    await expect(fs.readFile(path.join(projectRoot, '.gitignore'), 'utf8')).resolves.toContain(
+      '!/.comet/config.yaml',
+    );
 
     const hooks = await fs.readFile(path.join(projectRoot, '.codex', 'hooks.json'), 'utf8');
     expect(hooks.replaceAll('\\', '/')).toContain(

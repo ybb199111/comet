@@ -1,11 +1,8 @@
 import path from 'path';
-import { promises as fs } from 'fs';
+import { realpathSync } from 'fs';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 import { discoverNativeProject } from '../comet-native/native-paths.js';
-import {
-  assertClassicLayoutReadable,
-  discoverClassicProject,
-} from '../comet-classic/classic-layout.js';
 import {
   COMET_HOOK_PLATFORM_IDS,
   readCometHookRequest,
@@ -15,6 +12,7 @@ import { runWithHookReadCache } from '../../platform/process/hook-read-cache.js'
 import { inspectCometHook } from './hook-router.js';
 import type { CometHookDecision } from './hook-types.js';
 import { resolveCometHookProjectRoot } from './hook-project-root.js';
+import { readWorkflowProjectConfig } from '../workflow-contract/project-config-reader.js';
 
 const USAGE = 'Usage: comet-hook-router --platform <platform-id> [--project-root <project-root>]';
 
@@ -51,26 +49,26 @@ export async function projectRootFrom(
   request?: ReturnType<typeof readCometHookRequest>,
 ): Promise<string | null> {
   if (parsed.projectRoot) {
-    return request ? resolveCometHookProjectRoot(parsed.projectRoot, request) : parsed.projectRoot;
+    const candidate = request
+      ? await resolveCometHookProjectRoot(parsed.projectRoot, request)
+      : parsed.projectRoot;
+    return configuredProjectFrom(candidate);
   }
-  const discovered = await discoverNativeProject(process.cwd());
-  for (const marker of [['.comet', 'config.yaml'], ['.git']]) {
-    try {
-      await fs.lstat(path.join(discovered, ...marker));
-      return discovered;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-  }
-  const classic = await discoverClassicProject(process.cwd());
-  const layout = await assertClassicLayoutReadable(classic);
-  try {
-    await fs.lstat(layout.changesDir);
-    return classic;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-  return null;
+  // A Router without --project-root is a legacy/global installation. It must
+  // use the host-provided working directory when one is available; the
+  // process cwd is often the directory where the global Hook was installed,
+  // not the project that owns the current tool request. Without a trusted
+  // request cwd there is no safe project to inspect, so leave the legacy Hook
+  // neutral instead of applying another project's phase guard.
+  if (!request?.cwd) return null;
+
+  const discoveryStart = request.cwd;
+  return configuredProjectFrom(discoveryStart);
+}
+
+async function configuredProjectFrom(projectRoot: string): Promise<string | null> {
+  const discovered = await discoverNativeProject(projectRoot);
+  return (await readWorkflowProjectConfig(discovered)) === null ? null : discovered;
 }
 
 export async function runCometHookRouter(args: readonly string[]): Promise<number> {
@@ -101,4 +99,25 @@ export async function runCometHookRouter(args: readonly string[]): Promise<numbe
   return output.exitCode;
 }
 
-process.exitCode = await runCometHookRouter(process.argv.slice(2));
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
+  return runCometHookRouter(argv);
+}
+
+export function isDirectEntry(
+  entry: string | undefined,
+  moduleUrl: string = import.meta.url,
+): boolean {
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return moduleUrl === pathToFileURL(entry).href;
+  }
+}
+
+const entry = process.argv[1];
+if (isDirectEntry(entry)) {
+  void main().then((exitCode) => {
+    process.exitCode = exitCode;
+  });
+}

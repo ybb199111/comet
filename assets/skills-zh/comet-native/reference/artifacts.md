@@ -1,54 +1,31 @@
 # Native 产物参考
+只在编辑 brief、完整目标规格，或查看 Runtime 生成的验收报告时读取。
 
-只在需要编辑 brief、完整目标规格、verification 或验收证据时读取本文件。
-
-## 产物边界
-
-Agent 主要编辑：
+## 编辑边界
+每个 active change 目录只保留用户可读、可随 Git 同步的正式产物：
 
 ```text
 <artifact-root>/comet/changes/<change-name>/
+  comet-state.yaml
   brief.md
+  children.yaml
   specs/<capability>/spec.md
   verification.md
 ```
 
-项目配置、当前 change、change 状态和 `runtime/workspace.json` 用于读取，不要手工改变 Runtime 管理的 phase、确认、规格操作、workspace 绑定、scope、evidence、checkpoint、锁或事务字段。
+Agent 只编辑 brief、完整目标规格和 Supervisor Change 的 `children.yaml`。`comet-state.yaml` 与 `verification.md` 由 Runtime 管理；Runtime 第一次接受 Verifier 结果后生成报告。
 
-新建 change 的 `comet.native.workspace.v3` 记录 `isolation`、`changeBranch`、`targetBranch`、Archive 前由 `--finish` 持久化的收尾决定和物理目录身份。它用于跨会话恢复和写入保护，不是会话 lease；旧 v1/v2 元数据保持兼容，不得为了启用隔离而手工迁移。
+本机 Runtime 固定保存在被 Git 忽略的 `.comet/runtime/native/`。每个 active change 的本机状态和日志位于 `changes/<change-name>/state.json` 与 `logs/`；项目级锁和短期事务也放在这个 Runtime 目录中。这些机器文件始终交给 Runtime 创建、迁移和修复。
 
-Native artifact root 只由 `.comet/config.yaml` 指定。不要扫描其他 workflow 的目录，也不要自行创建第二个状态根。
+## 跨设备状态与报告
+`comet-state.yaml` 是跨设备恢复时唯一可信的工作流状态，记录当前阶段、状态、版本、验收循环次数、验收结果、Builder 交接摘要、阻塞原因、下一步、检查摘要和精简历史。本机进程、绝对路径和完整命令输出只保留在本机 Runtime 中。该文件由 Runtime 更新。
 
-## Scope 快照边界
+`verification.md` 是 Runtime 根据同一版本的 YAML 生成的可读验收报告。报告缺失或版本落后时，Runtime 只重建报告，不会因此重新运行检查或 Verifier。工作流进度始终以 YAML 为准，不能通过修改 Markdown 报告来推进。
 
-Git 快照包含 tracked 和未被 ignore 的 untracked 文件，submodule/gitlink 作为原子条目。非 Git 项目使用有界物理树快照。
-
-- `git-selection-changed`：等待 Git 写入稳定后重试，不能授权为 partial scope。
-- `physical-selection-changed` 或 `physical-enumeration-limit`：等待文件系统稳定或缩小项目树后重试，不能授权为 partial scope。
-- scope 明细超出预算时，Runtime 用 `scope-detail-overflow` 的数量与内容 hash 汇总，而不是猜测遗漏路径。不要手改证据或把不完整快照视为完整。
-
-## 项目配置
-
-与 Agent 行为直接相关的配置：
-
-```yaml
-native:
-  artifact_root: docs
-  language: zh-CN
-  clarification_mode: sequential
-  archive_confirmation: automatic
-  max_verify_failures: 5
-```
-
-- `clarification_mode`：`sequential` 或 `batch`。
-- `archive_confirmation`：`automatic` 或 `required`。
-- `max_verify_failures`：同一份已确认 contract 允许提交的 Verify fail 总数。
-
-字段缺失时分别使用 `sequential`、`automatic` 和 `5`。配置改变不会让旧证据继续有效，也不会自动清除已有阻塞项。
+`.comet/config.yaml` 决定使用哪种工作流，以及 change 产物保存在哪个目录。使用非默认产物目录并需要跨设备恢复时，应同步该文件；其余 `.comet/*` 只保留在本机。
 
 ## Brief
-
-`brief.md` 使用以下一级标题：
+`brief.md` 是 Native 的持久化澄清产物，使用以下非空一级标题：
 
 ```text
 # Outcome
@@ -61,76 +38,49 @@ native:
 # Verification expectations
 ```
 
-Outcome、Scope、Non-goals 和 Acceptance examples 必须有实质内容。
-
-Open questions 中的阻塞项使用固定格式：
+Open questions 中只有真实未解决的用户问题使用：
 
 ```text
 - [blocking] <Sequential 当前问题>
-- [blocking] Q1: <问题>
-- [blocking] CONFIRM: <最终共享理解>
+- [blocking] Q1: <Batch 问题>
+- [blocking] CONFIRM: <最终确认内容>
 ```
 
-未回答或不明确的问题继续保留。用户确认后，把决定写入 Decisions 和完整目标规格，再移除对应阻塞项。不要保存隐藏推理。
+每个决定确认后立即写入 Decisions 和完整目标规格，再移除对应阻塞项。正式产物只记录结论和理由，不记录模型的隐藏推理过程。`brief.md` 是 Native 的持久化澄清产物；用户直接提供文件、附件、链接或本地路径作为需求来源时，在 `brief.md` 的 `# Scope` 下建立 `## Source coverage` 作为唯一来源覆盖映射，完整目标 Spec 不重复来源表，只完整表达所有当前有效可执行语义。
+
+验收标准必须具体、可观察且互不重复。使用简单顺序 ID，例如 `A1`、`A2`、`A3`；ID 只用于结果映射，不从内容计算，也不代表文件身份。Runtime 在 Shape 确认时保存完整验收文字及其来源。直接来源覆盖映射为每个单元记录来源定位、`complete`/`partial`/`unavailable` 读取状态、保留语义、对应的 Spec 位置、对应的验收 ID、`covered`/`needs-clarification`/`background`/`non-goal`/`superseded` 覆盖状态以及理由或替代关系；当前有效可执行单元必须同时具有 Spec 位置和验收 ID，背景、非目标和已废止来源单元不要求 Spec 位置或验收 ID；验收条件至少覆盖原始来源的全部当前有效可执行语义，`partial`、`unavailable`、未覆盖内容或缺少双重映射的可执行单元保持阻塞。
+新版 `children.yaml` 使用 `comet.native.children.v2`：`acceptance_index` 保存 brief 派生的父级验收 ID、来源和完整文字；每个子任务只包含 `name`、`depends_on` 和 `covers`，并覆盖索引中的全部 ID。Spec 派生验收仍由 Runtime 的完整验收矩阵管理，只有修复阶段才把实际失败的 Spec ID 补入索引。名称必须唯一，依赖必须存在且无环；历史 `comet.native.children.v1` 继续按原契约接受，修改后 Supervisor Change 返回 Shape。
+
+`acceptance_index` 是按验收 ID 索引的对象，不是数组。以下示例中两个子任务可以并行；填写时从当前验收目录逐字复制对应 ID 的 `source` 和 `text`，不要改写成摘要：
+
+```yaml
+schema: comet.native.children.v2
+acceptance_index:
+  A1:
+    source: brief.md
+    text: 集成结果包含功能 A。
+  A2:
+    source: brief.md
+    text: 集成结果包含功能 B。
+children:
+  - name: alpha
+    depends_on: []
+    covers: [A1]
+  - name: beta
+    depends_on: []
+    covers: [A2]
+```
 
 ## 完整目标规格
+每个 `specs/<capability>/spec.md` 描述归档后 capability 的完整行为，而不是只写相对旧文本的变化：
 
-规格写在：
+- 新 capability：写完整规格；
+- 已有 capability：写修改后的完整规格；
+- 删除 capability：使用 CLI 的 `spec remove`，不只删除文件。
 
-```text
-changes/<change-name>/specs/<capability>/spec.md
-```
-
-它描述归档后 capability 应有的完整行为，不是相对旧文本的增量 patch。
-
-- 新 capability：创建完整规格。
-- 已有 capability：写出替换后的完整规格。
-- 删除 capability：运行 `comet native spec remove`，不要只删除文件。
-
-Runtime 负责记录 create、replace、remove 和 canonical 基线。发生 canonical 冲突时，先重读并改写完整目标规格，再使用 `spec rebase`；不要手改 Runtime 状态或 hash。
+如果项目中已经归档的正式 Spec 与当前 change 发生冲突，先重读最新 Spec，再按用户意图改写当前 change 的完整目标规格，最后执行 Runtime 返回的重新对齐（rebase）动作。Spec 操作类型和工作流状态仍由 Runtime 管理。
 
 ## Verification
+报告展示每个验收项的结果和原因、实际检查的脱敏命令预览与状态、阻塞项、风险以及精简的验收循环历史。完整命令输出只保留在本机日志中。
 
-`verification.md` 使用以下非空一级标题：
-
-```text
-# Acceptance evidence
-# Commands and results
-# Skipped checks
-# Spec consistency
-# Known limitations and risks
-# Conclusion
-```
-
-记录真实命令、结果和可复核事实。未运行的检查放在 Skipped checks；失败结果不能写成 pass。
-
-## Acceptance evidence
-
-使用 Runtime 返回的 acceptance ID，不要自行计算。先准备条目数组，再运行：
-
-```text
-comet native evidence format [--entries <path>]
-```
-
-把命令输出原样放入 `# Acceptance evidence`。输入条目的基本形式：
-
-```json
-[
-  {
-    "acceptance_id": "acceptance-<sha256>",
-    "status": "passed",
-    "evidence_refs": ["runtime/evidence/receipts/<sha256>.json"]
-  },
-  {
-    "acceptance_id": "acceptance-<sha256>",
-    "status": "failed",
-    "evidence_refs": [],
-    "skipped_reason": "实际失败或未完成原因"
-  }
-]
-```
-
-- `passed` 引用当前有效的 typed receipt。
-- `failed` 说明真实失败或跳过原因。
-
-不要手工排版机器块，不要复用旧 change 的 evidence ref，也不要把失败、跳过或阻塞结果写成通过。
+验收结论由 Runtime 根据 YAML 生成。失败、阻塞、未运行或超时的项目保持原状态；只有当前候选的全部验收项都有结论，并且必要检查成功，最终结果才是通过。

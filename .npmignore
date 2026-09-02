@@ -44,6 +44,8 @@ __tests__/
 eval/**/.pytest*/
 eval/**/.pytest-*/
 eval/**/.pytest_*/
+eval/.pytest-basetemp-*/
+eval/.pytest-tmp-*/
 eval/**/.tmp/
 eval/**/.cache/
 eval/**/.ruff_cache/
@@ -59,3 +61,6 @@ skills-lock.json
 npm-debug.log*
 
 .agents/
+
+# Repository maintainer Skills are tracked under assets but are not part of the npm package
+assets/skills-maintainer/

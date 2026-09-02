@@ -11,10 +11,10 @@ import {
   MINIMUM_OPENSPEC_VERSION,
 } from '../../domains/integrations/openspec.js';
 import {
+  inspectCodegraphIntegration,
   inspectCodegraphIndex,
   repairCodegraphIndex,
-  resolveCodegraphCommand,
-  type CodegraphIndexDiagnostic,
+  type CodegraphIntegrationDiagnostic,
 } from '../../domains/integrations/codegraph.js';
 import {
   copyCometRulesForPlatform,
@@ -68,6 +68,7 @@ import { resolveHookWorkflowOwner } from '../../domains/comet-entry/hook-router.
 import type { InitWorkflowSelection } from '../../domains/comet-entry/types.js';
 import { inspectGitWorktree } from '../../platform/paths/git-worktree.js';
 import { projectCometHooksFromInstalledScope } from '../../domains/skill/project-hook-projection.js';
+import { hasDshInstruction } from '../../domains/skill/dsh-adapter.js';
 
 interface CheckResult {
   check: string;
@@ -96,7 +97,7 @@ interface DoctorRuntimeDiagnostic {
 interface DoctorReport {
   results: CheckResult[];
   runtime: DoctorRuntimeDiagnostic;
-  codegraph: CodegraphIndexDiagnostic | null;
+  codegraph: CodegraphIntegrationDiagnostic | null;
 }
 
 const SUPERPOWERS_SENTINELS = [
@@ -681,12 +682,15 @@ function globalHookCheckResult(
     inspection.present || inspection.managedPresent === true || inspection.legacyPresent === true;
   return {
     check: `hooks: ${platform.name} (${scope})`,
-    status: globalHookPresent || inspection.error ? 'warn' : 'pass',
+    status:
+      globalHookPresent || inspection.error || inspection.activationRequired ? 'warn' : 'pass',
     message: inspection.error
       ? `${inspection.error} — run: comet doctor --repair --scope global`
-      : globalHookPresent
-        ? 'global blocking Hook remains — run: comet doctor --repair --scope global'
-        : 'no global blocking Hook present',
+      : inspection.activationRequired
+        ? 'Hook config and Cordis patch are present; the active dsh profile must load the official bridge'
+        : globalHookPresent
+          ? 'global blocking Hook remains — run: comet doctor --repair --scope global'
+          : 'no global blocking Hook present',
   };
 }
 
@@ -708,7 +712,13 @@ async function checkPlatformComponents(
     const inspectionErrors: string[] = [];
     for (const destination of ruleDestinations) {
       try {
-        if (await fileExists(destination)) present++;
+        if (
+          platform.rulesFormat === 'dsh'
+            ? await hasDshInstruction(baseDir, platform, scope)
+            : await fileExists(destination)
+        ) {
+          present++;
+        }
       } catch (error) {
         inspectionErrors.push(`${destination}: ${(error as Error).message}`);
       }
@@ -800,7 +810,8 @@ async function checkHookComponents(
       inspection.present &&
       !inspection.error &&
       !inspection.legacyPresent &&
-      !inspection.duplicatePresent
+      !inspection.duplicatePresent &&
+      !inspection.activationRequired
         ? 'pass'
         : 'warn',
     message:
@@ -813,7 +824,9 @@ async function checkHookComponents(
           ? `duplicate managed Router Hooks remain — run: comet doctor --repair --scope ${scope}`
           : inspection.present && inspection.legacyPresent
             ? `Router Hook and legacy managed Hook coexist — run: comet doctor --repair --scope ${scope}`
-            : `${inspection.error ?? 'managed Hook missing'} — run: comet update --scope ${scope}`,
+            : inspection.present && inspection.activationRequired
+              ? 'Hook config and Cordis patch are present; load the official bridge and run dsh with the project patch'
+              : `${inspection.error ?? 'managed Hook missing'} — run: comet update --scope ${scope}`,
   });
   return results;
 }
@@ -1120,15 +1133,54 @@ async function checkCometYamlValidity(projectPath: string): Promise<CheckResult[
   return results;
 }
 
-function codegraphCheckResult(diagnostic: CodegraphIndexDiagnostic): CheckResult {
-  return {
-    check: diagnostic.status === 'cli_missing' ? 'CodeGraph CLI' : 'CodeGraph',
-    status:
-      diagnostic.status === 'index_ready' || diagnostic.status === 'cli_ready' ? 'pass' : 'warn',
-    message: diagnostic.remediation
-      ? `${diagnostic.detail} — run: ${diagnostic.remediation}`
-      : diagnostic.detail,
+function codegraphCheckResults(diagnostic: CodegraphIntegrationDiagnostic): CheckResult[] {
+  const cliResult: CheckResult = {
+    check: 'CodeGraph CLI',
+    status: diagnostic.cliStatus === 'installed' ? 'pass' : 'warn',
+    message:
+      diagnostic.cliStatus === 'installed'
+        ? 'CodeGraph CLI is installed'
+        : diagnostic.remediation
+          ? `${diagnostic.detail} — run: ${diagnostic.remediation}`
+          : diagnostic.detail,
   };
+  const indexResult: CheckResult = {
+    check: 'CodeGraph project index',
+    status:
+      diagnostic.indexStatus === 'current' || diagnostic.indexStatus === 'not_checked'
+        ? 'pass'
+        : 'warn',
+    message:
+      diagnostic.indexStatus === 'not_checked'
+        ? 'project index is not part of global scope'
+        : diagnostic.indexStatus === 'current'
+          ? diagnostic.detail
+          : diagnostic.remediation
+            ? `${diagnostic.detail} — run: ${diagnostic.remediation}`
+            : diagnostic.detail,
+  };
+  const agentSummary =
+    diagnostic.agents.length === 0
+      ? 'no supported Agent configuration detected'
+      : diagnostic.agents
+          .map(
+            (agent) =>
+              `${agent.name}: ${agent.registered ? (agent.valid ? 'registered' : 'invalid entry') : 'not registered'}`,
+          )
+          .join('; ');
+  const mcpResult: CheckResult = {
+    check: 'CodeGraph MCP registration',
+    status: diagnostic.mcpStatus === 'registered' ? 'pass' : 'warn',
+    message: agentSummary,
+  };
+  const effectiveResults = diagnostic.agents.map((agent) => ({
+    check: `CodeGraph effective for ${agent.name}`,
+    status: agent.effective ? ('pass' as const) : ('warn' as const),
+    message: agent.effective
+      ? 'CLI, current project index, and MCP registration are ready'
+      : 'not ready — requires an installed CLI, current project index, and valid MCP registration',
+  }));
+  return [cliResult, indexResult, mcpResult, ...effectiveResults];
 }
 
 async function inspectManagedInstallAvailability(
@@ -1310,23 +1362,12 @@ async function collectResultsWithContext(
   }
   results.push(...skillResults);
   results.push(await checkScriptsPresent());
-  const codegraph: CodegraphIndexDiagnostic =
-    scope === 'global'
-      ? resolveCodegraphCommand()
-        ? {
-            status: 'cli_ready',
-            repairable: false,
-            remediation: null,
-            detail: 'CodeGraph CLI is installed; project indexes are not part of global scope',
-          }
-        : {
-            status: 'cli_missing',
-            repairable: false,
-            remediation: 'npm install -g @colbymchenry/codegraph',
-            detail: 'CodeGraph CLI is not installed',
-          }
-      : inspectCodegraphIndex(projectPath);
-  results.push(codegraphCheckResult(codegraph));
+  const codegraph = inspectCodegraphIntegration(
+    projectPath,
+    scope === 'global' ? 'global' : 'project',
+    context.homeDir,
+  );
+  results.push(...codegraphCheckResults(codegraph));
   if (classicEnabled && !configError && config && workflows.includes('classic')) {
     results.push(...(await checkCometYamlValidity(projectPath)));
   }

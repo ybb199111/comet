@@ -7,6 +7,7 @@ import { PLATFORMS } from '../../../platform/install/platforms.js';
 import {
   DEFAULT_NATIVE_SNAPSHOT_CONFIG,
   defaultProjectConfig,
+  mergeNativeSnapshotExcludes,
   readProjectConfig,
   resolveNativeProject,
   writeProjectConfig,
@@ -27,44 +28,12 @@ describe('Native project configuration', () => {
 
   it('builds the shared default project config with docs as the Native artifact root', () => {
     expect(defaultProjectConfig().native.artifact_root).toBe('docs');
-    expect(defaultProjectConfig().native.clarification_mode).toBe('sequential');
+    expect(defaultProjectConfig().native.clarification_mode).toBe('batch');
     expect(defaultProjectConfig().native.archive_confirmation).toBe('automatic');
     expect(defaultProjectConfig().native.max_verify_failures).toBe(5);
     expect(defaultProjectConfig().native.snapshot).toEqual({
       include: ['**/*'],
-      exclude: [
-        '.agents/skills/**',
-        '.amazonq/skills/**',
-        '.augment/skills/**',
-        '.bob/skills/**',
-        '.claude/skills/**',
-        '.cline/skills/**',
-        '.codebuddy/skills/**',
-        '.continue/skills/**',
-        '.cospec/skills/**',
-        '.crush/skills/**',
-        '.cursor/skills/**',
-        '.factory/skills/**',
-        '.forge/skills/**',
-        '.gemini/skills/**',
-        '.github/skills/**',
-        '.iflow/skills/**',
-        '.junie/skills/**',
-        '.kilocode/skills/**',
-        '.kimi-code/skills/**',
-        '.kiro/skills/**',
-        '.lingma/skills/**',
-        '.mimocode/skills/**',
-        '.opencode/skills/**',
-        '.pi/skills/**',
-        '.qoder/skills/**',
-        '.qwen/skills/**',
-        '.roo/skills/**',
-        '.trae-cn/skills/**',
-        '.trae/skills/**',
-        '.windsurf/skills/**',
-        '.zcode/skills/**',
-      ],
+      exclude: DEFAULT_NATIVE_SNAPSHOT_CONFIG.exclude,
       max_files: 10_000,
       max_total_bytes: 256 * 1024 * 1024,
       max_duration_ms: 60_000,
@@ -72,12 +41,39 @@ describe('Native project configuration', () => {
   });
 
   it('keeps every supported platform Skill directory outside the default baseline scope', () => {
-    expect(new Set(DEFAULT_NATIVE_SNAPSHOT_CONFIG.exclude)).toEqual(
-      new Set(PLATFORMS.map((platform) => `${platform.skillsDir}/skills/**`)),
+    expect(DEFAULT_NATIVE_SNAPSHOT_CONFIG.exclude).toEqual(
+      expect.arrayContaining(PLATFORMS.map((platform) => `${platform.skillsDir}/skills/**`)),
     );
   });
 
-  it('round-trips a custom artifact root with stable YAML fields', async () => {
+  it('includes common generated, IDE, and Comet-managed paths in default snapshots', () => {
+    expect(DEFAULT_NATIVE_SNAPSHOT_CONFIG.exclude).toEqual(
+      expect.arrayContaining([
+        '**/.idea/**',
+        '**/.vscode/**',
+        '.codex/skills/**',
+        '**/node_modules/**',
+        '**/dist/**',
+        '**/target/**',
+        '**/__pycache__/**',
+        '**/obj/**',
+        '**/logs/**',
+        '**/tmp/**',
+        '**/temp/**',
+      ]),
+    );
+    expect(DEFAULT_NATIVE_SNAPSHOT_CONFIG.exclude).not.toContain('**/bin/**');
+  });
+
+  it('preserves custom exclusions while adding missing defaults', () => {
+    const merged = mergeNativeSnapshotExcludes(['custom/generated/**', '**/dist/**']);
+
+    expect(merged).toEqual(expect.arrayContaining(['custom/generated/**', '**/dist/**']));
+    expect(merged).toEqual(expect.arrayContaining(['**/.idea/**', '**/node_modules/**']));
+    expect(new Set(merged).size).toBe(merged.length);
+  });
+
+  it('round-trips a custom artifact root without persisting legacy snapshot settings', async () => {
     await writeProjectConfig(projectRoot, defaultProjectConfig('docs'));
 
     expect(await readProjectConfig(projectRoot)).toEqual({
@@ -85,10 +81,17 @@ describe('Native project configuration', () => {
       default_workflow: 'native',
       workflows: ['native'],
       ambient_resume: true,
+      memory: {
+        learning: true,
+        retrieval: true,
+      },
+      knowledge: {
+        provider: 'local',
+      },
       native: {
         artifact_root: 'docs',
         language: 'en',
-        clarification_mode: 'sequential',
+        clarification_mode: 'batch',
         archive_confirmation: 'automatic',
         max_verify_failures: 5,
         snapshot: {
@@ -102,18 +105,21 @@ describe('Native project configuration', () => {
     });
     const source = await fs.readFile(path.join(projectRoot, '.comet', 'config.yaml'), 'utf8');
     expect(source).toContain('# Enables automatic recovery');
-    expect(source).toContain('# Controls whether Native asks one clarification at a time');
+    expect(source).toContain(
+      '# Root directory where Native stores Comet specs and changes. Runtime data stays under .comet.',
+    );
+    expect(source).toContain(
+      '# Controls how Native asks clarifying questions: batch asks every currently answerable question per round',
+    );
     expect(source).toContain('# Controls whether Native archives automatically');
-    expect(source).toContain('# Maximum failed Verify outcomes');
-    expect(source).toContain('# Selects the project-relative paths included in Native snapshots');
-    expect(source).toContain('# Bounds the total file content hashed by one snapshot');
+    expect(source).toContain(
+      '# Maximum failed Verify outcomes allowed for one confirmed acceptance target',
+    );
     expect(source).toContain('ambient_resume: true');
-    expect(source).toContain('clarification_mode: sequential');
+    expect(source).toContain('clarification_mode: batch');
     expect(source).toContain('archive_confirmation: automatic');
     expect(source).toContain('max_verify_failures: 5');
-    expect(source).toContain('include:');
-    expect(source).toContain('- "**/*"');
-    expect(source).toContain('max_total_bytes: 268435456');
+    expect(source).not.toMatch(/^\s+snapshot:/mu);
   });
 
   it('does not write Native project config through a linked .comet directory', async () => {
@@ -234,7 +240,7 @@ describe('Native project configuration', () => {
     );
 
     expect((await readProjectConfig(projectRoot))?.native.language).toBe('en');
-    expect((await readProjectConfig(projectRoot))?.native.clarification_mode).toBe('sequential');
+    expect((await readProjectConfig(projectRoot))?.native.clarification_mode).toBe('batch');
     expect((await readProjectConfig(projectRoot))?.native.archive_confirmation).toBe('automatic');
     expect((await readProjectConfig(projectRoot))?.native.max_verify_failures).toBe(5);
     expect((await readProjectConfig(projectRoot))?.native.snapshot).toEqual(
@@ -243,16 +249,16 @@ describe('Native project configuration', () => {
     expect((await readProjectConfig(projectRoot))?.ambient_resume).toBe(true);
   });
 
-  it('round-trips the batch clarification mode', async () => {
+  it('round-trips the sequential clarification mode', async () => {
     const config = defaultProjectConfig('docs');
-    config.native.clarification_mode = 'batch';
+    config.native.clarification_mode = 'sequential';
 
     await writeProjectConfig(projectRoot, config);
 
-    expect((await readProjectConfig(projectRoot))?.native.clarification_mode).toBe('batch');
+    expect((await readProjectConfig(projectRoot))?.native.clarification_mode).toBe('sequential');
     await expect(
       fs.readFile(path.join(projectRoot, '.comet', 'config.yaml'), 'utf8'),
-    ).resolves.toContain('clarification_mode: batch');
+    ).resolves.toContain('clarification_mode: sequential');
   });
 
   it('round-trips required Native archive confirmation', async () => {
@@ -298,12 +304,11 @@ describe('Native project configuration', () => {
 
     const source = await fs.readFile(path.join(projectRoot, '.comet', 'config.yaml'), 'utf8');
     expect(source).toContain('# 是否启用只读的环境感知恢复探针');
-    expect(source).toContain('# Native 产物的存放根目录');
-    expect(source).toContain('# Native 每轮询问一个问题');
-    expect(source).toContain('# Native 归档预演成功后自动归档');
-    expect(source).toContain('# 同一份已确认 contract 最多允许的 Verify 失败次数');
-    expect(source).toContain('# Native 快照纳入的项目相对路径');
-    expect(source).toContain('# 单次快照最多哈希的文件内容总字节数');
+    expect(source).toContain('# Native 规格和 change 的存放根目录；运行时数据始终位于 .comet');
+    expect(source).toContain('# Native 提问澄清问题的方式');
+    expect(source).toContain('# Native 归档检查成功后自动归档');
+    expect(source).toContain('# 同一个已确认验收目标最多允许的 Verify 失败次数');
+    expect(source).not.toMatch(/^\s+snapshot:/mu);
     expect(source).not.toContain('# Enables automatic recovery');
   });
 
@@ -447,6 +452,12 @@ describe('Native project configuration', () => {
     expect(resolved.configured).toBe(false);
   });
 
+  it('can require an existing Native project config', async () => {
+    await expect(
+      resolveNativeProject({ startPath: projectRoot, allowMissingConfig: false }),
+    ).rejects.toThrow('.comet/config.yaml was not found');
+  });
+
   it('refuses an explicit root that conflicts with persisted config', async () => {
     await writeProjectConfig(projectRoot, defaultProjectConfig('docs'));
 
@@ -511,7 +522,7 @@ describe('Native project configuration', () => {
     expect(source).toContain('auto_transition: false');
   });
 
-  it('round-trips unknown top-level and nested workflow extension fields', async () => {
+  it('preserves extensions outside the retired Native snapshot subtree', async () => {
     await fs.writeFile(
       path.join(projectRoot, '.comet', 'config.yaml'),
       [
@@ -543,7 +554,8 @@ describe('Native project configuration', () => {
     const source = await fs.readFile(path.join(projectRoot, '.comet', 'config.yaml'), 'utf8');
     expect(source).toContain('artifact_root: docs');
     expect(source).toContain('custom_extension:');
-    expect(source).toContain('snapshot_extension: keep');
+    expect(source).not.toContain('snapshot_extension: keep');
+    expect(source).not.toMatch(/^\s+snapshot:/mu);
     expect(source).toContain('classic_extension: keep');
     expect(source).toContain('top_extension:');
   });

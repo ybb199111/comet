@@ -2,7 +2,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { execFileSync } from 'child_process';
 import type { BigIntStats } from 'fs';
-import { homedir } from 'os';
+import os from 'os';
 import {
   hasComparableFileObject,
   sameFileObject,
@@ -16,7 +16,7 @@ import {
   workflowProjectConfigIdentityEquals,
   type WorkflowProjectConfigIdentity,
 } from '../workflow-contract/project-config-reader.js';
-import { lstat, realpath, rename, rmdir, unlink, writeFile } from 'fs/promises';
+import { lstat, readFile, realpath, rename, rmdir, unlink, writeFile } from 'fs/promises';
 
 import {
   fileExists,
@@ -40,11 +40,27 @@ import {
   isManagedHookCommand,
   removeManagedCopilotHookEntries,
   removeManagedHooksFromJsonFile,
+  getCentralSkillsDir,
+  OMP_HOOK_MARKER,
+  OMP_HOOK_RELATIVE_PATH,
+  removeRetiredCometOwnedSkillPaths,
+  RETIRED_COMET_OWNED_SKILL_PATHS,
 } from './platform-install.js';
 import type { CometWorkflow, InitWorkflowSelection } from '../comet-entry/types.js';
 import { removeCometProjectInstructions } from './project-instructions.js';
 import { readJsonObjectFile } from './json-object.js';
-import { SKILLS_AGENT_MAP } from '../integrations/superpowers.js';
+import {
+  dshRootPath,
+  readDshOwnedPaths,
+  removeDshCordisPatch,
+  removeDshInstruction,
+  removeDshOwnedPaths,
+} from './dsh-adapter.js';
+import {
+  SKILLS_AGENT_MAP,
+  readStagedSuperpowersSkillNames,
+  removeStagedSuperpowersManifests,
+} from '../integrations/superpowers.js';
 
 interface RemovalResult {
   removed: number;
@@ -62,7 +78,6 @@ const LEGACY_HOOK_SCRIPT_PATHS = [
   'comet/scripts/comet-hook-guard.mjs',
   'comet-native/scripts/comet-native-hook-guard.mjs',
 ] as const;
-
 type ManagedWorkingTree = {
   readonly [entry: string]: 'file' | ManagedWorkingTree;
 };
@@ -726,6 +741,13 @@ async function removeCometSkillsForPlatform(
   )) {
     if (workflowsToKeep.length > 0) removablePaths.delete(retainedPath);
   }
+  const removeRetiredNativePaths =
+    workflowsToRemove.includes('native') && !workflowsToKeep.includes('native');
+  if (removeRetiredNativePaths) {
+    for (const retiredPath of RETIRED_COMET_OWNED_SKILL_PATHS) {
+      removablePaths.add(retiredPath);
+    }
+  }
   const managedSkills = [...removablePaths];
   const skillsDir = getPlatformSkillsDir(platform, scope);
   const uniqueSkillsDirs = [
@@ -737,6 +759,13 @@ async function removeCometSkillsForPlatform(
   const skillsRemoval = await removeManagedSkillsFromDirs(baseDir, uniqueSkillsDirs, managedSkills);
   let removed = skillsRemoval.removed;
   let failed = skillsRemoval.failed;
+  if (removeRetiredNativePaths) {
+    const centralCleanup = await removeRetiredCometOwnedSkillPaths([
+      path.join(getCentralSkillsDir(baseDir, scope), 'skills'),
+    ]);
+    removed += centralCleanup.removed;
+    failed += centralCleanup.failed;
+  }
 
   if (OPENCODE_STYLE_PLATFORM_IDS.has(platform.id)) {
     const commandsDir = path.join(baseDir, skillsDir, 'commands');
@@ -786,6 +815,9 @@ async function removeCometRulesForPlatform(
   platform: Platform,
   scope: InstallScope = 'project',
 ): Promise<RemovalResult> {
+  if (platform.rulesFormat === 'dsh') {
+    return removeDshInstruction(baseDir, platform, scope);
+  }
   if (!platform.rulesDir || !platform.rulesFormat) {
     return { removed: 0, failed: 0 };
   }
@@ -843,6 +875,26 @@ async function removeOpenSpecSkillsForPlatform(
   platform: Platform,
   scope: InstallScope = 'project',
 ): Promise<RemovalResult> {
+  if (platform.id === 'dsh') {
+    try {
+      const owned = await readDshOwnedPaths(baseDir, platform, scope, 'openspec');
+      let removed = 0;
+      for (const relative of owned) {
+        const target = path.join(dshRootPath(baseDir, platform, scope), ...relative.split('/'));
+        const stat = await lstat(target).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        });
+        if (!stat) continue;
+        const didRemove = stat.isDirectory() ? await removeDir(target) : await removeFile(target);
+        if (didRemove) removed++;
+      }
+      await removeDshOwnedPaths(baseDir, platform, scope, 'openspec', owned);
+      return { removed, failed: 0 };
+    } catch {
+      return { removed: 0, failed: 1 };
+    }
+  }
   let removed = 0;
   let failed = 0;
   for (const skillsDir of getPlatformSkillsDirs(platform, scope)) {
@@ -926,16 +978,52 @@ async function removeSuperpowersSkillsForPlatforms(
   scope: InstallScope = 'project',
   options: { removeSharedStorage?: boolean } = {},
 ): Promise<RemovalResult> {
+  const dshPlatforms = platforms.filter((platform) => platform.id === 'dsh');
+  const baseDir = scope === 'global' ? os.homedir() : projectPath;
+  const dshResult: RemovalResult = { removed: 0, failed: 0 };
+  for (const platform of dshPlatforms) {
+    try {
+      const owned = await readDshOwnedPaths(baseDir, platform, scope, 'superpowers');
+      let removed = 0;
+      const removedPaths: string[] = [];
+      for (const relative of owned) {
+        if (!relative.startsWith('skills/')) continue;
+        const target = path.join(dshRootPath(baseDir, platform, scope), ...relative.split('/'));
+        const stat = await lstat(target).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        });
+        if (!stat) {
+          removedPaths.push(relative);
+          continue;
+        }
+        if (await removeDir(target)) {
+          removed++;
+          removedPaths.push(relative);
+        }
+      }
+      await removeDshOwnedPaths(baseDir, platform, scope, 'superpowers', removedPaths);
+      dshResult.removed += removed;
+    } catch {
+      dshResult.failed++;
+    }
+  }
+  const genericPlatforms = platforms.filter((platform) => platform.id !== 'dsh');
   const agents = [
     ...new Set(
-      platforms
+      genericPlatforms
         .map((platform) => SKILLS_AGENT_MAP[platform.id])
         .filter((agent): agent is string => Boolean(agent)),
     ),
   ];
-  if (agents.length === 0) return { removed: 0, failed: 0 };
+  const stagedCopyPlatforms = genericPlatforms.filter((platform) => !SKILLS_AGENT_MAP[platform.id]);
+  if (agents.length === 0 && stagedCopyPlatforms.length === 0) {
+    return dshResult;
+  }
   const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
   const scopeArgs = scope === 'global' ? ['--global'] : [];
+  const lockedNames = await readLockedSuperpowersSkillNames(projectPath);
+  let listedNames: string[] = [];
   try {
     const output = execFileSync(command, ['skills', 'list', '--json', ...scopeArgs], {
       cwd: projectPath,
@@ -947,13 +1035,18 @@ async function removeSuperpowersSkillsForPlatforms(
       name?: unknown;
       source?: unknown;
     }>;
-    const names = new Set([
-      ...listed.flatMap((skill) =>
-        skill.source === 'obra/superpowers' && typeof skill.name === 'string' ? [skill.name] : [],
-      ),
-      ...(await readLockedSuperpowersSkillNames(projectPath)),
-    ]);
-    let failed = 0;
+    listedNames = listed.flatMap((skill) =>
+      skill.source === 'obra/superpowers' && typeof skill.name === 'string' ? [skill.name] : [],
+    );
+  } catch {
+    if (agents.length > 0 && lockedNames.length === 0 && stagedCopyPlatforms.length === 0) {
+      return { removed: 0, failed: 1 };
+    }
+  }
+  const stagedNames = await readStagedSuperpowersSkillNames(baseDir, stagedCopyPlatforms, scope);
+  const names = new Set([...listedNames, ...lockedNames, ...stagedNames]);
+  let failed = 0;
+  if (agents.length > 0) {
     for (const name of names) {
       try {
         execFileSync(
@@ -970,31 +1063,36 @@ async function removeSuperpowersSkillsForPlatforms(
         failed++;
       }
     }
-    const baseDir = scope === 'global' ? homedir() : projectPath;
-    if (options.removeSharedStorage) {
-      const fallbackResult = await removeSuperpowersSkillDirs(baseDir, platforms, scope, [
-        ...names,
-      ]);
-      failed += fallbackResult.failed;
-    }
-
-    const remaining = (
-      await Promise.all(
-        [...names].map(async (name) => {
-          for (const platform of platforms) {
-            for (const skillsDir of getPlatformSkillsDirs(platform, scope)) {
-              if (await fileExists(path.join(baseDir, skillsDir, 'skills', name))) return true;
-            }
-          }
-          return false;
-        }),
-      )
-    ).filter(Boolean).length;
-    if (remaining > 0) failed++;
-    return { removed: names.size - remaining, failed };
-  } catch {
-    return { removed: 0, failed: 1 };
   }
+  if (options.removeSharedStorage || stagedCopyPlatforms.length > 0) {
+    const fallbackResult = await removeSuperpowersSkillDirs(
+      baseDir,
+      stagedCopyPlatforms.length > 0 && !options.removeSharedStorage
+        ? stagedCopyPlatforms
+        : genericPlatforms,
+      scope,
+      [...names],
+    );
+    failed += fallbackResult.failed;
+  }
+
+  const remaining = (
+    await Promise.all(
+      [...names].map(async (name) => {
+        for (const platform of genericPlatforms) {
+          for (const skillsDir of getPlatformSkillsDirs(platform, scope)) {
+            if (await fileExists(path.join(baseDir, skillsDir, 'skills', name))) return true;
+          }
+        }
+        return false;
+      }),
+    )
+  ).filter(Boolean).length;
+  if (remaining > 0) failed++;
+  if (stagedCopyPlatforms.length > 0 && remaining === 0) {
+    await removeStagedSuperpowersManifests(baseDir, stagedCopyPlatforms, scope);
+  }
+  return { removed: dshResult.removed + names.size - remaining, failed: dshResult.failed + failed };
 }
 
 async function removeCometHooksForPlatform(
@@ -1039,6 +1137,18 @@ async function removeCometHooksForPlatform(
         }
         return { removed, failed };
       }
+      case 'dsh': {
+        const hookResult = await removeManagedHooksFromJsonFile(
+          path.join(platformBase, platform.hookConfigFile ?? 'hooks.json'),
+          scriptRelPaths,
+        );
+        if (hookResult.failed > 0) return hookResult;
+        const patchResult = await removeDshCordisPatch(baseDir, platform, scope);
+        return {
+          removed: hookResult.removed + patchResult.removed,
+          failed: patchResult.failed,
+        };
+      }
       case 'qwen':
       case 'qoder':
       case 'codebuddy':
@@ -1053,6 +1163,27 @@ async function removeCometHooksForPlatform(
         return await removeCopilotHooks(platformBase, scriptRelPaths);
       case 'kiro':
         return await removeKiroHooks(platformBase, scriptRelPaths);
+      case 'omp': {
+        const hookPath = path.join(platformBase, ...OMP_HOOK_RELATIVE_PATH);
+        let removed = 0;
+        let failed = 0;
+        try {
+          if (await fileExists(hookPath)) {
+            const content = await readFile(hookPath, 'utf8');
+            if (content.includes(OMP_HOOK_MARKER) && (await removeFile(hookPath))) removed++;
+          }
+        } catch {
+          failed++;
+        }
+        for (const directory of [path.dirname(hookPath), path.join(platformBase, 'hooks')]) {
+          try {
+            if (await isDirEmpty(directory)) await removeDir(directory);
+          } catch {
+            failed++;
+          }
+        }
+        return { removed, failed };
+      }
       default:
         return { removed: 0, failed: 0 };
     }

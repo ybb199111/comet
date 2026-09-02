@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import { promises as fs } from 'fs';
 import path from 'path';
 
@@ -7,6 +6,7 @@ import {
   readProjectRegistry,
   type ProjectRegistryEntry,
 } from '../../platform/install/project-registry.js';
+import { resolveStableProjectId, stableProjectId } from '../../platform/paths/project-identity.js';
 
 export type DashboardProjectAvailability = 'available' | 'missing' | 'unreadable';
 
@@ -35,7 +35,7 @@ function canonicalKey(projectPath: string): string {
 }
 
 function projectId(projectPath: string): string {
-  return createHash('sha256').update(canonicalKey(projectPath)).digest('base64url').slice(0, 22);
+  return resolveStableProjectId(projectPath);
 }
 
 function projectName(projectPath: string): string {
@@ -97,14 +97,20 @@ export async function collectDashboardProjectDirectory(
 
   const currentKey = canonicalKey(currentPath);
   const projects = await Promise.all(
-    [...candidates.entries()].map(async ([key, candidate]) => ({
-      id: projectId(candidate.path),
-      name: projectName(candidate.path),
-      path: candidate.path,
-      lastSeenAt: candidate.lastSeenAt,
-      availability: await availabilityOf(candidate.path),
-      isCurrent: key === currentKey,
-    })),
+    [...candidates.entries()].map(async ([key, candidate]) => {
+      const availability = await availabilityOf(candidate.path);
+      return {
+        id:
+          availability === 'available'
+            ? projectId(candidate.path)
+            : stableProjectId(candidate.path),
+        name: projectName(candidate.path),
+        path: candidate.path,
+        lastSeenAt: candidate.lastSeenAt,
+        availability,
+        isCurrent: key === currentKey,
+      };
+    }),
   );
   projects.sort(sortEntries);
 

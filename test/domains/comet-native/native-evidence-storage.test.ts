@@ -4,22 +4,27 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import {
-  createNativeChange,
-  nativeChangeDir,
-} from '../../../domains/comet-native/native-change.js';
+import { createNativeChange } from '../../../domains/comet-native/native-change.js';
 import {
   MAX_NATIVE_EVIDENCE_DOCUMENT_BYTES,
+  listNativeVerificationReceiptRefs,
   readNativeImplementationScope,
   readNativePartialAllowance,
+  readNativeVerificationReportSnapshot,
   readNativeVerificationEvidence,
+  readArchivedNativeVerificationAcceptanceCounts,
+  nativeEvidenceRef,
   writeNativeImplementationScope,
   writeNativePartialAllowance,
   writeNativeVerificationReportSnapshot,
   writeNativeVerificationEvidence,
 } from '../../../domains/comet-native/native-evidence-storage.js';
 import { canonicalHash } from '../../../domains/comet-native/native-canonical-hash.js';
-import { nativeProjectPaths } from '../../../domains/comet-native/native-paths.js';
+import {
+  nativeChangeRuntimeDir,
+  nativeProjectPaths,
+  nativeRuntimeRefFile,
+} from '../../../domains/comet-native/native-paths.js';
 import type {
   NativeContentSnapshotManifest,
   NativeProjectPaths,
@@ -168,7 +173,7 @@ describe('Native evidence storage', () => {
       name: 'secure-login',
       bundle,
     });
-    const file = path.join(nativeChangeDir(paths, 'secure-login'), ...ref.split('/'));
+    const file = nativeRuntimeRefFile(nativeChangeRuntimeDir(paths, 'secure-login'), ref);
     const value = JSON.parse(await fs.readFile(file, 'utf8')) as Record<string, unknown>;
     value.complete = true;
     await fs.writeFile(file, JSON.stringify(value));
@@ -195,7 +200,7 @@ describe('Native evidence storage', () => {
     delete content.scopeHash;
     malformed.scopeHash = canonicalHash(NATIVE_IMPLEMENTATION_SCOPE_SCHEMA, content);
     const ref = `runtime/evidence/scopes/${malformed.scopeHash}.json`;
-    const file = path.join(nativeChangeDir(paths, 'secure-login'), ...ref.split('/'));
+    const file = nativeRuntimeRefFile(nativeChangeRuntimeDir(paths, 'secure-login'), ref);
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, JSON.stringify(malformed));
 
@@ -230,7 +235,7 @@ describe('Native evidence storage', () => {
     delete content.scopeHash;
     forged.scopeHash = canonicalHash(NATIVE_IMPLEMENTATION_SCOPE_SCHEMA, content);
     const ref = `runtime/evidence/scopes/${forged.scopeHash}.json`;
-    const file = path.join(nativeChangeDir(paths, 'secure-login'), ...ref.split('/'));
+    const file = nativeRuntimeRefFile(nativeChangeRuntimeDir(paths, 'secure-login'), ref);
     await fs.writeFile(file, JSON.stringify(forged));
 
     await expect(readNativeImplementationScope(paths, 'secure-login', ref)).rejects.toThrow(
@@ -254,9 +259,9 @@ describe('Native evidence storage', () => {
     await expect(
       writeNativeImplementationScope({ paths, name: 'secure-login', bundle: forged }),
     ).rejects.toThrow('does not match its authoritative bundle');
-    const file = path.join(
-      nativeChangeDir(paths, 'secure-login'),
-      ...`runtime/evidence/scopes/${forged.scope.scopeHash}.json`.split('/'),
+    const file = nativeRuntimeRefFile(
+      nativeChangeRuntimeDir(paths, 'secure-login'),
+      `runtime/evidence/scopes/${forged.scope.scopeHash}.json`,
     );
     await expect(fs.lstat(file)).rejects.toMatchObject({ code: 'ENOENT' });
   });
@@ -264,9 +269,9 @@ describe('Native evidence storage', () => {
   it('rejects snapshot projection content tampering and ref/hash rebinding', async () => {
     const { bundle } = fixtures();
     await writeNativeImplementationScope({ paths, name: 'secure-login', bundle });
-    const baselineFile = path.join(
-      nativeChangeDir(paths, 'secure-login'),
-      ...bundle.scope.baselineProjectionRef.split('/'),
+    const baselineFile = nativeRuntimeRefFile(
+      nativeChangeRuntimeDir(paths, 'secure-login'),
+      bundle.scope.baselineProjectionRef,
     );
     await fs.writeFile(baselineFile, JSON.stringify(bundle.current));
     await expect(
@@ -285,7 +290,10 @@ describe('Native evidence storage', () => {
     delete reboundContent.scopeHash;
     rebound.scopeHash = canonicalHash(NATIVE_IMPLEMENTATION_SCOPE_SCHEMA, reboundContent);
     const reboundRef = `runtime/evidence/scopes/${rebound.scopeHash}.json`;
-    const reboundFile = path.join(nativeChangeDir(paths, 'secure-login'), ...reboundRef.split('/'));
+    const reboundFile = nativeRuntimeRefFile(
+      nativeChangeRuntimeDir(paths, 'secure-login'),
+      reboundRef,
+    );
     await fs.writeFile(reboundFile, JSON.stringify(rebound));
 
     await expect(readNativeImplementationScope(paths, 'secure-login', reboundRef)).rejects.toThrow(
@@ -312,9 +320,9 @@ describe('Native evidence storage', () => {
     await expect(
       writeNativeImplementationScope({ paths, name: 'secure-login', bundle: largeBundle }),
     ).resolves.toMatch(/^runtime\/evidence\/scopes\//u);
-    const file = path.join(
-      nativeChangeDir(paths, 'secure-login'),
-      ...`runtime/evidence/scopes/${largeScope.scopeHash}.json`.split('/'),
+    const file = nativeRuntimeRefFile(
+      nativeChangeRuntimeDir(paths, 'secure-login'),
+      `runtime/evidence/scopes/${largeScope.scopeHash}.json`,
     );
     await expect(fs.lstat(file)).resolves.toMatchObject({ isFile: expect.any(Function) });
   });
@@ -357,7 +365,7 @@ describe('Native evidence storage', () => {
     );
   });
 
-  it('streams overflow for ten thousand changes owned by 128 overlapping artifacts', async () => {
+  it('retains snapshot incompleteness when the source projection cannot retain ten thousand files', async () => {
     const { contract } = fixtures();
     const segments = Array.from({ length: 128 }, () => 'a');
     const artifactPaths = segments.map((_, index) => segments.slice(0, index + 1).join('/'));
@@ -392,7 +400,7 @@ describe('Native evidence storage', () => {
     expect(bundle.scope.changes.length).toBeLessThan(128);
     expect(bundle.scope.changes[0]?.attributedTo).toHaveLength(128);
     expect(bundle.scope.unresolvedScopes).toEqual(
-      expect.arrayContaining([expect.objectContaining({ kind: 'scope-detail-overflow' })]),
+      expect.arrayContaining([expect.objectContaining({ kind: 'snapshot-incomplete' })]),
     );
     expect(
       [bundle.baseline, bundle.current, bundle.scope].every(
@@ -485,9 +493,9 @@ describe('Native evidence storage', () => {
     await expect(readNativeImplementationScope(paths, 'secure-login', ref)).resolves.toEqual(
       bundle.scope,
     );
-    const file = path.join(
-      nativeChangeDir(paths, 'secure-login'),
-      ...bundle.scope.baselineProjectionRef.split('/'),
+    const file = nativeRuntimeRefFile(
+      nativeChangeRuntimeDir(paths, 'secure-login'),
+      bundle.scope.baselineProjectionRef,
     );
     await expect(fs.lstat(file)).resolves.toMatchObject({ isFile: expect.any(Function) });
   });
@@ -540,7 +548,7 @@ describe('Native evidence storage', () => {
       name: 'secure-login',
       bundle,
     });
-    const file = path.join(nativeChangeDir(paths, 'secure-login'), ...ref.split('/'));
+    const file = nativeRuntimeRefFile(nativeChangeRuntimeDir(paths, 'secure-login'), ref);
     const parent = path.dirname(file);
     const displaced = `${parent}-displaced`;
     const original = await fs.readFile(file, 'utf8');
@@ -560,7 +568,7 @@ describe('Native evidence storage', () => {
     'rejects a junction in the evidence parent chain',
     async () => {
       const { bundle } = fixtures();
-      const evidenceRoot = path.join(nativeChangeDir(paths, 'secure-login'), 'runtime', 'evidence');
+      const evidenceRoot = path.join(nativeChangeRuntimeDir(paths, 'secure-login'), 'evidence');
       const redirected = path.join(paths.specsDir, 'redirected-evidence');
       await fs.mkdir(redirected, { recursive: true });
       await fs.mkdir(path.dirname(evidenceRoot), { recursive: true });
@@ -568,7 +576,7 @@ describe('Native evidence storage', () => {
 
       await expect(
         writeNativeImplementationScope({ paths, name: 'secure-login', bundle }),
-      ).rejects.toThrow(/real directory|symlink/iu);
+      ).rejects.toThrow(/outside|real directory|symlink/iu);
       await expect(fs.readdir(redirected)).resolves.toEqual([]);
     },
   );
@@ -582,9 +590,9 @@ describe('Native evidence storage', () => {
         name: 'secure-login',
         bundle,
       });
-      const changeRoot = nativeChangeDir(paths, 'secure-login');
-      const evidenceRoot = path.join(changeRoot, 'runtime', 'evidence');
-      const displaced = path.join(changeRoot, 'runtime', 'evidence-displaced');
+      const runtimeRoot = nativeChangeRuntimeDir(paths, 'secure-login');
+      const evidenceRoot = path.join(runtimeRoot, 'evidence');
+      const displaced = path.join(runtimeRoot, 'evidence-displaced');
       const redirected = path.join(paths.specsDir, 'redirected-existing-evidence');
       await fs.rename(evidenceRoot, displaced);
       await fs.mkdir(redirected, { recursive: true });
@@ -598,4 +606,108 @@ describe('Native evidence storage', () => {
       ).rejects.toThrow(/outside|symlink|real directory/iu);
     },
   );
+
+  it('round-trips report snapshots and bounds their content-addressed refs', async () => {
+    const text = 'Verification passed.';
+    const hash = createHash('sha256').update(text).digest('hex');
+    await expect(
+      writeNativeVerificationReportSnapshot({ paths, name: 'secure-login', hash, text }),
+    ).resolves.toBe(nativeEvidenceRef('reports', hash));
+    await expect(readNativeVerificationReportSnapshot(paths, 'secure-login', hash)).resolves.toBe(
+      text,
+    );
+    await expect(
+      writeNativeVerificationReportSnapshot({
+        paths,
+        name: 'secure-login',
+        hash: 'f'.repeat(64),
+        text,
+      }),
+    ).rejects.toThrow(/hash or size/u);
+    await expect(
+      writeNativeVerificationReportSnapshot({
+        paths,
+        name: 'secure-login',
+        hash: createHash('sha256')
+          .update('x'.repeat(MAX_NATIVE_EVIDENCE_DOCUMENT_BYTES + 1))
+          .digest('hex'),
+        text: 'x'.repeat(MAX_NATIVE_EVIDENCE_DOCUMENT_BYTES + 1),
+      }),
+    ).rejects.toThrow(/hash or size/u);
+    await expect(
+      readNativeVerificationReportSnapshot(paths, 'secure-login', 'bad'),
+    ).rejects.toThrow(/hash is invalid/u);
+  });
+
+  it('lists only valid typed receipt filenames and returns an empty missing directory', async () => {
+    expect(await listNativeVerificationReceiptRefs(paths, 'secure-login')).toEqual([]);
+    const directory = path.join(
+      nativeChangeRuntimeDir(paths, 'secure-login'),
+      'evidence',
+      'receipts',
+    );
+    await fs.mkdir(directory, { recursive: true });
+    await Promise.all([
+      fs.writeFile(path.join(directory, `${'b'.repeat(64)}.json`), '{}'),
+      fs.writeFile(path.join(directory, `${'a'.repeat(64)}.json`), '{}'),
+      fs.writeFile(path.join(directory, 'not-a-receipt.txt'), '{}'),
+      fs.mkdir(path.join(directory, `${'c'.repeat(64)}.json`)),
+    ]);
+    await expect(listNativeVerificationReceiptRefs(paths, 'secure-login')).resolves.toEqual([
+      nativeEvidenceRef('receipts', 'a'.repeat(64)),
+      nativeEvidenceRef('receipts', 'b'.repeat(64)),
+    ]);
+  });
+
+  it('reads legacy archived acceptance counters and validates their envelope', async () => {
+    const hash = 'a'.repeat(64);
+    const archiveDir = path.join(paths.archiveDir, '2026-08-12-secure-login');
+    const file = path.join(archiveDir, 'runtime', 'evidence', 'verifications', `${hash}.json`);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        schema: 'comet.native.verification-evidence.v1',
+        change: 'secure-login',
+        envelopeHash: hash,
+        acceptanceTrace: {
+          schema: 'comet.native.acceptance-trace.v1',
+          total: 3,
+          evidenced: 2,
+          skipped: 1,
+        },
+      }),
+    );
+    await expect(
+      readArchivedNativeVerificationAcceptanceCounts(
+        paths,
+        'secure-login',
+        `runtime/evidence/verifications/${hash}.json`,
+        archiveDir,
+      ),
+    ).resolves.toEqual({ total: 3, evidenced: 2, skipped: 1 });
+
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        schema: 'comet.native.verification-evidence.v1',
+        change: 'other-change',
+        envelopeHash: hash,
+        acceptanceTrace: {
+          schema: 'comet.native.acceptance-trace.v1',
+          total: 1,
+          evidenced: 1,
+          skipped: 0,
+        },
+      }),
+    );
+    await expect(
+      readArchivedNativeVerificationAcceptanceCounts(
+        paths,
+        'secure-login',
+        `runtime/evidence/verifications/${hash}.json`,
+        archiveDir,
+      ),
+    ).rejects.toThrow(/change mismatch/u);
+  });
 });

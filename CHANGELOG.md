@@ -2,17 +2,165 @@
 
 All notable changes to @rpamis/comet will be documented in this file.
 
-## What's Changed [0.4.0-beta.18] - 2026-08-07
+## What's Changed [0.4.0-rc.2] - 2026-09-01
 
 ### Added
 
-- **Trae Hook support**: `comet init`, `comet update`, `comet doctor`, and `comet uninstall` now support managed Hook Router entries for Trae and Trae CN, using Trae's official project and global `hooks.json` locations while preserving user-owned Hook configuration.
+- **CLI output envelope**: Native and Classic CLI `--json` output now carries `summary`, `next`, and `user_message` fields alongside the unchanged machine data. `summary` states what happened in plain user language, `next` names the single follow-up action for the Agent, and `user_message` provides ready-to-relay bilingual text for user decisions, so Agents quote the Runtime's wording instead of paraphrasing internal fields.
 
-## What's Changed [0.4.0-beta.17] - 2026-08-05
+### Changed
+
+- **Human-first default CLI text**: Native commands no longer print the raw internal state JSON by default. Text output now leads with a plain-language summary line, a `NEXT:` step, and a `RELAY TO USER:` block for pauses that need a user decision; the full machine projection moved behind the new global `--verbose` flag, and stable error codes (conflicts, snapshot budget, workspace isolation) render as human sentences with the machine detail retained on a `DETAIL:` line. Classic commands (`state next/scale/recover/transition/entry-check`, handoff, archive, manual `guard` checks, and phase-guard write blocks) prepend bilingual summaries that follow the change's language while keeping their existing machine lines — blocked guard checks now say the failing items are the Agent's checklist, not user actions. `comet status` adds one plain-language line per Native and Classic change above its machine details.
+- **CLI envelope consistency**: Direct Classic command `--json` invocations and verbose Native errors now retain the structured envelope and machine detail, while user-decision relays take precedence over internal confirmation commands so an Agent asks the user before resuming a paused workflow.
 
 ### Fixed
 
+- **Native verification loop-stop handoff**: When Native verification paused after repeated failures or repeated no-progress results, the Agent received no user-facing message at the pause point, so sessions could keep re-checking the same candidate instead of asking the user whether to continue repairing or adjust the requirements. The Runtime now returns an explicit user decision request with ready-to-relay bilingual messages for the loop stop, and the same applies when a Verifier blocker waits on information only the user can provide.
+- **Native status resilience for stale children indexes**: A stale `children.yaml` acceptance index (for example a partially synced Supervisor copy inside another Git worktree) no longer blocks the whole Native status view. `comet status` and `comet native status` now keep listing every other change, show the drifted copy as needing Shape re-confirmation, and the Dashboard keeps rendering parent-child progress, while strict index validation still guards state-advancing commands such as Shape confirmation and Build.
+
+- **Prerelease update detection**: `comet init` and `comet update` now compare complete SemVer values, so beta-to-RC, RC-to-stable, future patch, and future minor prerelease upgrades are detected correctly.
+
+## What's Changed [0.4.0-rc.1] - 2026-08-31
+
+### Added
+
+- **Dashboard workspace**: Comet now provides a three-pane Dashboard for Native and Classic changes, Personal Memory, Project Knowledge, plugin settings, archived history, Git worktrees, and interactive website previews.
+- **Personal Memory**: Comet now provides a first-party `comet-memory` Skill and `comet memory` commands for reusable user profiles, collaboration policies, task episodes, retrieval, correction, deletion, rollback, synchronization, and bounded context use.
+- **Agent Learning Loop**: Classic, Native, Hotfix, and Tweak now record structured workflow, verification, review, archive, and context outcomes so bounded reflection can promote stable preferences and collaboration experience.
+- **Project Knowledge and Project Policy**: `comet task` and `comet knowledge` now provide source-backed project topology, facts, dependencies, decisions, procedures, constraints, and failure resolutions through separate Local and optional Remote providers.
+- **Configurable project knowledge corpus**: Projects can index project-relative Markdown globs through `knowledge.local.include`; local indexes, records, provider diagnostics, and corrections are kept outside the project repository by default.
+- **Progressive Agent Context**: Personal Memory and Project Knowledge can now be selected by task, path, operation, and phase, with direct context for core facts and explainable manifests for longer records.
+- **Native Supervisor Change v2**: Large Native changes can be decomposed into dependency-aware children, assigned to independent Codex sessions or a Claude Code Agent Team, verified separately, integrated in order, and advanced automatically to final parent verification.
+- **Native Portable State and recovery**: Native changes now expose portable phase, acceptance, handoff, check, verification, workspace, and Supervisor summaries through `comet-state.yaml`, `comet status`, and rebuildable `verification.md`.
+- **Oh My Pi and DeepSeek Harness support**: `comet init`, `comet update`, `comet doctor`, and `comet uninstall` now manage Comet Skills, Rules, OpenSpec integration, and Hook bridges in both platforms' project and user environments.
+- **Native CodeGraph setup**: `comet init` now offers optional CodeGraph setup when Native or Both is selected, with project indexing and Agent integration kept separate from Classic's OpenSpec and Superpowers dependencies.
+
+### Changed
+
+- **Native verification loop**: Native now reuses completed checks, avoids redundant project scans and Archive checks, streams command output to local logs, and exposes compact paginated status/details with acceptance, evidence, child, integration, and recovery information.
+- **Native Supervisor coordination recovery**: Supervisor Changes now remember the user's multi-session or single-session choice; when multi-session coordination cannot use an independent Codex session or Claude Code Agent Team, Comet continues ready children through Subagents without reopening the coordination choice, while preserving Runtime worktree, task identity, verification, and integration rules.
+- **Native workspace and delivery flow**: Native branch/worktree discovery and reuse remain authoritative across commands; completed Supervisor parents continue directly into final Verify, successful merges clean up Comet-created worktrees while preserving branches, and Archive presents concrete local-commit, merge, push, and PR effects.
+- **Native clarification and Classic context settings**: New Native projects now default to batch clarification, while rc1 project templates enable beta Classic context compression; artifact language, review mode, auto-transition, and memory/knowledge policies remain explicit project configuration.
+- **Classic Build and workflow dispatch**: Classic plan creation and self-review stay with `writing-plans`, the main session collects execution, TDD, and review choices together, and `/comet` can load the configured phase and preset Skills when continuing a workflow on a supported host.
+- **Classic Superpowers dependency installation**: `comet init` and `comet update` now install and refresh the functional Superpowers Skills without adding the user-level `using-superpowers` bootstrap Skill; existing user-owned copies are preserved.
+- **Workflow context integration**: Native, Classic, and workflow resolution can request the same bounded Personal Memory and Project Knowledge context, record lifecycle outcomes, and keep context injection best-effort without changing workflow state ownership.
+- **Dashboard memory and knowledge experience**: Dashboard records, source files, Markdown/JSON/YAML previews, provider settings, application history, diagnostics, and project controls now use compact toolbars, stable loading states, internal scrolling, fullscreen/restore dialogs, and aligned desktop geometry.
+- **CodeGraph diagnostics**: `comet init` and `comet doctor` now report CLI installation, project index freshness, MCP registration, and effective Agent capability as separate states.
+- **Native status and verification copy**: CLI, reports, and Dashboard explain independent verification, automatic checks, required confirmation, child progress, integration evidence, and next actions in user-facing terms while retaining stable machine status values.
+
+### Fixed
+
+- **Windows Hook launch**: Claude Code now runs the Comet Hook Router and Classic branch-binding probes without transient command-window flashes on Windows, while preserving and migrating existing managed Hooks safely.
+- **Native Supervisor coordination choice**: Comet now requires an explicit multi-session or single-session choice before confirming a Supervisor Change with multiple independent children, so a generic confirmation cannot silently skip the collaboration decision.
+- **Memory and Project Knowledge consistency**: Fixed stale Remote configuration, stale or deleted source injection, local index recovery, WAL handling, provider result merging, correction preservation, permanent-forget tombstones, duplicate management reads, and background Reflection timing.
+- **Native Supervisor recovery**: Fixed ambiguous parent discovery, stale continuation decisions, task-binding protection, integration identity checks, persistent recovery state, portable workspace projection, and final verification evidence handling.
+- **Native Portable compatibility**: `comet status` now reads valid Native v4 Portable State changes, including large documents, paginated details, Supervisor summaries, and explicit project-root routing.
+- **Native requirement and Archive recovery**: User-visible requirement changes now return Archive-ready changes to Shape and invalidate stale verification; interrupted workspace/archive operations retain actionable recovery state and do not silently reuse an unverifiable pass.
+- **Windows and cross-platform execution**: Common command shims and concurrent snapshot/workspace operations now behave reliably on Windows, while packaged Dashboard/runtime assets remain stable across platform path and formatting differences.
+- **Classic workflow recovery**: Fixed missing project context in workspace preparation/resolution, Build plan offload fallback, phase-aware Skill/Rule contract drift, and verification repairs that previously left implementation work in the wrong phase.
+- **Dashboard project and UI state**: Fixed monorepo subdirectory discovery, stale worktree/index sources, long project name visibility, project selector and header alignment, empty/loading transitions, repeated Project Knowledge source reads, sidebar brand title clipping, source preview state, collapsed-sidebar overflow, modal controls, and misleading Personal Memory notices.
+- **Issue triage fallback**: Issues without a recognized form area now infer a unique repository area from their title and body; ambiguous reports remain marked for manual triage.
+
+### Removed
+
+- **Legacy Native verification bookkeeping**: New Native changes no longer expose the old project-wide scan, checkpoint, check, evidence, and receipt command chain; legacy active changes migrate conservatively and archived legacy changes remain read-only.
+
+## What's Changed [0.4.0-beta.19] - 2026-08-21
+
+### Added
+
+- **Grok platform support**: `comet init`, `comet update`, `comet doctor`, and `comet uninstall` now treat Grok as a first-class host. Skills, rules, and the Hook Router live under `.grok/skills/`, `.grok/rules/`, and `.grok/hooks/comet.json`. The Router recognizes `--platform grok` and matches Grok's native `write` / `search_replace` tools.
+- **Repository-owned Native pull-request finish providers**: Projects can opt into a structured repository command for PR title, body, template, and policy validation while Comet retains commit, push, remote base/head/SHA verification, existing-PR reuse, recoverable failure state, and safe worktree cleanup.
+- **CodeBuddy rules support**: Comet now installs and refreshes Markdown workflow rules in CodeBuddy's `.codebuddy/rules/` directory.
+- **On-demand change review**: The new `/comet-review` Skill reviews the current Native or Classic change against its implementation diff and existing evidence, reports prioritized correctness, security, edge-case, and coverage findings, and remains read-only without advancing or replacing Verify.
+- **Fork pull request guidance**: First-time contributors opening pull requests from forks now receive the repository guidance comment through a trusted workflow.
+- **Pull request template validation**: Pull requests now receive an actionable comment and a failing check when required template sections or items are missing, or when checklist items are incomplete.
+- **Issue triage labels**: New issues are automatically marked for triage and assigned a repository area label from their structured issue form selection.
+
+### Changed
+
+- **Hook allow-path documentation**: The website now explains how to configure project-relative `hook.allow_paths` directories for guarded workflow phases.
+- **Native child plans**: New Supervisor Change child plans keep a readable parent acceptance index, while Runtime verification still retains the complete brief-and-Spec acceptance matrix; historical child-plan files remain compatible.
+- **Dashboard artifact previews**: Fullscreen previews now close with Escape, keep long tables horizontally scrollable, preserve readable table headers, and use a larger directory navigation scale.
+- **Native source requirements**: Files and links supplied as requirement sources now retain a complete coverage map in the Native brief, map every active executable requirement to both the target Spec and acceptance criteria, and keep incomplete or unavailable sources blocked for clarification.
+- **Native verification decisions**: Native await-user continuations now let users accept the current result, revise the implementation, or revise requirements and acceptance criteria while invalidating stale Archive authorization from older goal cycles.
+- **Pull request title scopes**: Conventional PR titles now support Native, Classic, Hook, Dashboard, Platform, Workflow, Eval, and other repository areas, including titles such as `feat(native): ...`.
+- **Ambient Resume non-Comet skill exemption**: The managed Ambient Resume instructions in `AGENTS.md` and `CLAUDE.md` now exempt explicitly invoked non-Comet skills and slash commands from the resume probe, so unrelated plugin or tooling setup tasks no longer begin with a `comet resume-probe` call. Existing projects pick up the revised block through `comet update`.
+
+### Fixed
+
+- **Windows init reliability**: `comet init` no longer aborts OpenSpec and Skills installation with "Contained atomic write temporary file changed before commit" on file systems without stable file identities, such as exFAT or FAT32 removable and network drives. The commit-time integrity check compared the temporary file against its pre-write snapshot, so comet's own write looked like tampering; it now compares against the post-write snapshot while symlink and directory-displacement detection are unchanged.
+- **Classic design handoff refresh after Spec Patch**: Running `comet handoff <change> design --write` after OpenSpec artifacts changed no longer fails with a stale-handoff error, so the design guard can pass and the Classic full workflow proceeds from Design to Build. Refreshing now rewrites stale context files even when a manually aligned hash would otherwise short-circuit success, regenerates the context pack when OpenSpec delta specs are added, changed, or removed, and remains available after the guard has advanced the phase to build.
+- **Classic Ambient Resume**: `comet init` and `comet update` now keep the managed Ambient Resume instructions for Classic-only projects when `ambient_resume` is enabled, so re-running the commands no longer removes the block from `AGENTS.md` or `CLAUDE.md`.
+- **Classic workspace command context**: `comet classic workspace prepare` and `comet classic workspace resolve` no longer fail with "Classic command project context is unavailable" for every isolation mode (`current`, `branch`, `worktree`), fixing the workspace preparation step of the Classic Open flow.
+- **Native Archive**: Archive now respects Git ignore rules when staging workspace artifacts and keeps valid portable verification reports from being treated as incomplete migrations.
+- **Windows Eval packaging**: Packaging no longer traverses ignored pytest and Eval runtime artifacts before applying the package boundary, so stale Windows test directories cannot make `pnpm pack` fail with `EPERM`.
+- **Windows Eval isolation**: Repeated `comet eval` runs no longer copy generated `.comet` caches, run artifacts, or the framework's own Runtime state into Skill workspaces, preventing nested-cache and deep-path `MAX_PATH` failures on Windows.
+- **Monorepo Dashboard workspaces**: Starting `comet dashboard` from a monorepo subdirectory that holds `.comet/config.yaml` now uses that subdirectory as the workspace root and maps sibling Git worktrees to the same subdirectory, so the change list is no longer empty when the Comet project root is not the worktree root.
+- **Ambient Resume mid-flow replies**: Agents following the installed Ambient Resume instructions no longer stall a running Comet change after the user answers an in-flow question with a short option pick. The managed block now exempts replies to questions asked inside a Comet flow from the resume probe and clarifies that an `out_of_scope` result only blocks entering a workflow, never continuing one already in progress.
+- **Windows stdin and file JSON parsing**: Runtime commands now strip a leading UTF-8 BOM before parsing JSON, so `comet-intent.mjs route --stdin` no longer fails with "Invalid JSON" when the frame JSON comes from Windows PowerShell 5.1 redirection or `Out-File`, which emit BOM-prefixed UTF-8 by default. The same tolerance covers `comet-resume-probe.mjs --stdin`, Hook payload parsing in `comet-hook-guard.mjs` and the Hook Router, and Native `evidence format` entries read from stdin or `--entries` files.
+- **Classic record-check step sync**: `comet state record-check` no longer fails with "Classic Run step mismatch" after the agent checks off the final tasks.md entry during Build. Checking off tasks advances the evidence-derived Run step without running a state command, which legitimately left the recorded step behind; record-check now re-syncs the Run projection before recording the check (printing a `[RECONCILED] currentStep ... -> ...` line and appending a trajectory transition) instead of blocking Build evidence, while genuine corruption — skill identity, snapshot, or migration marker mismatch — still fails hard.
+- **Classic Build plan offload**: The Build Step 1 plan-writing subagent no longer routinely degrades to the main session (#345). The dispatch prompt now tells the subagent to skip interactive skill steps such as the `writing-plans` Execution Handoff question, the full plan path is fixed by the main session before dispatch, and the subagent must end its reply with a `PLAN_PATH:` line that the coordinator reads first. Subagents without the Skill tool fail fast with `SKILL_UNAVAILABLE` instead of grinding, plans are scoped to tasks.md, and after any dispatch failure later Step 1 entries in the same session go inline directly.
+
+## What's Changed [0.4.0-beta.18] - 2026-08-13
+
+### Added
+
+- **Standalone Skill evaluation**: `comet eval ./my-skill` now evaluates any local Skill without depending on `comet-any`, supports project-authored or automatically generated tasks, offline `--collect`, independent subject and LLM-as-judge model/API routing, and explicitly installed custom Agent adapters.
+- **Selectable evaluation agents**: `comet eval` can now run the subject, user simulator, and optional Judge with Claude Code, Codex, Qoder, or CodeBuddy, selected from the CLI or eval manifest while keeping Claude Code as the default.
+- **Project-authored evaluation tasks**: Skills can now declare inline deterministic tasks or reuse package-local task definitions from `evaluation.tasks` in `comet/eval.yaml`.
+- **Automatic evaluation tasks**: A taskless Skill evaluation now generates a bounded, hash-cached task set on the first normal run while keeping `--quick` and cache-only `--collect` available for smoke and discovery workflows.
+- **Langfuse evaluation suite**: `comet eval --suite langfuse` now reports task traces, rubric scores, pass metrics, and experiment summaries to Langfuse, automatically provisions pinned official Claude Code/Codex plugins in an isolated cache, and captures Qoder/CodeBuddy transcripts without changing local scoring.
+- **Native Supervisor Change mode**: The Native Skill now recognizes large requests that benefit from independent acceptance, proposes a named child graph during the Supervisor Change Shape confirmation, automatically dispatches ready children with a serial fallback, merges them into the Supervisor Change branch in order, and verifies the final integrated result against the Supervisor Change acceptance criteria.
+- **Worktree-aware Dashboard changes**: The Dashboard now discovers Classic and Native changes across every registered Git worktree, keeps independent changes as separate root entries, and groups explicit child changes under expandable Supervisor Changes while preserving the existing detail workspace.
+- **WorkBuddy platform support**: `comet init` and `comet update` now install and refresh Comet Skills in project `.workbuddy/skills/` or user `~/.workbuddy/skills/`, and project installs merge the Comet Hook into `.workbuddy/settings.json` while preserving existing settings.
+
+### Changed
+
+- **User-level Eval configuration**: Published `comet eval` users can now configure separate Bench and LLM-as-judge credentials, endpoints, model names, and other Eval environment settings in `~/.comet/eval/.env` (or the Windows user-equivalent path), without editing the installed package or repository. A missing file is created automatically as a complete commented template and is never overwritten. Agent keys remain container-local and are never written into published assets or reports.
+- **CodeBuddy custom model routing**: CodeBuddy Eval runs now use the CLI's native API key, endpoint, model, and model-role settings, while keeping the host `models.json` and login directory outside the container.
+- **Project-local Hook write allowlist**: Projects can now configure project-relative directories under `hook.allow_paths` in `.comet/config.yaml` for shared rules or notes that must remain writable during guarded Native Shape or Classic non-coding phases, while Comet Runtime and workflow-owned artifacts remain protected. The Hook itself does not block writes outside the project, so external paths do not need to be listed.
+- **Classic workspace routing**: Classic changes now choose and prepare their current branch or Worktree during Open, reuse matching registered Worktrees, and route resume/select operations to the aligned workspace.
+- **Native workspace reuse**: Native parallel changes now reuse an existing linked Worktree for their change branch and recreate a missing Worktree when the branch remains available.
+
+### Fixed
+
+- **macOS packaged Hook Router**: Installed Comet packages now execute the Hook Router correctly from macOS temporary paths, including paths that resolve through `/var` symlinks.
+- **Classic Guard project-root resolution**: Classic design guards now enumerate delta specs from the discovered project root even when invoked from a nested working directory.
+- **Classic OpenSpec version passthrough**: `comet classic openspec -- --version` now routes through the Classic facade before top-level CLI option parsing, so `/comet-open` compares the OpenSpec CLI version instead of Comet's own version.
+- **Codex OpenSpec skills with OpenSpec 1.8**: `comet init` and `comet update` now read OpenSpec 1.8's `.agents` Codex skill output (keeping `.codex` as a legacy fallback for OpenSpec 1.7 and earlier), so project OpenSpec skills are refreshed to the installed CLI version instead of being reported as installed while staying stale. A missing or empty staged tool output now fails the OpenSpec update with a clear reason instead of silently reporting success.
+
+### Security
+
+- **Dependency security updates**: Updated DOMPurify, Mermaid, and Nanoid to patched releases to address reported XSS, denial-of-service, prototype-pollution, CSS-injection, and resource-exhaustion vulnerabilities.
+
+## What's Changed [0.4.0-beta.17] - 2026-08-10
+
+### Added
+
+- **Independent Native verification**: After a Builder submits a candidate, Comet runs the declared local checks and coordinates a fresh read-only Verifier over every acceptance item. Failed items return to Build through a bounded loop; the packaged Skill-coordinated flow requires one explicit user confirmation before Archive.
+- **Trae Hook support**: `comet init`, `comet update`, `comet doctor`, and `comet uninstall` now support managed Hook Router entries for Trae and Trae CN, using Trae's official project and global `hooks.json` locations while preserving user-owned Hook configuration.
+
+### Changed
+
+- **Faster Native completion loop**: New Native changes no longer scan or fingerprint the project during Verify, create per-item receipts, or repeat checks during Archive. Each normal check runs once, stdout and stderr stream to local logs, and long Maven, Gradle, npm, or Python output no longer invalidates an otherwise valid result.
+- **Portable Native recovery**: `comet-state.yaml` now records the stable phase, loop, handoff, blockers, checks, and verification summary needed by a new Agent on another synchronized device. `verification.md` is a rebuildable user report, while in-flight execution and logs remain device-local.
+- **Native Dashboard workflow view**: Native details now show Build/Verify stage, iteration, attempt, acceptance outcomes, checks, blockers, and compact history directly from portable state; archived legacy changes remain available through a read-only adapter.
+- **Native artifact previews**: Native details now preview the portable `comet-state.yaml`, brief, complete target Specs, and generated verification report while keeping machine-only Runtime files out of the artifact list.
+- **Native clarification and workspace flow**: Batch clarification is now the default for new projects, dependent decisions are mapped before asking, and branch/worktree changes keep structured creation, discovery, recovery, and authorized finish actions.
+- **Native command guidance**: Public commands and bilingual Skills now keep normal progression on Runtime continuation, explain the bounded Build/Verify loop, and load workspace, command-exception, or recovery details only when needed without exposing machine-only state files.
+- **Codex Skill invocation policy**: User-facing phase and preset Skills now include display metadata and require explicit invocation, while permanent workflow entry Skills remain available for model routing.
+
+### Fixed
+
+- **Native worktree and recovery routing**: Commands keep linked worktrees authoritative, discover portable changes across registered worktrees, reject migration from the wrong checkout, and resume interrupted Archive steps without silently reusing an unverifiable pass.
+- **Cross-platform Native checks**: Windows projects can run common command shims such as npm and pnpm without shell-specific failures, while timed-out checks are stopped as a process tree instead of leaving child processes behind.
+- **Workflow isolation and references**: Legacy global Hooks remain neutral outside the active project, and Classic-only reference documents stay scoped to Classic installations.
 - **Doctor Superpowers detection**: `comet doctor` now recognizes Claude Code plugin-managed Superpowers installs, so users with Superpowers under the plugin cache no longer receive a misleading install warning.
+
+### Removed
+
+- **Native verification bookkeeping**: New Native changes no longer expose the old project-wide scan settings or public checkpoint/check/evidence/receipt command chain. Legacy active changes migrate conservatively, and archived legacy changes remain read-only.
 
 ## What's Changed [0.4.0-beta.16] - 2026-08-05
 

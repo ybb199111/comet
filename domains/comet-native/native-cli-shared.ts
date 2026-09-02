@@ -1,6 +1,15 @@
 import path from 'path';
+import { realpathSync } from 'fs';
 
 import { RaceSafeReadError, readFileRaceSafe } from '../../platform/fs/race-safe-read.js';
+import { stripUtf8Bom } from '../../platform/fs/strip-bom.js';
+import { inspectGitWorktree } from '../../platform/paths/git-worktree.js';
+import {
+  CLI_OUTPUT_MARKERS,
+  formatCliErrorEnvelope,
+  formatCliOutputEnvelope,
+  type CliOutputEnvelope,
+} from '../workflow-contract/output-envelope.js';
 
 import { NativeArchivePreflightError, NativeSpecConflictError } from './native-archive.js';
 import {
@@ -10,9 +19,12 @@ import {
 } from './native-change.js';
 import { discoverNativeProject, nativeProjectPaths } from './native-paths.js';
 import { readProjectConfig, resolveNativeProject } from './native-config.js';
+import { deriveNativeOutputEnvelope, nativeErrorEnvelope } from './native-output-language.js';
 import { NativeReceiptScopeStaleError } from './native-receipt-errors.js';
 import { NativeVerificationReceiptBindingError } from './native-verification-runtime.js';
+import { NativeWorkspacePreparationError } from './native-workspace-preparation.js';
 import type { CometProjectConfig, NativeProjectPaths } from './native-types.js';
+export { USAGE } from './native-cli-help.js';
 
 export interface NativeCommandResult {
   exitCode: number;
@@ -29,6 +41,7 @@ export interface NativeCliErrorShape {
     | 'internal'
     | 'baseline-incomplete'
     | 'workspace-isolation-required'
+    | 'workspace-preparation-incomplete'
     | 'implementation-scope-stale';
   message: string;
 }
@@ -39,35 +52,16 @@ export interface DispatchResult {
   data?: unknown;
   text?: string;
   error?: NativeCliErrorShape;
+  /**
+   * Audience-split output envelope. When present it replaces `text` as the
+   * default human/agent story; `data` remains the machine projection.
+   */
+  envelope?: CliOutputEnvelope;
 }
 
 export const NATIVE_SHOW_MAX_SERIALIZED_BYTES = 10 * 1024 * 1024;
 
 export class NativeUsageError extends Error {}
-
-export const USAGE = `Usage: comet native <command> [options]
-
-Commands:
-  hook-guard [--hook-output copilot]
-  init [--root <artifact-root>] [--language en|zh-CN]
-  root show
-  root move <artifact-root>
-  new <change-name> [--language en|zh-CN] [--isolation current|branch|worktree] [--change-branch <branch>] [--target-branch <branch>]
-  spec remove <change-name> <capability>
-  spec rebase <change-name> --summary <text>
-  show <change-name>
-  status [<change-name>] [--cursor <token>] [--details [--acceptance-cursor <token>]]
-  select <change-name>
-  checkpoint <change-name> --summary <text> --next-action <text> [--artifact <project-relative>] [--expect-revision <n>]
-  check <change-name>
-  evidence format [--entries <path>]
-  receipt manual <change-name> --acceptance <id> --step <text> --observation <text>
-  receipt automated <change-name> --acceptance <id> [--timeout-ms <n>] -- <executable> [args...]
-  next <change-name> --summary <text> [--confirmed] [--artifact <path>] [--no-code-reason <text>] [--allow-partial-scope <sha256> --partial-reason <text>] [--result pass|fail] [--report <path>] [--override-repair <sha256> --override-summary <text>]
-  archive <change-name> --dry-run [--finish merge|push|pull-request|keep]
-  archive <change-name> --expect-preflight <sha256> [--confirmed]
-  doctor [<change-name>] [--repair] [--strategy continue|rollback]
-`;
 
 export function takeFlag(args: string[], name: string): boolean {
   const indexes = args.flatMap((value, index) => (value === name ? [index] : []));
@@ -134,8 +128,61 @@ export function revisionOption(args: string[]): number | undefined {
   return Number(value);
 }
 
+function samePath(left: string, right: string): boolean {
+  const normalizedLeft = path.normalize(pathIdentity(left));
+  const normalizedRight = path.normalize(pathIdentity(right));
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function pathIdentity(value: string): string {
+  const resolved = path.resolve(value);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/**
+ * Resolve the project root for a Native invocation without allowing a host
+ * process already running inside a linked worktree to silently fall back to
+ * the primary checkout. The primary checkout may still explicitly target a
+ * secondary worktree; this only makes the current secondary worktree
+ * authoritative when it is the process context.
+ */
+function explicitProjectRootFromCurrentWorktree(explicit: string): string {
+  const requested = path.resolve(explicit);
+  const current = inspectGitWorktree(process.cwd());
+  if (
+    !current.isSecondaryWorktree ||
+    current.currentWorktreeRoot === null ||
+    current.primaryWorktreeRoot === null
+  ) {
+    return requested;
+  }
+
+  const requestedContext = inspectGitWorktree(requested);
+  if (
+    !requestedContext.isGitWorktree ||
+    requestedContext.currentWorktreeRoot === null ||
+    requestedContext.primaryWorktreeRoot === null ||
+    !samePath(current.primaryWorktreeRoot, requestedContext.primaryWorktreeRoot) ||
+    samePath(current.currentWorktreeRoot, requestedContext.currentWorktreeRoot)
+  ) {
+    return requested;
+  }
+
+  return samePath(process.cwd(), current.currentWorktreeRoot)
+    ? path.resolve(process.cwd())
+    : current.currentWorktreeRoot;
+}
+
 export async function projectRootFrom(explicit: string | undefined): Promise<string> {
-  return explicit ? path.resolve(explicit) : discoverNativeProject(process.cwd());
+  return explicit
+    ? explicitProjectRootFromCurrentWorktree(explicit)
+    : discoverNativeProject(process.cwd());
 }
 
 export async function configuredPaths(projectRoot: string): Promise<{
@@ -154,8 +201,12 @@ export async function doctorPaths(projectRoot: string): Promise<NativeProjectPat
   return nativeProjectPaths(projectRoot, config?.native.artifact_root ?? 'docs');
 }
 
+function jsonProjection(data: unknown): string {
+  return JSON.stringify(data, null, 2) + '\n';
+}
+
 export function success(command: string, data: unknown, text?: string): DispatchResult {
-  return { command, exitCode: 0, data, text: text ?? JSON.stringify(data, null, 2) + '\n' };
+  return { command, exitCode: 0, data, text: text ?? jsonProjection(data) };
 }
 
 export async function readBoundedEvidenceFile(filePath: string, maxBytes: number): Promise<string> {
@@ -163,7 +214,7 @@ export async function readBoundedEvidenceFile(filePath: string, maxBytes: number
     const { bytes } = await readFileRaceSafe(filePath, maxBytes, {
       label: 'Acceptance evidence entries file',
     });
-    return bytes.toString('utf8');
+    return stripUtf8Bom(bytes.toString('utf8'));
   } catch (error) {
     if (error instanceof RaceSafeReadError) {
       if (error.reason === 'not-regular-file') {
@@ -195,10 +246,10 @@ export async function readBoundedEvidenceStdin(maxBytes: number): Promise<string
     }
     chunks.push(buffer);
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return stripUtf8Bom(Buffer.concat(chunks).toString('utf8'));
 }
 
-export function errorResult(command: string | null, error: unknown): DispatchResult {
+function rawErrorResult(command: string | null, error: unknown): DispatchResult {
   if (error instanceof NativeUsageError) {
     return {
       command,
@@ -250,6 +301,14 @@ export function errorResult(command: string | null, error: unknown): DispatchRes
         requiredAction: 'create-native-worktree',
       },
       error: { code: 'workspace-isolation-required', message: error.message },
+    };
+  }
+  if (error instanceof NativeWorkspacePreparationError) {
+    return {
+      command,
+      exitCode: 73,
+      data: { preparation: error.preparation },
+      error: { code: 'workspace-preparation-incomplete', message: error.message },
     };
   }
   if (error instanceof NativeBaselineIncompleteError) {
@@ -323,7 +382,24 @@ export function errorResult(command: string | null, error: unknown): DispatchRes
   };
 }
 
-export function render(result: DispatchResult, json: boolean): NativeCommandResult {
+export function errorResult(command: string | null, error: unknown): DispatchResult {
+  const result = rawErrorResult(command, error);
+  const errorShape = result.error;
+  if (!errorShape) return result;
+  const envelope = nativeErrorEnvelope({
+    code: errorShape.code,
+    message: errorShape.message,
+    data: result.data,
+  });
+  return envelope ? { ...result, envelope } : result;
+}
+
+export function render(
+  result: DispatchResult,
+  json: boolean,
+  verbose = false,
+): NativeCommandResult {
+  const envelope = result.envelope ?? deriveNativeOutputEnvelope(result.data);
   if (json) {
     return {
       exitCode: result.exitCode,
@@ -331,13 +407,44 @@ export function render(result: DispatchResult, json: boolean): NativeCommandResu
         JSON.stringify({
           command: result.command,
           exitCode: result.exitCode,
+          ...(envelope === undefined
+            ? {}
+            : {
+                summary: envelope.summary,
+                ...(envelope.next === undefined ? {} : { next: envelope.next }),
+                ...(envelope.user_message === undefined
+                  ? {}
+                  : { user_message: envelope.user_message }),
+              }),
           ...(result.data === undefined ? {} : { data: result.data }),
           ...(result.error === undefined ? {} : { error: result.error }),
         }) + '\n',
     };
   }
   if (result.error) {
-    return { exitCode: result.exitCode, stderr: result.error.message };
+    return {
+      exitCode: result.exitCode,
+      stderr: envelope
+        ? formatCliErrorEnvelope(envelope, result.error.message, verbose ? result.data : undefined)
+        : result.error.message,
+    };
+  }
+  if (envelope) {
+    return {
+      exitCode: result.exitCode,
+      stdout: formatCliOutputEnvelope(envelope, verbose ? result.data : undefined),
+    };
+  }
+  if (
+    verbose &&
+    result.text !== undefined &&
+    result.data !== undefined &&
+    result.text !== jsonProjection(result.data)
+  ) {
+    return {
+      exitCode: result.exitCode,
+      stdout: `${result.text}\n${CLI_OUTPUT_MARKERS.details}\n${JSON.stringify(result.data, null, 2)}\n`,
+    };
   }
   return { exitCode: result.exitCode, stdout: result.text };
 }

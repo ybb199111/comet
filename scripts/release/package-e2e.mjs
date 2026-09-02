@@ -22,6 +22,7 @@ const requiredPackageFiles = [
   'bin/comet.js',
   'bin/fast-runtime-router.js',
   'dist/app/cli/index.js',
+  'eval/schemas/comet.eval/v1alpha1.schema.json',
   'scripts/install/postinstall.js',
 ];
 const requiredNativeInstallFiles = [
@@ -91,11 +92,19 @@ async function main() {
       ),
     );
 
-    const packOutput = run(
-      'npm',
-      ['pack', '--json', '--ignore-scripts=true', '--pack-destination', packageDir],
-      { env: { ...process.env, npm_config_ignore_scripts: 'true' } },
-    );
+    // npm pack runs with --ignore-scripts, so drive the npm README transform
+    // manually around it to exercise the exact tarball npm publish would ship.
+    run(process.execPath, ['scripts/release/npm-readme.mjs', 'apply']);
+    let packOutput;
+    try {
+      packOutput = run(
+        'npm',
+        ['pack', '--json', '--ignore-scripts=true', '--pack-destination', packageDir],
+        { env: { ...process.env, npm_config_ignore_scripts: 'true' } },
+      );
+    } finally {
+      run(process.execPath, ['scripts/release/npm-readme.mjs', 'restore']);
+    }
     const [packed] = parseJsonPayload(packOutput);
     if (!packed?.filename || !Array.isArray(packed.files)) {
       throw new Error(`npm pack returned an unexpected payload:\n${packOutput}`);
@@ -128,6 +137,18 @@ async function main() {
       env: environment,
     });
     await assertFile(cli, 'Installed Comet CLI');
+
+    const packedReadme = await fs.readFile(path.join(packageRoot, 'README.md'), 'utf8');
+    if (/!\[[^\]]*\]\(img\/[a-z0-9-]+\.mp4\)/u.test(packedReadme)) {
+      throw new Error(
+        'Packed README still embeds relative mp4 videos; npmjs.com would render them as broken images.',
+      );
+    }
+    for (const preview of ['supervisor-codex-preview.png', 'supervisor-claude-code-preview.png']) {
+      if (!packedReadme.includes(preview)) {
+        throw new Error(`Packed README is missing the npm preview image: ${preview}`);
+      }
+    }
 
     const version = run(process.execPath, [cli, '--version'], {
       cwd: consumerDir,
@@ -284,7 +305,7 @@ async function main() {
     );
     if (
       hookDecision.permissionDecision !== 'deny' ||
-      !String(hookDecision.permissionDecisionReason).includes('only allowed in build')
+      !String(hookDecision.permissionDecisionReason).toLowerCase().includes('only allowed in build')
     ) {
       throw new Error(
         `Installed Hook Router did not block a Shape write: ${JSON.stringify(hookDecision)}`,

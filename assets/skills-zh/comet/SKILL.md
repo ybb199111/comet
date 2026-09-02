@@ -1,6 +1,6 @@
 ---
 name: comet
-description: "当用户明确调用 /comet，或明确要求使用 Comet 但未指定 Native/Classic 时使用；首次使用会按全局默认配置激活项目，之后按项目配置加载一个永久入口。"
+description: "Comet 工作流入口。当用户明确调用 /comet，或明确要求使用 Comet 但未指定 Native/Classic 时使用；解析项目配置并加载唯一入口。"
 ---
 
 # Comet 入口
@@ -22,5 +22,9 @@ description: "当用户明确调用 /comet，或明确要求使用 Comet 但未�
     - `/comet-classic` → **立即执行：** 使用 Skill 工具加载 `comet-classic` 技能。禁止跳过此步骤。
 
    技能加载后，把用户原始请求完整交给已加载的入口 Skill，作为该入口的用户输入。
+
+入口只选择 workflow；返回的 Skill 绑定 change 工作区、确定阶段后，再加载任务上下文、个人记忆和项目知识，必要时使用 `comet memory context`。按该 Skill 继续执行。
+
+被选中的入口 Skill 必须使用统一的渐进式上下文协议：先通过 `comet task ... --json` 接收只含摘要、应用原因和稳定 ID 的 Context Manifest；需要正文、来源或验证方式时才增加 `--expand-context "<id>"`。实际采用条目且结果明确后，用返回的 application ID 调用 `--application "<application-id>" --outcome used-successfully|ignored|overridden|corrected|contributed-to-failure` 回写真实结果，不得为未使用内容回写成功。
 
 不根据任务大小、文件数量、活跃 change 或模型判断改选另一套工作流。Native 与 Classic 的 change、状态和产物始终彼此独立。

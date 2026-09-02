@@ -1,219 +1,113 @@
 ---
 name: comet-native
-description: 当用户明确调用 /comet-native、要求启动或恢复 Native change，或入口路由到 Native 时使用；负责澄清需求、读取状态并推动 Shape → Build → Verify → Archive。
+description: "Comet Native 工作流。当用户明确调用 /comet-native、要求启动或恢复 Native change，或入口路由到 Native 时使用。"
 ---
 
 # Comet Native
 
-Native 保存需求、完整目标规格、状态和证据。你负责理解、实现和验证；Runtime 负责状态、边界和恢复。
-
-## 核心规则
-
-从 `.comet/config.yaml` 读取：
-
-- `native.clarification_mode`：默认 `sequential`；
-- `native.archive_confirmation`：默认 `automatic`；
-- `native.max_verify_failures`：默认 `5`。
-
-磁盘中的 config、当前 change 记录、change 状态和正式产物优先于聊天记忆。不要直接编辑 Runtime 管理的状态、证据、锁或事务文件。
-
-Native 主流程不依赖任何外部 Skill。
-
-## CLI 引导
-
-Native Skill 只使用 PATH 中的公开 `comet native <cmd>` CLI；随 Skill 发布的命令 bundle 属于内部安装与 Runtime 资产，不由 Skill 搜索或直接调用。若命令返回 `command not found`、`executable not found` 或 `ENOENT`，停止并说明 Comet CLI 安装不完整；不得搜索 Skill 文件、枚举平台目录或直接调用内部 bundle。
-
-常用命令：
-
-```bash
-comet native status [--json]
-comet native show <change-name>
-comet native select <change-name>
-comet native new <change-name> [--language en|zh-CN] [--isolation current|branch|worktree]
-comet native next <change-name> --summary <text> [--confirmed]
-comet native archive <change-name> --dry-run
-```
+Native 把需求、完整目标规格、当前进度和验收结论保存在项目中。每完成一个阶段都回到 Runtime 读取下一步，当前只处理 Runtime 指定的阶段。CLI 文本先给出面向用户的 `summary` 和唯一 `NEXT:`；需要稳定解析时使用 `--json` 读取新增的 `summary`/`next`/`user_message` Envelope，只有排查机器状态才使用 `--verbose`，并在等待用户决定前先转述 `userCommunication`。
+## 硬性边界
+- 磁盘中的 `.comet/config.yaml`、当前 change、`comet-state.yaml` 和正式产物是工作依据，聊天记忆只作辅助。
+- Runtime 管理工作流状态、本机执行状态、日志、锁和事务；所有阶段推进都通过 PATH 中公开的 `comet native` 命令完成，用户不手工执行这些命令。
+- 命令不可用时报告 Comet 安装不完整并停止。参数和输出以 `comet native <command> --help` 为准。
+- Builder 提交候选，由新的只读 Verifier 作出验收判断；Verifier 的启动方式服从用户选择的推进方式和 Runtime 返回的 `continuation`。
+- Native 主流程由本 Skill 和 Runtime 完成，不依赖任何外部 Skill。
 
 ## 开始或恢复
-
-1. 若项目使用 Git，先读取当前分支与 `git worktree list --porcelain`；对每个安全可访问的工作目录运行只读 `comet native status --project-root <path> --json`。这一步是默认发现流程，不等待用户说“并行”。
-2. 运行当前工作目录的 `comet native status`，结合其他工作目录的结果确认目标 change、所属工作目录和 phase。同名 active change 已存在时，进入其工作目录恢复，不再创建。
-3. 对目标运行 `comet native show <change-name>`；Verify、Archive 或失败后的 Build 再对 status 命令加 `--details` 运行。
-4. 需要更多 acceptance 时，按 `acceptancePage.nextCursor` 分页；findings 被截断时，先处理已返回项，再重新读取。
-5. 进入目标实际所属的工作目录后运行 `comet native select <change-name>`；不要要求用户手动 `cd`。
-
-存在多个合理候选时让用户选择。只有确认所有已发现工作目录中都没有对应 active change 时才创建，并执行下方工作区协议。
-
-只使用配置指定的 Native artifact root。
-
-## 新 change 的工作区协议
-
-并行单位是 change：不同 change 可以位于不同工作目录并行推进；同一个 change 只能由其绑定工作目录中的当前执行上下文写入，不为会话建立长期 lease。
-
-创建前读取当前分支、未提交改动、当前目录中的 active Native change 和已登记 Git worktree。工作方式保留三种：
-
-- `current`：保留当前分支和目录；
-- `branch`：在当前目录创建并切换到 change 分支；
-- `worktree`：创建独立 change 分支和 Git 工作目录，并在其中继续。
-
-选择规则：
-
-- 当前目录干净且所有已发现工作目录都没有其他 active change 时，默认直接使用 `current`，不询问“是否并行”；
-- 当前目录已有未提交改动或其他事实使隔离方式会明显影响用户目录时，一次联合展示 `current / branch / worktree`，说明推荐项、分支名和工作目录；不要拆成“是否并行”等多轮问题；
-- 当前目录已被另一个 active Native change 占用时，披露 `current` 和 `branch` 因 baseline 漂移风险不可用，并直接使用唯一安全的 `worktree`；其他 worktree 中的 active change 不会让本目录的 `current` 或 `branch` 自动失效；
-- 用户可在同一次选择中覆盖默认分支 `comet/<change-name>` 和默认目录 `.worktrees/<change-name>`；路径或分支冲突时停止，不追加随机后缀、不接管不属于该 change 的现有目录。
-
-`branch` 与 `worktree` 都必须在运行 `new`、建立 baseline 之前准备完成。目标分支默认绑定为创建分支或 worktree 时所在的起始分支：
-
+1. 已知 change 名称时，先运行紧凑查询 `comet native status <change-name> --json`；名称未知时才运行 `comet native status --json`，确定目标后再查询该 change。
+2. 只有当前动作需要验收文字、Builder 交接、历史或验证详情时才加 `--details`，并按返回的 `nextPageArgs` 逐页读取；只读取覆盖当前 `scopeIds` 的页面，不在同一步重复读取完整状态。需要编辑或核对正式正文时才运行 `show` 或读取对应 brief/Spec。
+3. active change 已存在时，进入返回的 `workspace.projectRoot` 并 `select`。Runtime 会扫描已登记的 `worktree`，优先返回绑定分支匹配的工作区；只有多个同样匹配的候选才让用户选择。
+4. 没有对应 active change 时才创建，并使用配置指定的产物目录。`comet init` 会按所选 Skill 语言初始化 `native.language`；之后产物跟随项目配置，只有用户明确要求覆盖时才传入 `--language`。
+### 记忆接入
+进入 change 工作区并读取 Runtime 当前 `phase` 后，Agent 自动运行一次：
 ```text
-# current
-comet native new <change-name> --language zh-CN --isolation current
-
-# branch：先创建并切换分支
-comet native new <change-name> --language zh-CN \
-  --isolation branch --change-branch comet/<change-name> --target-branch <起始分支>
-
-# worktree：先创建并进入 .worktrees/<change-name>
-comet native new <change-name> --language zh-CN \
-  --isolation worktree --change-branch comet/<change-name> --target-branch <起始分支>
+comet task <project-root> --task "<用户原始请求>" --phase "<phase>" --session "<本次任务稳定标识>" --json
 ```
+- 只把返回 JSON 的 `text` 加入当前上下文。`manifest`（注入文本中的 `<context_manifest>`）是 Context Manifest，只包含摘要、应用原因和稳定 ID；当前任务需要正文、来源或验证方式时，运行 `comet task <project-root> --task "<用户原始请求>" --phase "<phase>" --session "<同一标识>" --expand-context "<id>" --json`。路径、操作或阶段变化时，以同一 `--session` 和新的 `--path`、`--operation`、`--phase` 重新选择；未变化内容不会重复投递。
+- 若 `<active_policies>` 中包含 `<verification command="...">`，把这些命令加入当前 Verify 的实际检查，并记录真实结果；只有成功执行过的命令才能让对应策略进入强制执行状态。
+- 只有用户明确要求长期记住偏好或项目约定时，才调用 `comet memory remember <project-root> --text "<偏好或约定>" --scope global|project --json` 并立即作为显式记忆生效；没有明确长期要求但出现可跨任务复用的稳定协作方式时，才调用 `comet memory observe <project-root> --text "<协作方式>" --workflow <workflow> --change <change-id> --candidate-key <stable-topic-key> --json`。两者都不得写任务摘要、实现进展、命令输出或测试结果。
+- 实际采用某条上下文后，从 JSON 的 `applications[].applicationId`（Hook 文本中的 `application_id`）取得标识，并在结果明确时运行 `comet task <project-root> --task "<用户原始请求>" --application "<application-id>" --outcome used-successfully|ignored|overridden|corrected|contributed-to-failure --json`；不得为未实际使用的条目回写成功。验证、编译或 linter 失败时直接按诊断修复并重跑。任务结束仍调用 `comet task <project-root> --task "<用户原始请求>" --complete --workflow <workflow> --change <change-id> --json` 记录工作流检查点。命令不可用、没有内容或自动检索失败时继续工作；无 Hook 平台由本 Skill 使用以上同一接口，`comet memory context` 只作为兼容入口。
+### 创建 change
+先确定小写 kebab-case 名称，再按[工作区选择参考](reference/workspace.md)决定使用当前目录、创建分支还是创建 worktree。用户明确说并行、同时处理或多个会话时自动选择 `worktree`，不再询问三种方式。CLI 会在创建 change 前完成分支或 worktree 绑定，复用或重建已登记的 change worktree，维护仓库本地排除规则，核对配置并创建可跨设备恢复的状态。随后进入命令返回的 `preparation.projectRoot`；后续命令不得继续在原目录执行。
+如果准备没有完成，保留已经创建的资源，展示 `preparation` 中的失败原因，并按 Runtime 或用户给出的恢复方向继续。
+## 按需读取
+确认当前阶段（`phase`）后，按当前动作读取必要的参考文件。通常只读一份；Shape 必须读取澄清参考，编辑正式产物时可同时读取产物参考：
 
-创建 worktree 前，把 `.worktrees/` 写入仓库本地 Git exclude（Git common dir 的 `info/exclude`），不得为此修改 tracked `.gitignore`。Agent 必须在新工作目录中自动继续，不把进入目录的操作交给用户。
-
-worktree 必须从已解析的本地目标分支提交创建。源目录有未提交内容时，先归因：可证明与新 change 无关的内容留在原目录；可能属于新 change 且无法从该提交带入时，等待用户决定如何保留，不静默提交、复制或遗漏。目标目录必须从目标分支获得一致配置，或通过公开 `comet native init` 建立合法配置并核对 artifact root、language、clarification、archive、verify 与 snapshot 语义；无法证明一致时停止。不得复制源目录的 `.comet/current-change.json`。
-
-目标配置就绪后、运行 `new` 前，Agent 必须在新工作目录中依次执行：
-
-```bash
-comet doctor --repair --scope project
-comet doctor --scope project --json
-```
-
-只有 Doctor 确认 Hook runtime 为当前版本、该平台恰好存在一个以目标项目为根的 Router，且没有遗留或重复 Comet Hook 时才继续。Agent 自行在新工作目录中执行这些命令，不让用户手动进入目录；不得从源目录复制 `.comet/current-change.json`。若项目配置未从目标分支继承，则先用公开 `comet native init` 按源项目的已核对语义建立配置，再执行上述 Doctor 序列。
-
-worktree 创建只完成部分步骤时立即停止：报告原始错误、目标分支与目标路径、已明确创建的分支/worktree/exclude/config/change 资源，以及可恢复的下一步。只能清理可证明由本次操作新建且删除安全的资源；无法证明归属时保留现场，绝不删除已有或可能属于用户的 worktree、分支与文件。
-
-Runtime 会在 `new` 的同一个 mutation lock 中重新检查当前目录是否已出现 active change。系统默认的 `current` 因竞态返回 `workspace-isolation-required` 时，自动按默认 `worktree` 重新准备并创建；用户明确选择的方式若在执行前失效，停止并重新确认，不擅自换方式。
-
-没有 workspace v3 绑定的旧 active change 保持兼容：不自动生成 worktree、不移动文件、不刷新 baseline；同一旧目录内仍一次只选择一个 change。只有真实 baseline 或 scope 漂移时才按 Runtime 失败关闭，并让用户决定恢复、重建或放弃。
-
-## 按需加载
-
-确认当前 change 和 phase 后，再按需读取一份对应 reference：
-
-- 进入 Shape 时，必须先读取并执行[澄清参考](reference/clarification.md)。不得以“需求看起来明确”为由跳过；完成共享理解确认前，不得修改项目实现或推进到 Build。
-- 需要高级参数、receipt 或 partial scope 命令时，读取[命令参考](reference/commands.md)。
-- 需要编辑 brief、规格或 verification 时，读取[产物参考](reference/artifacts.md)。
-- 出现中断、失效证据、repair stop、冲突、锁或迁移问题时，读取[恢复参考](reference/recovery.md)。
-
+- Shape：必须读取并执行[澄清参考](reference/clarification.md)；
+- 实际编辑 brief/完整目标规格，或查看验收报告时读取[产物参考](reference/artifacts.md)；
+- 正常推进时，直接执行 Runtime 在 `continuation` 中给出的命令。只有返回字段含义不清、命令输入被拒绝、无法启动 Verifier、Verifier 执行报错，或 Verifier 要求用户补充信息时，才读取[命令参考](reference/commands.md)；
+- 只有任务因进程中断、换设备后本机状态缺失、连续多轮没有进展、并发冲突、旧版本迁移失败或状态损坏而无法继续时，才读取[恢复参考](reference/recovery.md)。
 ## Shape
+先调查能够从仓库、工具和运行环境确定的事实；彼此独立的事实可以交给 subagent 调查。按 `native.clarification_mode` 和澄清参考维护决策树，只把会改变用户可见结果、又无法可靠推断的决定交给用户。用户直接提供文件、附件、链接或本地路径作为需求来源时进入源文档完整覆盖模式：完整读取并记录 `complete`、`partial` 或 `unavailable` 状态，分块读取只改变读取顺序和工作记忆管理，不改变最终覆盖集合；`brief.md` 先保存完整来源需求和覆盖状态，再提出歧义、遗漏或隐含边界问题；可执行来源单元必须同时映射到完整目标 Spec 和至少一个验收 ID，背景、非目标或已废止内容只保留归类、理由和替代关系；修正后的旧单元标为 `superseded` 并指向替代单元；`partial`、`unavailable`、未映射或未确认内容保持 `[blocking]`。仅用于排错、取证、审查或实现参考的材料不自动触发，用途不明时先澄清；摘要不能替代来源覆盖映射。
+确认后的用户可见决定和重要约束立即同步到 Decisions、brief 和完整目标规格；普通实现选择只有影响用户可见行为时才进入正式需求。验收项必须具体、可观察且互不重复。Runtime 只从 brief 顶层的验收示例和 Spec 中明确以 `Scenario:` 标出的完整场景生成验收项；说明段落、普通列表和单独的 WHEN/THEN 行不能拆成额外验收项。大型需求需要拆分时，在 Supervisor Change 根目录维护 `children.yaml`；依赖、验收映射和版本兼容规则以产物参考为准。
+大型需求在最终 Shape 确认前执行一次拆分检测：只有至少两个结果可独立实现和验证、每项验收都能明确分配给子任务，并且确实存在先后依赖或并行价值时，才建议使用 Supervisor Change；目标紧密相关、需要反复修改同一核心区域、协调成本更高或用户要求单个 Native Change 时，不进行拆分；需求文字长、任务条目多本身不能触发拆分。
+建议拆分时，Skill 将 `children.yaml` 草案、子任务依赖和先后顺序、每项验收由哪个子任务负责，以及推进方式，一并放入最终 Shape 确认；用户可以调整拆分、继续使用单个 Native Change，或从以下方式中选择其一：
 
-先调查能从仓库、工具和运行环境查明的事实。只有不同选择会实质改变用户可见结果，并且无法从已有要求可靠确定时，才询问用户；实现方式由你决定。
+| 选项 | 推进方式 | 实际影响 |
+| --- | --- | --- |
+| A | 多会话协作（推荐） | 当前会话只负责统筹；优先由独立会话处理当前可执行的子任务，独立会话或 Agent Team 不可用时自动改用 subagent，并持续反馈进度 |
+| B | 单会话推进 | 不创建 Codex 独立会话或 Claude Code Agent Team；全部子任务仍按相同范围、依赖和验收要求，由当前会话依次处理 |
+用户已经明确要求“多个会话”“独立会话”“跨会话协作”或“Agent Team”时，视为选择 A，不重复询问推进方式。确认前不得创建子 change、worktree、Codex 独立会话、Claude Code Agent Team 或分配任务。
+当最终 Shape 已确定为包含两个或更多 Child 的 Supervisor Change 时，必须在 Decisions 中明确记录 Supervisor Change 和每个 Child 条目，并在运行 `--confirmed` 前要求用户在多会话协作和单会话推进中二选一；不得把普通“确认”视为已选择，也不得替用户默认选择。
+确认后，Runtime 把推进方式写入 `comet-state.yaml` 的 `coordination_mode`，再为 Supervisor Change 创建独立的集成分支和 worktree，并基于集成分支的当前提交，为每个子任务生成包含角色、worktree、基线提交和 `runId` 的任务包。推进方式不写入 `children.yaml`，也不改变 Runtime 的 `readyChildren`、`runId`、验收或集成规则。Skill 只启动 `readyChildren` 中列出的当前可执行子任务；选择 A 时最多同时启动两个不依赖其他子任务的任务，选择 B 时按顺序执行。每个子任务的范围都必须来自 Supervisor Change 的确认；出现新的用户可见决定时回到 Supervisor Change 的 Shape。
+恢复 `/comet-native` 时以 Runtime 持久化的 `coordination_mode` 为准，不重复创建已有子任务或 worktree，也不再询问推进方式。`multi-session` 继续使用多会话协作及其 subagent 自动降级；`single-session` 继续由当前会话按顺序推进。原来的 Codex 独立会话或 Claude Code Agent Team 已经不存在时，先重新读取 Runtime；不得根据旧会话或旧团队的状态推断子任务已经完成，也不得自动改为单会话推进。
+未解决问题保持 `[blocking]`；有阻塞项时不修改项目实现。完成标准：所有会影响用户可见结果的选择和未明说的假设均已处理，没有 `[blocking]`，用户明确确认目标、范围、关键决定、验收项和非目标，并且 Runtime 已进入 Build。只有用户明确确认后才使用后续指令中含 `--confirmed` 的命令推进。
 
-按 `clarification_mode` 执行澄清参考。即使初步判断没有未决行为，也必须完成其中的信息分类和静默假设检查。每次用户回答后，立即更新同一个 change 的 Decisions、brief 和完整目标规格。未解决项继续以 `[blocking]` 保存；存在阻塞项时不修改项目实现，也不推进阶段。
-
-所有用户决定处理完后，重新检查是否仍有静默假设，并向用户提供目标、范围、关键决定、验收标准和非目标的共享理解摘要。只有用户明确确认后，才移除最终阻塞项并推进：
-
-```text
-comet native next <change-name> --summary <摘要> --confirmed
-```
-
-brief 或规格改变已确认的行为时，重新取得用户确认；不要手工修改确认状态。
+## Build ↔ Verify Loop
+Build 和 Verify 组成一个有界验收循环（Loop）：Builder 提交候选，Runtime 执行必要检查，再由新的只读 Verifier 验收。验收未通过时回到 Build，完成修改并提交下一轮候选；全部通过时进入 Archive。`iteration` 表示实现候选的轮次，`attempt` 表示同一候选启动 Verifier 的次数。连续失败、没有实际进展或 Verifier 多次执行出错时，Runtime 会在预算上限处进入等待用户或阻塞状态。所有计数都由 Runtime 更新，Agent 只执行最新 `continuation`。
 
 ## Build
 
-实现满足 brief 和完整目标规格的最简单可靠方案。可以分批完成；长任务可使用 checkpoint 保存恢复摘要，但 checkpoint 不是完成证据。
+首次实现时读取当前 brief、完整目标规格和全部验收项。如果 Verify 未通过并返回 Build，先处理 Verifier 指出的未通过项、无法继续验证的问题和失败检查；修复轮以 `previous_unresolved_ids` 与本轮实际影响的验收 ID 为范围，不重复把已经通过且未受影响的场景交给 Verifier。提交前仍核对改动没有破坏其他已确认行为。
+用户确认一次 Supervisor Change 的 Shape，就授权执行所有完全来自该确认范围的子任务，不要求用户重复确认相同范围。Skill 只执行 Runtime 在 `continuation` 中返回的动作，并在每个任务完成后重新读取 `readyChildren`；每个子任务必须经过 `active → verified → integrated`，Supervisor Change 最后仍在集成 worktree 验证全部验收项。
+状态包含 `childSummary` 时，不要运行 Supervisor Change Builder，只处理 Runtime 在 `readyChildren` 中列出的当前可执行子任务和 Supervisor 统筹动作。需要某个子任务的完整状态时再读取详情。Runtime 为每个子任务返回 worktree、集成分支的当前提交、角色、任务包和 `runId`；Builder 与 Verifier 回报必须携带当前 `runId`，重复或迟到的回报一律拒绝。子任务不单独执行 Archive；原先通过 `finish=merge` 完成的合入步骤现由 Runtime 负责。只有经过 `active → verified → integrated` 和最小集成检查才算完成集成；Agent 等执行方报告完成，或 worktree 仍有未提交修改，都不能证明已经集成。
+选择多会话协作时，当前会话只负责分配任务、检查进度、处理阻塞、集成和 Supervisor Change 的最终 Verify，不直接实现子任务。所有需要修改文件的子任务，都把 Runtime 为该子任务创建的 worktree 作为唯一工作目录；不得为同一子任务再创建另一个 worktree，也不得在 Supervisor Change 或其他子任务的 worktree 写入。分配任务时必须说明子任务角色、任务包、worktree、基线提交、`runId`、验收范围、依赖和停止条件。只启动 `readyChildren` 中列出的当前可执行子任务；不得让独立会话中的 Agent 或团队成员自行领取当前还不能开始的子任务。执行期间持续检查各会话，发现实现偏离、权限或环境阻塞、范围歧义或新的用户可见决定时立即反馈并处理，不等全部任务结束才检查。
 
-需求变化时先更新正式产物。出现新的用户决定时保持在 Build，但重新执行 Shape 的澄清与确认边界：保存 `[blocking]`、暂停实现并询问用户。用户确认后，更新 Decisions、brief 和完整目标规格并移除阻塞项；离开 Build 时执行 Runtime 返回的命令并传入 `--confirmed`。
+- 在 Codex 中，如果可以管理用户可见的独立会话，就为每个当前可执行子任务新建一个独立会话，不要只启动当前会话内的 subagent。创建会话时沿用现有项目，不要让 Codex 另外创建 worktree；新会话必须先进入 Runtime 为该子任务创建的 worktree，后续所有文件和 Git 操作只在该目录执行。当前会话保存会话信息，通过等待或读取会话检查进度，并在需要修正或补充信息时发送后续指令。
+- 在 Claude Code 中，如果可以使用 Claude Code Agent Team 且当前为交互式会话，就创建一个 Claude Code Agent Team。当前会话负责统筹，每个当前可执行子任务分配给一个有明确名称的团队成员。团队成员进入 Runtime 为该子任务创建的 worktree；团队任务列表只加入 Runtime 已允许开始的子任务。子任务是否可以开始、是否已经完成，最终以 Runtime 为准。团队成员不得创建新的 Claude Code Agent Team、直接集成父分支或自行扩大范围；当前会话持续读取消息和任务状态并及时引导。
+- 如果 Codex 独立会话或 Claude Code Agent Team 不可用，或者恢复后已经找不到原来的会话或团队，先重新读取 Runtime 并说明原因，然后在 `multi-session` 下自动改用 subagent，不再询问推进方式。尚未派发的任务直接按最新 `readyChildren` 创建任务包；已经派发但失去会话的任务不能被视为完成，先用当前 `runId` 提交 `supervisor-cancel`，再执行最新 `continuation` 取得新任务包和新 `runId` 后派发 subagent，旧执行的迟到结果由 Runtime 拒绝。subagent 也不可用时报告真实执行阻塞；不得自动改为单会话推进。
+全部子任务都进入 `integrated` 后，立即按 Runtime 返回的 `parentAdvance` 继续，并通知用户 Supervisor Change 进入最终 Verify，不要求用户再次说“推进”。最终 Verify 在集成 worktree 检查全部验收项；失败时保留冲突和阻塞现场，不重新打开已经归档或已进入 `integrated` 的子任务；按 `repair-child` 在 v2 `acceptance_index` 中补充实际失败的 Spec 验收文字，追加一个名称唯一的修复子任务，重新确认 Shape 后继续。目标分支在最终交付前保持不变，最终 Archive、工作区收尾、merge、push 和 PR 仍按原授权边界处理。
 
-候选实现完成后，对照完整规格和全部 acceptance 复核是否仍有遗漏，再提供真实项目产物推进：
+需求变化时先判断归属：
 
-```text
-comet native next <change-name> \
-  --summary <摘要> \
-  --artifact <项目内路径> \
-  [--confirmed]
-```
-
-没有代码变化或 Runtime 无法证明完整 scope 时，读取命令参考。不得把未知或不完整范围声明为 complete。
-
-## Completion Loop
-
-进入 Build 后按以下循环收敛：
-
-1. 运行 `comet native status <change-name> --details`，读取当前需要的 acceptance 页；上一轮 Verify 失败时，优先处理 failed/missing acceptance 和 failed check。
-2. 完成一批相关的实际修复。需要中断时可以写 checkpoint，但 checkpoint 不是完成证据。
-3. 形成候选实现后，重新读取 brief、完整规格和全部 acceptance，执行一次完整审查。
-4. 运行真实验证并提交 Verify 结果。
-5. `fail` 回到 Build，从第 1 步继续，且不运行 Archive；`pass` 才进入 Archive。
-
-`blocked` 会暂停正常 Build → Verify 循环并进入恢复分支。处理 findings 后，根据新的 continuation 从第 1 步恢复循环。只有 `done`、`await-user` 或调用方明确要求停止时，才结束当前工作。一次 Agent turn、一次 checkpoint、一次 `blocked` 或 Agent 自述“已完成”都不是终态。Agent 负责发现并修复缺口，Runtime 负责判断是否完成。
+- 当前需求只是实现有遗漏：从 Verify 使用 `--revise-implementation` 保留已确认需求并回到 Build；
+- 用户可见行为或验收标准发生变化：从 Verify 或 Archive-ready 使用 `--revise-requirements`，更新正式产物并重新确认 Shape；
+- 与当前需求无关：保留给另一个 change。
+用户明确补充当前范围时，按同一规则处理。
+候选完成后，先启动一个没有写权限的新复核执行，检查本轮代码改动、相关测试和当前验收范围。发现必要问题时由 Builder 修正并重新复核；通过后记录简短复核摘要和该复核的执行标识。然后按 Runtime 在 `continuation` 中提供的输入模板提交一份精简的 Builder 交接摘要，包括：本轮做了什么、处理了哪些验收项、实际运行或没有运行哪些开发期检查、已知限制，以及 `review.status=passed`、`review.summary`、`review.reviewer_execution_ref`。复核执行标识不能与 Builder 执行标识相同。这份交接摘要保存在 `comet-state.yaml` 中，不会生成单独文件，也不代表已经验收通过。Runtime 会把必要摘要交给 Verifier，Builder 提交一次即可。
+完成标准：实现和相关检查达到可验收状态，完整验收项已重新核对，Runtime 接受交接摘要并进入 Verify。
 
 ## Verify
 
-根据 acceptance、完整目标规格和改动风险运行真实验证。用实际结果完成 `verification.md` 和验收证据；未运行或失败的检查不能写成通过。
-
-使用 Runtime 返回的 acceptance ID 和 receipt。需要生成证据块或记录 automated/manual receipt 时，读取产物与命令参考。
-
-只有 Runtime 接受完整且新鲜的验收矩阵和 required checks 时才能提交 `pass`。相关实现、规格、报告或证据改变后重新验证。
-
-提交 Verify 时只传 `--result` 和 `--report`；`next` 不接受 `--receipt` 或其他调用方提供的 required-check 参数。Runtime 会先校验报告格式、完整验收矩阵和 acceptance receipt，只有这些输入有效后才执行或复用当前 scope 的内置 required check。报告无效时先修正报告，不要反复重试同一个 `next` 命令。
-
-`fail` 会回到 Build。先根据 Runtime 返回的 failed/missing acceptance 和 failed check 修复，再重新验证；不要把再次调用 `next` 当作修复。`repair-stagnation-stop` 由 Agent 按恢复参考提出新假设并使用 Runtime 返回的 override；只有 continuation 要求 `repair-continuation-decision` 时才等待用户选择。
-
-Verify 失败的中间循环不运行 Archive，也不触发归档确认。持续执行 Build → Verify，直到 pass、Runtime 阻塞或需要用户决定。
+Runtime 要求启动 Verifier（`dispatch-verifier`）时，先把当前候选需要运行的测试和检查命令填入 `inputOptions.template`，由 Runtime 统一执行。Runtime 会复用已经完成的检查；是否重试或补充检查，以最新 `continuation` 为准。`verifierDispatch` 携带工作区与证据位置、`scopeIds`、数量、brief/Spec 引用、详情分页参数、复核摘要和检查结果，不直接携带全部验收文字；如果存在 `recoveryContext`，也要原样传给 Verifier，作为最近一次恢复或用户补充的上下文。按详情分页参数读取覆盖 `scopeIds` 的验收场景后，立即启动一个新的只读 Verifier subagent，并原样传递工作区与证据定位信息。subagent 不可用时，只有选择多会话协作且平台可以管理独立会话，才启动与 Builder 分开的独立 Agent 会话；其他情况按命令参考报告 Verifier 不可用，并执行最新 `continuation`。
+Verifier 先读取当前 `scopeIds` 对应的验收场景、brief、完整目标 Spec、实际实现和 Runtime 检查结果，最后再把 Builder 交接摘要当作调查线索，保持验收判断独立。Verifier 保持只读。如果现有检查不足，就在 Runtime 返回的 `inputOptions.template` 中列出还需要运行哪些检查，由 Runtime 执行并把结果返回给 Verifier。
+Verifier 必须把当前 `scopeIds` 中的每个场景恰好标记一次为通过（`passed`）、未通过（`failed`）或暂时无法验证（`blocked`）。修复范围通过后，Runtime 保留已完成检查并准备一次覆盖全部验收场景的新 Verifier；只有这次最终全量验证通过，才允许进入 Archive。未通过或无法验证时，写出下一轮 Build 可直接处理的原因。无法启动 Verifier、Verifier 执行出错或缺少外部信息时，按命令参考和最新 `continuation` 处理。由 Skill 启动的最终 Verifier 通过且 Runtime 等待用户决策时，只有用户接受当前结果才用 `--accept-result` 进入 Archive；如果用户要求修改实现或验收标准，分别使用 `--revise-implementation` 或 `--revise-requirements`。
+完成标准：Runtime 已接受完整的 Verifier 结果，并明确进入 Build、Archive、等待用户（`await-user`）、阻塞（`blocked`）或完成（`done`）中的一种状态。
 
 ## Archive
 
-只有最终 Verify pass 后才准备 Archive。先读取该 change 的 workspace 绑定；旧 workspace 元数据按 `current` 兼容处理。
+只有 `continuation` 允许 Archive 时才继续。Archive 直接使用已经接受的验收结果。`current` 不需要选择工作区收尾方式：展示当前分支和目录，说明不会执行 merge、push 或创建 PR，再按最新 `continuation` 继续。
+使用 `branch` 或 `worktree` 时如果需要选择收尾方式，一次展示实际 change 分支、目标分支和目录，并以单选题提供以下全部选项。文本提问必须使用下表；结构化提问必须将“方式”作为短标签、“实际影响”作为说明，不得只显示 `merge`、`push`、`pull-request` 或 `keep`：
 
-`current` 沿用 `native.archive_confirmation`，不额外询问分支收尾。`branch` 或 `worktree` 必须在 Archive 前一次联合选择：
+| 选项 | 方式 | 实际影响 |
+| --- | --- | --- |
+| A | 仅归档并保留工作区（`keep`） | 完成归档并在 change 分支创建归档提交；不合并、不推送、不创建 PR，保留当前分支和目录 |
+| B | 本地合并（`merge`） | 完成归档并创建归档提交，再把 change 分支本地合并到目标分支；不推送、不创建 PR |
+| C | 归档并推送（`push`） | 完成归档并创建归档提交，再推送 change 分支；不合并到目标分支、不创建 PR |
+| D | 归档、推送并创建 PR（`pull-request`） | 完成归档并创建归档提交，推送 change 分支，再以目标分支作为基础分支创建 PR |
+| E | 暂不归档 | 不执行归档或工作区收尾，保留当前仍在进行的 change 和工作区，等待稍后继续 |
 
-1. 归档并本地合并到已绑定目标分支；
-2. 归档并推送 change 分支；
-3. 归档、推送并创建 PR；
-4. 归档并保留当前分支/工作目录；
-5. 暂不归档。
+用户选择 A、B、C 或 D 后，按 `keep`、`merge`、`push` 或 `pull-request` 的映射执行 Runtime 返回的完整命令；选择 E 后停止。选择 A 表示保留当前分支和目录，同一次归档不得删除该 worktree。其他普通 change 归档后，如有已经归档且没有未提交修改的 change worktree，向用户提供清理选项；Runtime 已清理的无需再次询问。只有用户确认后才执行 `git worktree remove`，存在未提交修改或仍在使用的 worktree 必须保留。
+Supervisor 最终交付后，Runtime 只自动清理确认没有未提交修改且不再使用的子任务 worktree、集成 worktree 及其分支；发现未提交文件、当前进程仍在其中或 Git 步骤未完成时保留现场并返回阻塞原因，绝不强制删除。
+只提交属于当前 change 的实现和正式产物，保留其他用户改动。执行 Runtime 返回的 `commandArgs`，再检查工作区收尾结果 `workspaceFinishResult`；结果为阻塞（`blocked`）时保留现场，并执行 `recoveryArgs` 中的恢复命令。
+完成标准：状态为 `done`，并且用户授权的工作区收尾结果为已完成（`completed`）或已保留（`kept`）；其他结果按 `continuation` 继续。
 
-展示精确 change 分支、目标分支和工作目录；结合目标分支是否本地可用、目录是否干净给出一个推荐。只有用户选择后才执行对应外部 Git 动作；选择“暂不归档”时保留现场并停止。
+## 后续指令
 
-然后预演：
+每次命令后只处理最新的 `continuation`，并按 CLI 输出分层规则处理结果：
+- `continue`：执行 `commandArgs`，并按模板填写 `inputOptions`；
+- `await-user`：先转述 `userCommunication.message` 和 `suggestedReply`（如果存在），等待列出的用户决定；如有 `commandAlternatives`，选择匹配项执行完整 `commandArgs`，保留 `--expected-state-version` 和 `--expected-action`。备选操作已经过期时重新读取最新 `continuation`，不得自行拼出不带状态保护参数的命令；
+- `blocked`：先处理列出的阻塞原因或恢复动作；
+- `done`：结束。
 
-```text
-# current
-comet native archive <change-name> --dry-run
-
-# branch / worktree：把联合选择写入正式 workspace 元数据
-comet native archive <change-name> --dry-run --finish merge|push|pull-request|keep
-```
-
-预演成功后：
-
-- `automatic`：执行 continuation 返回的精确提交命令；
-- `required`：向用户展示实现、验证和规格操作摘要，等待用户选择立即归档或保留 change。
-
-不要复用旧 preflight。发生事实漂移、canonical 冲突或未完成事务时，按 continuation 和恢复参考处理。
-
-Runtime 返回的 `workspaceFinish` 必须与用户选择一致；后续会话从正式 workspace 元数据恢复该决定，不重复例行询问。归档成功后，只暂存并提交已确认 change 归属的实现、规格和 Archive 路径，排除其他用户改动。此前的联合选择授权这一次精确 stage/commit 以及所选收尾动作：
-
-- 本地合并：在已绑定目标分支的工作目录中合并 change 分支，运行与改动风险匹配的合并后验证；成功后删除干净的 change worktree 和已合并本地分支。任何失败都保留分支与工作目录；
-- 推送：推送 change 分支。成功后可删除干净的 change worktree，但保留本地和远端分支；
-- 推送并创建 PR：推送后以 workspace 中持久化的 `targetBranch` 作为 PR base 创建 PR，不使用仓库默认分支推断；成功后按推送方式清理；Native 不持续监控 PR；
-- 保留：提交后保留分支和工作目录，不做合并或推送。
-
-多个 change 独立 Archive；只有更新同一个目标 ref 的本地合并需要串行。合并冲突只有在能机械地保留双方已确认契约时才可解决并重新验证；任何语义冲突都中止合并并询问是否创建新的 integration change，不把某一方静默覆盖。
-
-## Continuation 与停止条件
-
-Shape、Build 和 Verify 的 transition 都会返回 `next: auto | manual`、`continuation.disposition: continue | await-user | blocked | done`、所需输入与下一步动作；Archive 不通过 `next` 推进，归档成功才返回 `done`。每次 transition 后按该 Runtime continuation 行动：
-
-- `continue`：重新读取 phase 和当前所需产物后继续；
-- `await-user`：等待确实需要用户决定或补充的输入；
-- `blocked`：暂停正常循环，处理 findings，必要时读取恢复参考；处理后按新的 continuation 恢复，不因 `blocked` 本身结束任务；
-- `done`：change 已完成。
-
-`next: auto` 只表示本次 transition 成功，不表示后续步骤已执行。调用方明确要求在某次 transition 后停止时，严格按“更新正式产物 → 执行一次允许的 transition → transition 成功后不再调用工具 → 输出约定标记并结束本轮”执行；即使 continuation 为 `continue` 也不得继续执行后续步骤。
-
-旧元数据的 `workspace-root-changed` 与 `workspace-inspection-unavailable` 是只读提示，不单独阻止推进或归档。`workspace-binding-root-changed`、`workspace-branch-changed`、`workspace-kind-changed` 与 `workspace-vcs-unavailable` 表示新绑定失效，必须回到绑定工作目录/分支或停止并走恢复流程。其他未知 workspace 完整性 finding、确定冲突、失效证据和 repair stop 也必须处理；Runtime 要求修复工作区身份时，先运行只读 doctor，再按报告执行显式 `doctor --repair`。
-
-摘要、理由、报告和产物中不得写入 token、密码、私钥、连接串或其他凭据。
+执行会修改状态的命令后，重新运行紧凑状态查询，确认当前阶段、验收循环、状态版本和工作目录；只有当前动作确实需要长字段时才分页读取详情，只有需要正式正文时才运行 `show`。

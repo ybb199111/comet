@@ -6,6 +6,7 @@ import os from 'os';
 import path from 'path';
 import { parse } from 'yaml';
 import { getProjectRegistryPath } from '../../platform/install/project-registry.js';
+import { stageOpenSpecSkills, unquoteWindowsArg } from '../helpers/openspec-test-utils.js';
 
 vi.mock('child_process', () => ({
   execFileSync: vi.fn(),
@@ -48,10 +49,12 @@ async function readManifest() {
 function isNativeInstallSkillPath(skillPath: string): boolean {
   return (
     skillPath === 'comet/SKILL.md' ||
+    skillPath.startsWith('comet-review/') ||
     skillPath === 'comet/scripts/comet-entry-runtime.mjs' ||
     skillPath === 'comet/scripts/comet-hook-router.mjs' ||
     skillPath.startsWith('comet-native/') ||
-    skillPath.startsWith('comet-any/')
+    skillPath.startsWith('comet-any/') ||
+    skillPath.startsWith('comet-memory/')
   );
 }
 
@@ -77,9 +80,13 @@ function mockExternalSuccess(options: { openSpecConfig?: 'healthy' | 'missing' |
       cmdArgs.includes('claude-code')
     ) {
       const cwd = (opts as { cwd?: string } | undefined)?.cwd ?? os.tmpdir();
-      const stagedSkillsDir = path.join(cwd, '.claude', 'skills', 'comet');
+      const stagedSkill = cmdArgs.includes('obra/superpowers') ? 'brainstorming' : 'comet';
+      const stagedSkillsDir = path.join(cwd, '.claude', 'skills', stagedSkill);
       mkdirSync(stagedSkillsDir, { recursive: true });
-      writeFileSync(path.join(stagedSkillsDir, 'SKILL.md'), '# Lingma Comet\n');
+      writeFileSync(
+        path.join(stagedSkillsDir, 'SKILL.md'),
+        stagedSkill === 'brainstorming' ? '# Superpowers\n' : '# Lingma Comet\n',
+      );
       return Buffer.from('installed');
     }
 
@@ -87,17 +94,23 @@ function mockExternalSuccess(options: { openSpecConfig?: 'healthy' | 'missing' |
       return Buffer.from('/usr/bin/openspec');
     }
     if (cmd === 'openspec' && cmdArgs[0] === '--version') {
-      return Buffer.from('1.5.0');
+      return Buffer.from('1.6.0');
     }
     if (cmd === 'openspec' && cmdArgs[0] === 'init') {
-      const targetPath = cmdArgs[1];
+      const targetPath = unquoteWindowsArg(cmdArgs[1]);
       if (targetPath) {
-        const openSpecRoot = path.join(targetPath, 'openspec');
-        mkdirSync(path.join(openSpecRoot, 'changes', 'archive'), { recursive: true });
-        if (openSpecConfig === 'healthy') {
-          writeFileSync(path.join(openSpecRoot, 'config.yaml'), 'schema: spec-driven\n');
-        } else if (openSpecConfig === 'corrupt') {
-          writeFileSync(path.join(openSpecRoot, 'config.yaml'), 'schema: [broken\n');
+        const toolsIndex = cmdArgs.indexOf('--tools');
+        const tools = toolsIndex >= 0 ? cmdArgs[toolsIndex + 1] : undefined;
+        if (tools && tools !== 'none') {
+          stageOpenSpecSkills(targetPath, tools);
+        } else {
+          const openSpecRoot = path.join(targetPath, 'openspec');
+          mkdirSync(path.join(openSpecRoot, 'changes', 'archive'), { recursive: true });
+          if (openSpecConfig === 'healthy') {
+            writeFileSync(path.join(openSpecRoot, 'config.yaml'), 'schema: spec-driven\n');
+          } else if (openSpecConfig === 'corrupt') {
+            writeFileSync(path.join(openSpecRoot, 'config.yaml'), 'schema: [broken\n');
+          }
         }
       }
       return Buffer.from('ok');
@@ -214,6 +227,11 @@ describe('comet init E2E', () => {
     expect(output.codegraph).toMatchObject({
       requested: 'init',
       status: 'index_ready',
+      cliStatus: 'installed',
+      indexStatus: 'current',
+      mcpStatus: expect.any(String),
+      agents: expect.any(Array),
+      effectiveForAgent: expect.any(Object),
       repairable: false,
       remediation: null,
     });
@@ -244,9 +262,14 @@ describe('comet init E2E', () => {
       }),
     );
 
-    expect(output.codegraph).toEqual({
+    expect(output.codegraph).toMatchObject({
       requested: 'skip',
       status: 'skipped',
+      cliStatus: 'skipped',
+      indexStatus: 'skipped',
+      mcpStatus: 'not_detected',
+      agents: [],
+      effectiveForAgent: {},
       repairable: false,
       remediation: null,
       detail: 'CodeGraph setup explicitly skipped',
@@ -345,7 +368,11 @@ describe('comet init E2E', () => {
       const projectConfig = await fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf8');
       expect(projectConfig).toContain('default_workflow: native');
       expect(projectConfig).toContain('artifact_root: docs');
-      expect(projectConfig).toContain('clarification_mode: sequential');
+      expect(projectConfig).toContain('clarification_mode: batch');
+      expect(projectConfig).not.toMatch(/^\s+snapshot:/mu);
+      await expect(fs.readFile(path.join(tmpDir, '.gitignore'), 'utf8')).resolves.toContain(
+        '!/.comet/config.yaml',
+      );
       expect(mockedExecFileSync.mock.calls.some((call) => String(call[0]) === 'openspec')).toBe(
         false,
       );
@@ -478,7 +505,7 @@ describe('comet init E2E', () => {
     expect(config).toContain('default_workflow: native');
     expect(config).toContain('- native');
     expect(config).toContain('- classic');
-    expect(config).toContain('clarification_mode: sequential');
+    expect(config).toContain('clarification_mode: batch');
     await expect(fs.stat(path.join(tmpDir, 'docs', 'comet', 'changes'))).resolves.toBeDefined();
     await expect(fs.stat(path.join(tmpDir, 'docs', 'superpowers', 'specs'))).resolves.toBeDefined();
     await expect(
@@ -492,6 +519,31 @@ describe('comet init E2E', () => {
     await expect(
       fs.access(path.join(tmpDir, '.comet', 'current-change.json')),
     ).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('installs Ambient Resume instructions for Classic-only project init', async () => {
+    mockExternalSuccess();
+    await fs.mkdir(path.join(tmpDir, '.claude'), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, 'AGENTS.md'), '# User\n\nKeep this.\n', 'utf8');
+    await fs.writeFile(path.join(tmpDir, 'CLAUDE.md'), '# User\n\nAlso keep this.\n', 'utf8');
+
+    const { initCommand } = await import('../../app/commands/init.js');
+    const result = await captureJsonOutput(() =>
+      initCommand(tmpDir, { yes: true, json: true, workflow: 'classic', language: 'en' }),
+    );
+
+    expect(result).toMatchObject({
+      workflow: 'classic',
+      initializedWorkflows: ['classic'],
+    });
+    const agents = await fs.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf8');
+    const claude = await fs.readFile(path.join(tmpDir, 'CLAUDE.md'), 'utf8');
+    for (const content of [agents, claude]) {
+      expect(content).toContain('<comet-ambient-resume>');
+      expect(content).toContain('comet resume-probe . --stdin --json');
+    }
+    expect(agents).toContain('# User\n\nKeep this.');
+    expect(claude).toContain('# User\n\nAlso keep this.');
   });
 
   it('adds Classic with the docs layout when a Native-only project is reinitialized as Both', async () => {
@@ -557,7 +609,7 @@ describe('comet init E2E', () => {
     });
   });
 
-  it('repairs missing Native defaults while initializing Both over a legacy Classic root', async () => {
+  it('repairs missing Native defaults and removes legacy snapshot config while initializing Both', async () => {
     mockExternalSuccess();
     await fs.mkdir(path.join(tmpDir, '.claude'), { recursive: true });
     await fs.mkdir(path.join(tmpDir, 'openspec', 'changes', 'archive'), { recursive: true });
@@ -570,6 +622,10 @@ describe('comet init E2E', () => {
         'workflows: [native]',
         'native:',
         '  language: en',
+        '  snapshot:',
+        '    include: ["**/*"]',
+        '    exclude:',
+        '      - custom/init-generated/**',
         '',
       ].join('\n'),
       'utf8',
@@ -593,10 +649,11 @@ describe('comet init E2E', () => {
       projectConfigUpdated: true,
     });
     const config = parse(await fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf8')) as {
-      native?: { artifact_root?: string };
+      native?: { artifact_root?: string; snapshot?: unknown };
       classic?: { artifact_layout?: string };
     };
     expect(config.native?.artifact_root).toBe('docs');
+    expect(config.native?.snapshot).toBeUndefined();
     expect(config.classic?.artifact_layout).toBe('legacy');
     await expect(fs.stat(path.join(tmpDir, 'openspec', 'config.yaml'))).resolves.toBeDefined();
     await expect(fs.access(path.join(tmpDir, 'docs', 'openspec'))).rejects.toMatchObject({
@@ -1544,6 +1601,9 @@ describe('comet init E2E', () => {
     await expect(
       fs.readFile(path.join(os.homedir(), '.comet', 'config.yaml'), 'utf8'),
     ).resolves.toContain('artifact_root: artifacts');
+    await expect(
+      fs.readFile(path.join(os.homedir(), '.comet', 'config.yaml'), 'utf8'),
+    ).resolves.not.toMatch(/^\s+snapshot:/mu);
     await expect(fs.access(path.join(os.homedir(), 'artifacts', 'comet'))).rejects.toThrow();
     await expect(fs.access(path.join(tmpDir, '.comet', 'config.yaml'))).rejects.toThrow();
   });
@@ -1562,6 +1622,10 @@ describe('comet init E2E', () => {
         'ambient_resume: false',
         'native:',
         '  artifact_root: docs',
+        '  snapshot:',
+        '    include: ["**/*"]',
+        '    exclude:',
+        '      - custom/global-generated/**',
         '',
       ].join('\n'),
     );
@@ -1583,7 +1647,11 @@ describe('comet init E2E', () => {
 
     await expect(
       fs.readFile(path.join(fakeHome, '.comet', 'config.yaml'), 'utf8'),
-    ).resolves.toContain('ambient_resume: false');
+    ).resolves.toMatch(/ambient_resume: false/);
+    const globalConfig = parse(
+      await fs.readFile(path.join(fakeHome, '.comet', 'config.yaml'), 'utf8'),
+    ) as { native: { snapshot?: unknown } };
+    expect(globalConfig.native.snapshot).toBeUndefined();
   });
 
   it('does not publish a global Classic default when OpenSpec initialization fails', async () => {
@@ -1688,6 +1756,40 @@ describe('comet init E2E', () => {
           fs.access(path.join(fakeHome, '.agents', 'skills', skill, 'SKILL.md')),
         ).resolves.toBeUndefined();
       }
+    },
+    INIT_E2E_TIMEOUT_MS,
+  );
+
+  it.each([
+    { workflow: 'native' as const, expected: ['codegraph'] },
+    { workflow: 'both' as const, expected: ['openspec', 'superpowers', 'codegraph'] },
+  ])(
+    'offers the CodeGraph dependency for $workflow initialization',
+    async ({ workflow, expected }) => {
+      mockExternalSuccess();
+      await fs.mkdir(path.join(tmpDir, '.codex'), { recursive: true });
+      const fakeHome = path.join(tmpDir, 'fake-home');
+      await fs.mkdir(fakeHome, { recursive: true });
+
+      const { checkbox, select } = await import('@inquirer/prompts');
+      const { platformSelectPrompt } = await import('../../app/commands/platform-select-prompt.js');
+      vi.mocked(select).mockResolvedValueOnce(workflow);
+      if (workflow === 'both') vi.mocked(select).mockResolvedValueOnce('copy');
+      vi.mocked(platformSelectPrompt).mockResolvedValue(['codex']);
+      vi.mocked(checkbox).mockResolvedValue([]);
+
+      const { initCommand } = await import('../../app/commands/init.js');
+      await captureTextOutput(() =>
+        initCommand(tmpDir, {
+          scope: 'global',
+          language: 'en',
+        }),
+      );
+
+      const prompt = vi.mocked(checkbox).mock.calls[0]?.[0] as {
+        choices: Array<{ value: string }>;
+      };
+      expect(prompt.choices.map((choice) => choice.value)).toEqual(expected);
     },
     INIT_E2E_TIMEOUT_MS,
   );
@@ -2440,7 +2542,7 @@ describe('comet init E2E', () => {
           initCommand(tmpDir, { yes: true, json: true }),
         );
 
-        expect((result.results as unknown[]).length).toBeGreaterThanOrEqual(33);
+        expect((result.results as unknown[]).length).toBeGreaterThanOrEqual(35);
 
         const manifest = await readManifest();
         const platformDirs = [
@@ -2461,11 +2563,13 @@ describe('comet init E2E', () => {
           '.lingma',
           '.junie',
           '.codebuddy',
+          '.workbuddy',
           '.cospec',
           '.crush',
           '.factory',
           '.iflow',
           '.pi',
+          '.omp',
           '.qoder',
           '.agents',
           '.bob',
@@ -2499,12 +2603,46 @@ describe('comet init E2E', () => {
         await expect(
           fs.access(path.join(tmpDir, '.pi', 'extensions', 'comet-commands.ts')),
         ).resolves.toBeUndefined();
+        await expect(
+          fs.access(path.join(tmpDir, '.omp', 'hooks', 'pre', 'comet-hook-router.ts')),
+        ).resolves.toBeUndefined();
+        await expect(
+          fs.access(path.join(tmpDir, '.omp', 'rules', 'comet-workflow-guard.mdc')),
+        ).resolves.toBeUndefined();
       } finally {
         homedirSpy.mockRestore();
       }
     },
     INIT_E2E_TIMEOUT_MS,
   );
+
+  it('installs WorkBuddy Skills in the user-level .workbuddy directory', async () => {
+    mockExternalSuccess();
+
+    const fakeHome = path.join(tmpDir, 'fake-home');
+    await fs.mkdir(fakeHome, { recursive: true });
+    const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+
+    try {
+      const { initCommand } = await import('../../app/commands/init.js');
+      const result = await captureJsonOutput(() =>
+        initCommand(tmpDir, {
+          yes: true,
+          json: true,
+          scope: 'global',
+          platform: 'workbuddy',
+          workflow: 'native',
+        }),
+      );
+
+      expect(result.selectedPlatforms).toEqual(['workbuddy']);
+      await expect(
+        fs.access(path.join(fakeHome, '.workbuddy', 'skills', 'comet', 'SKILL.md')),
+      ).resolves.toBeUndefined();
+    } finally {
+      homedirSpy.mockRestore();
+    }
+  });
 
   it(
     'installs Antigravity and Antigravity 2.0 Comet skills to their respective global skills directories',
@@ -2784,6 +2922,45 @@ describe('comet init E2E', () => {
       await expect(
         fs.access(path.join(fakeHome, '.zcode', 'rules', 'comet-workflow-guard.en.md')),
       ).rejects.toThrow();
+    },
+    INIT_E2E_TIMEOUT_MS,
+  );
+
+  it(
+    'installs dsh Classic dependencies and mirrors Claude-shaped OpenSpec Skills',
+    async () => {
+      mockExternalSuccess();
+      const fakeHome = path.join(tmpDir, 'dsh-classic-init-home');
+      await fs.mkdir(fakeHome, { recursive: true });
+      vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+
+      const { initCommand } = await import('../../app/commands/init.js');
+      const result = await captureJsonOutput(() =>
+        initCommand(tmpDir, {
+          yes: true,
+          json: true,
+          scope: 'project',
+          platform: 'dsh',
+          workflow: 'classic',
+          language: 'en',
+        }),
+      );
+
+      expect(result.selectedPlatforms).toEqual(['dsh']);
+      await expect(
+        fs.access(path.join(tmpDir, '.dsh', 'skills', 'openspec-propose', 'SKILL.md')),
+      ).resolves.toBeUndefined();
+      await expect(
+        fs.access(path.join(tmpDir, '.dsh', 'skills', 'brainstorming', 'SKILL.md')),
+      ).resolves.toBeUndefined();
+      await expect(fs.access(path.join(tmpDir, 'AGENTS.local.md'))).resolves.toBeUndefined();
+      await expect(fs.access(path.join(tmpDir, '.dsh', 'hooks.json'))).resolves.toBeUndefined();
+      await expect(
+        fs.access(path.join(tmpDir, '.dsh', 'cordis.patch.yml')),
+      ).resolves.toBeUndefined();
+      await expect(fs.access(path.join(tmpDir, '.claude'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
     },
     INIT_E2E_TIMEOUT_MS,
   );

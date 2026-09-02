@@ -13,6 +13,7 @@ import {
   PLATFORMS,
   getPlatformSkillsDir,
   getPlatformSkillsDirs,
+  resolveOpenSpecMirrorPlatformIds,
   type Platform,
 } from '../../platform/install/platforms.js';
 
@@ -55,6 +56,36 @@ describe('detect', () => {
   });
 
   describe('platform global skills directories', () => {
+    it('declares DeepSeek Harness roots and Claude-compatible Classic sources', () => {
+      const dsh = PLATFORMS.find((platform) => platform.id === 'dsh');
+
+      expect(dsh).toBeDefined();
+      expect(dsh?.skillsDir).toBe('.dsh');
+      expect(dsh?.globalSkillsDir).toBe('.dsh');
+      expect(dsh?.openspecToolId).toBe('claude');
+      expect(dsh?.rulesFormat).toBe('dsh');
+      expect(dsh?.supportsHooks).toBe(true);
+      expect(dsh?.supportsGlobalHooks).toBe(true);
+      expect(dsh?.hookFormat).toBe('dsh');
+      expect(dsh?.hookConfigFile).toBe('hooks.json');
+      expect(getPlatformSkillsDir(dsh!, 'project')).toBe('.dsh');
+      expect(getPlatformSkillsDir(dsh!, 'global')).toBe('.dsh');
+    });
+
+    it('uses DSH_HOME for the global dsh Skill root', async () => {
+      const dsh = PLATFORMS.find((platform) => platform.id === 'dsh')!;
+      const dshHome = path.join(tmpDir, 'custom-dsh-home');
+      vi.stubEnv('DSH_HOME', dshHome);
+
+      const globalSkillsRoot = path.join(
+        os.homedir(),
+        getPlatformSkillsDir(dsh, 'global'),
+        'skills',
+      );
+
+      expect(path.resolve(globalSkillsRoot)).toBe(path.join(dshHome, 'skills'));
+    });
+
     it('declares Codex canonical, compatibility, detection, and rules roots separately', () => {
       const codex = PLATFORMS.find((platform) => platform.id === 'codex');
 
@@ -70,6 +101,24 @@ describe('detect', () => {
       expect(getPlatformSkillsDir(codex!, 'global')).toBe('.agents');
       expect(getPlatformSkillsDirs(codex!, 'project')).toEqual(['.agents', '.codex']);
       expect(getPlatformSkillsDirs(codex!, 'global')).toEqual(['.agents', '.codex']);
+    });
+
+    it('declares Grok Skills, rules, and hooks under the native .grok root', () => {
+      const grok = PLATFORMS.find((platform) => platform.id === 'grok');
+
+      expect(grok).toBeDefined();
+      expect(grok?.skillsDir).toBe('.grok');
+      expect(grok?.globalSkillsDir).toBe('.grok');
+      expect(grok?.detectionPaths).toEqual(['.grok']);
+      expect(grok?.openspecToolId).toBe('codex');
+      expect(grok?.openspecMirrorFrom).toBe('codex');
+      expect(grok?.rulesDir).toBe('rules');
+      expect(grok?.hookFormat).toBe('claude-code');
+      expect(grok?.hookConfigFile).toBe('hooks/comet.json');
+      expect(grok?.hookMatcher).toBe('Write|Edit|write|search_replace');
+      expect(getPlatformSkillsDir(grok!, 'project')).toBe('.grok');
+      expect(getPlatformSkillsDir(grok!, 'global')).toBe('.grok');
+      expect(resolveOpenSpecMirrorPlatformIds(['grok', 'codex', 'claude'])).toEqual(['grok']);
     });
 
     it('declares Kimi Code global skills under the user .kimi-code directory', () => {
@@ -96,6 +145,7 @@ describe('detect', () => {
       expect(zcode?.skillsDir).toBe('.zcode');
       expect(zcode?.globalSkillsDir).toBe('.zcode');
       expect(zcode?.openspecToolId).toBe('opencode');
+      expect(zcode?.openspecMirrorFrom).toBe('opencode');
       expect(zcode?.rulesDir).toBe('rules');
       expect(zcode?.rulesFormat).toBe('md');
     });
@@ -125,6 +175,34 @@ describe('detect', () => {
       expect(traeCn?.configDir).toBe('.trae');
       expect(traeCn?.globalConfigDir).toBe('.trae-cn');
     });
+
+    it('declares WorkBuddy project and user Skill roots with CodeBuddy-style Hooks', () => {
+      const workbuddy = PLATFORMS.find((platform) => platform.id === 'workbuddy');
+
+      expect(workbuddy).toBeDefined();
+      expect(workbuddy?.skillsDir).toBe('.workbuddy');
+      expect(workbuddy?.globalSkillsDir).toBe('.workbuddy');
+      expect(workbuddy?.supportsHooks).toBe(true);
+      expect(workbuddy?.hookFormat).toBe('codebuddy');
+      expect(getPlatformSkillsDir(workbuddy!, 'project')).toBe('.workbuddy');
+      expect(getPlatformSkillsDir(workbuddy!, 'global')).toBe('.workbuddy');
+    });
+
+    it('declares Oh My Pi native project and user roots with Rules and Hooks', () => {
+      const omp = PLATFORMS.find((platform) => platform.id === 'oh-my-pi');
+
+      expect(omp).toBeDefined();
+      expect(omp?.skillsDir).toBe('.omp');
+      expect(omp?.globalSkillsDir).toBe('.omp/agent');
+      expect(omp?.openspecToolId).toBe('oh-my-pi');
+      expect(omp?.rulesDir).toBe('rules');
+      expect(omp?.rulesFormat).toBe('mdc');
+      expect(omp?.supportsHooks).toBe(true);
+      expect(omp?.supportsGlobalHooks).toBe(true);
+      expect(omp?.hookFormat).toBe('omp');
+      expect(getPlatformSkillsDir(omp!, 'project')).toBe('.omp');
+      expect(getPlatformSkillsDir(omp!, 'global')).toBe('.omp/agent');
+    });
   });
 
   describe('detectPlatforms', () => {
@@ -152,6 +230,14 @@ describe('detect', () => {
       expect(detected.has('claude')).toBe(true);
     });
 
+    it('detects Oh My Pi from the native .omp directory', async () => {
+      await fs.mkdir(path.join(tmpDir, '.omp'));
+
+      const detected = await detectPlatforms(tmpDir);
+
+      expect(detected.has('oh-my-pi')).toBe(true);
+    });
+
     it('detects github-copilot when copilot-instructions.md exists', async () => {
       await fs.mkdir(path.join(tmpDir, '.github'), { recursive: true });
       await fs.writeFile(path.join(tmpDir, '.github', 'copilot-instructions.md'), '');
@@ -163,6 +249,12 @@ describe('detect', () => {
       await fs.mkdir(path.join(tmpDir, '.github'));
       const detected = await detectPlatforms(tmpDir);
       expect(detected.has('github-copilot')).toBe(false);
+    });
+
+    it('detects grok from the .grok config directory', async () => {
+      await fs.mkdir(path.join(tmpDir, '.grok'));
+      const detected = await detectPlatforms(tmpDir);
+      expect(detected.has('grok')).toBe(true);
     });
 
     it('detects multiple platforms', async () => {

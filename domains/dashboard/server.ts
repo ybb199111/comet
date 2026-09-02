@@ -15,13 +15,20 @@ import {
   collectNativeDashboardChangePage,
   NativeDashboardQueryError,
 } from './native-collector.js';
+import {
+  collectDashboardProjectConfigSettings,
+  DashboardProjectConfigError,
+  updateDashboardProjectConfigSettings,
+} from './project-config-settings.js';
 import { collectDashboardProjectDirectory, findDashboardProject } from './project-directory.js';
+import { DashboardPluginHostError, type DashboardPluginHostFactory } from './plugin-host.js';
 import type { DashboardChangeTab } from './types.js';
 
 export interface DashboardServerOptions {
   projectPath: string;
   port?: number;
   webRoot?: string;
+  pluginHost?: DashboardPluginHostFactory;
 }
 
 export interface DashboardServerHandle {
@@ -32,6 +39,49 @@ export interface DashboardServerHandle {
 
 const DEFAULT_PORT = 4321;
 const PORT_RETRY_LIMIT = 50;
+const DASHBOARD_PLUGIN_HOST_CACHE_MS = 1000;
+
+type DashboardPluginHostInstance = Awaited<ReturnType<DashboardPluginHostFactory>>;
+
+interface DashboardPluginHostAccess {
+  readonly get: DashboardPluginHostFactory;
+  readonly invalidate: (projectId: string) => void;
+}
+
+function createDashboardPluginHostAccess(
+  factory: DashboardPluginHostFactory | undefined,
+): DashboardPluginHostAccess | undefined {
+  if (factory === undefined) return undefined;
+  const hosts = new Map<
+    string,
+    { readonly promise: Promise<DashboardPluginHostInstance>; expiresAt: number }
+  >();
+  const get: DashboardPluginHostFactory = (projectId, projectPath) => {
+    const existing = hosts.get(projectId);
+    if (existing !== undefined && existing.expiresAt > Date.now()) return existing.promise;
+    if (existing !== undefined) hosts.delete(projectId);
+    const pending = Promise.resolve(factory(projectId, projectPath));
+    const entry = { promise: pending, expiresAt: Number.POSITIVE_INFINITY };
+    hosts.set(projectId, entry);
+    void pending.then(
+      () => {
+        if (hosts.get(projectId) === entry) {
+          entry.expiresAt = Date.now() + DASHBOARD_PLUGIN_HOST_CACHE_MS;
+        }
+      },
+      () => {
+        if (hosts.get(projectId) === entry) hosts.delete(projectId);
+      },
+    );
+    return pending;
+  };
+  return {
+    get,
+    invalidate: (projectId) => {
+      hosts.delete(projectId);
+    },
+  };
+}
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -59,14 +109,26 @@ export async function startDashboardServer(
   const webRoot = options.webRoot ?? defaultWebRoot();
   const requestedPort = options.port ?? DEFAULT_PORT;
   const port = requestedPort === 0 ? 0 : await findAvailablePort(requestedPort);
+  const pluginHostAccess = createDashboardPluginHostAccess(options.pluginHost);
 
   const server = http.createServer((req, res) => {
-    handleRequest(req, res, options.projectPath, webRoot).catch((error) => {
+    handleRequest(req, res, options.projectPath, webRoot, pluginHostAccess).catch((error) => {
       if (
         error instanceof DashboardChangeQueryError ||
         error instanceof NativeDashboardQueryError
       ) {
         respondJson(res, req.method ?? 'GET', 400, { error: error.message });
+        return;
+      }
+      if (error instanceof DashboardPluginHostError) {
+        respondJson(res, req.method ?? 'GET', error.statusCode, {
+          error: error.message,
+          ...(error.pluginId ? { pluginId: error.pluginId } : {}),
+        });
+        return;
+      }
+      if (error instanceof DashboardProjectConfigError) {
+        respondJson(res, req.method ?? 'GET', error.statusCode, { error: error.message });
         return;
       }
       respondError(res, 500, `Internal server error: ${(error as Error).message}`);
@@ -99,6 +161,7 @@ async function handleRequest(
   res: http.ServerResponse,
   projectPath: string,
   webRoot: string,
+  pluginHostAccess?: DashboardPluginHostAccess,
 ): Promise<void> {
   if (!req.url) {
     respondError(res, 400, 'Bad request');
@@ -108,7 +171,13 @@ async function handleRequest(
   const url = new URL(req.url, 'http://localhost');
   const pathname = url.pathname;
 
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
+  const isPluginRequest = pathname.includes('/plugins');
+  const isProjectConfigRequest = pathname.endsWith('/config');
+  if (
+    req.method !== 'GET' &&
+    req.method !== 'HEAD' &&
+    !(req.method === 'POST' && (isPluginRequest || isProjectConfigRequest))
+  ) {
     respondError(res, 405, 'Method not allowed');
     return;
   }
@@ -185,8 +254,9 @@ async function handleRequest(
 
     if (subpath === '/native-change') {
       const changeName = url.searchParams.get('changeName');
+      const changeLocator = url.searchParams.get('changeLocator');
       const status = url.searchParams.get('status');
-      if (!changeName) {
+      if (!changeName && !changeLocator) {
         throw new NativeDashboardQueryError('Missing Native Dashboard change name');
       }
       if (status !== 'active' && status !== 'archived') {
@@ -194,8 +264,9 @@ async function handleRequest(
       }
       const detail = await collectNativeDashboardChangeDetail(project.path, {
         status,
-        name: changeName,
+        name: changeName ?? '',
         archiveName: url.searchParams.get('archiveName') ?? undefined,
+        locator: changeLocator ?? undefined,
       });
       if (!detail) {
         respondJson(res, req.method, 404, { error: 'Unknown Native Dashboard change' });
@@ -206,7 +277,7 @@ async function handleRequest(
     }
 
     if (subpath === '/change') {
-      const changeId = url.searchParams.get('changeId');
+      const changeId = url.searchParams.get('changeLocator') ?? url.searchParams.get('changeId');
       if (!changeId) {
         throw new DashboardChangeQueryError('Missing dashboard change id');
       }
@@ -216,6 +287,34 @@ async function handleRequest(
         return;
       }
       respondJson(res, req.method, 200, detail);
+      return;
+    }
+
+    if (subpath === '/config') {
+      if (req.method === 'GET' || req.method === 'HEAD') {
+        respondJson(
+          res,
+          req.method,
+          200,
+          await collectDashboardProjectConfigSettings(project.path),
+        );
+        return;
+      }
+      if (req.method === 'POST') {
+        respondJson(
+          res,
+          req.method,
+          200,
+          await updateDashboardProjectConfigSettings(project.path, await readJsonBody(req)),
+        );
+        return;
+      }
+      respondError(res, 405, 'Method not allowed');
+      return;
+    }
+
+    if (subpath === '/plugins' || subpath.startsWith('/plugins/')) {
+      await handlePluginRequest(req, res, project, subpath, pluginHostAccess);
       return;
     }
 
@@ -230,6 +329,110 @@ async function handleRequest(
   }
 
   await serveStatic(res, req.method ?? 'GET', webRoot, pathname);
+}
+
+async function handlePluginRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  project: { id: string; path: string },
+  subpath: string,
+  pluginHostAccess?: DashboardPluginHostAccess,
+): Promise<void> {
+  if (pluginHostAccess === undefined) {
+    respondJson(res, req.method ?? 'GET', 503, { error: 'Dashboard plugins are unavailable' });
+    return;
+  }
+  const host = await pluginHostAccess.get(project.id, project.path);
+  const segments = subpath
+    .split('/')
+    .filter((segment) => segment.length > 0)
+    .map((segment) => decodeURIComponent(segment));
+  if (segments.length === 1 && segments[0] === 'plugins') {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      respondError(res, 405, 'Method not allowed');
+      return;
+    }
+    respondJson(res, req.method ?? 'GET', 200, { pages: await host.list() });
+    return;
+  }
+  if (segments.length < 2 || segments[0] !== 'plugins' || !segments[1]) {
+    respondJson(res, req.method ?? 'GET', 404, { error: 'Not found' });
+    return;
+  }
+  const pluginId = segments[1];
+  if (segments.length === 2) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      respondError(res, 405, 'Method not allowed');
+      return;
+    }
+    respondJson(res, req.method ?? 'GET', 200, await host.get(pluginId));
+    return;
+  }
+  if (segments.length !== 3 || req.method !== 'POST') {
+    respondError(res, 405, 'Method not allowed');
+    return;
+  }
+  const body = await readJsonBody(req);
+  if (segments[2] === 'invoke') {
+    const value = asObject(body, 'Plugin invoke request');
+    if (typeof value.capability !== 'string' || value.capability.trim().length === 0) {
+      throw new DashboardPluginHostError('Plugin capability is required', 400, pluginId);
+    }
+    try {
+      const result = await host.invoke(pluginId, value.capability, value.input);
+      respondJson(res, req.method, 200, { result });
+    } finally {
+      pluginHostAccess.invalidate(project.id);
+    }
+    return;
+  }
+  if (segments[2] === 'lifecycle') {
+    const value = asObject(body, 'Plugin lifecycle request');
+    if (value.action !== 'enable' && value.action !== 'disable' && value.action !== 'uninstall') {
+      throw new DashboardPluginHostError('Plugin lifecycle action is invalid', 400, pluginId);
+    }
+    try {
+      await host.lifecycle(pluginId, value.action);
+      respondJson(res, req.method, 200, { ok: true });
+    } finally {
+      pluginHostAccess.invalidate(project.id);
+    }
+    return;
+  }
+  respondJson(res, req.method, 404, { error: 'Not found' });
+}
+
+const MAX_PLUGIN_BODY_BYTES = 128 * 1024;
+
+async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
+  const contentLength = Number(req.headers['content-length'] ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > MAX_PLUGIN_BODY_BYTES) {
+    throw new DashboardPluginHostError('Plugin request body is too large', 413);
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > MAX_PLUGIN_BODY_BYTES) {
+      throw new DashboardPluginHostError('Plugin request body is too large', 413);
+    }
+    chunks.push(buffer);
+  }
+  if (chunks.length === 0)
+    throw new DashboardPluginHostError('Plugin request body is required', 400);
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+  } catch {
+    throw new DashboardPluginHostError('Plugin request body must be valid JSON', 400);
+  }
+}
+
+function asObject(value: unknown, name: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new DashboardPluginHostError(`${name} must be an object`, 400);
+  }
+  return value as Record<string, unknown>;
 }
 
 function parseChangeTab(raw: string | null): DashboardChangeTab {

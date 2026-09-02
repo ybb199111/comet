@@ -34,6 +34,7 @@ import {
 import {
   getPlatformSkillsDir,
   getPlatformSkillsDirs,
+  resolveOpenSpecMirrorPlatformIds,
   type Platform,
 } from '../../platform/install/platforms.js';
 import { resolvePlatformTarget } from '../../platform/install/platform-targets.js';
@@ -65,6 +66,7 @@ import { assertClassicOpenSpecRootHealthy } from '../../domains/comet-classic/cl
 import { discoverNativeProject } from '../../domains/comet-native/native-paths.js';
 import { defaultProjectConfig } from '../../domains/comet-native/native-config.js';
 import { readWorkflowProjectConfigSnapshot } from '../../domains/workflow-contract/project-config-reader.js';
+import { ensureCometProjectGitignore } from '../../domains/workflow-contract/project-gitignore.js';
 import {
   readWorkflowGlobalConfig,
   writeWorkflowGlobalConfig,
@@ -72,7 +74,12 @@ import {
 import type { InitWorkflowSelection } from '../../domains/comet-entry/types.js';
 import { migrateLegacyClassicSelection } from '../../domains/comet-entry/current-selection.js';
 import type { InstallScope, InstallMode } from '../../platform/install/types.js';
-import { getLatestVersion, printVersionInfo } from '../../platform/version/version.js';
+import {
+  compareSemverVersions,
+  getLatestVersion,
+  parseSemver,
+  printVersionInfo,
+} from '../../platform/version/version.js';
 import { t, type TranslationKey } from './i18n.js';
 import { assertProjectScopeOptions, resolveProjectScopeMode } from './project-scope-selection.js';
 import type { CommandExecutionResult } from './command-result.js';
@@ -106,7 +113,9 @@ async function refreshGlobalWorkflowConfig(
   const existing = await readWorkflowGlobalConfig(homeDir);
   const defaults = defaultProjectConfig('docs', language ?? 'en');
   const config = existing ?? { ...defaults, schema: 'comet.global.v1' as const };
-  if (language && config.native) config.native.language = language;
+  if (config.native) {
+    if (language) config.native.language = language;
+  }
   if (language && config.classic) config.classic.language = language;
   await writeWorkflowGlobalConfig(homeDir, config);
 }
@@ -508,56 +517,6 @@ function buildNpmUpdateArgs(scope: InstallScope, version = 'latest'): string[] {
 
 function formatNpmUpdateCommand(scope: InstallScope, version = 'latest'): string {
   return ['npm', ...buildNpmUpdateArgs(scope, version)].join(' ');
-}
-
-interface ParsedSemver {
-  major: number;
-  minor: number;
-  patch: number;
-  prerelease: string[];
-}
-
-function parseSemver(version: string): ParsedSemver | null {
-  const match =
-    /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(
-      version,
-    );
-  if (!match) return null;
-  return {
-    major: Number(match[1]),
-    minor: Number(match[2]),
-    patch: Number(match[3]),
-    prerelease: match[4]?.split('.') ?? [],
-  };
-}
-
-function comparePrereleaseIdentifiers(left: string[], right: string[]): number {
-  if (left.length === 0 || right.length === 0) {
-    if (left.length === right.length) return 0;
-    return left.length === 0 ? 1 : -1;
-  }
-
-  for (let index = 0; index < Math.max(left.length, right.length); index++) {
-    const leftPart = left[index];
-    const rightPart = right[index];
-    if (leftPart === undefined) return -1;
-    if (rightPart === undefined) return 1;
-    if (leftPart === rightPart) continue;
-
-    const leftNumeric = /^\d+$/u.test(leftPart);
-    const rightNumeric = /^\d+$/u.test(rightPart);
-    if (leftNumeric && rightNumeric) return Number(leftPart) - Number(rightPart);
-    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
-    return leftPart < rightPart ? -1 : 1;
-  }
-  return 0;
-}
-
-function compareSemverVersions(left: ParsedSemver, right: ParsedSemver): number {
-  for (const field of ['major', 'minor', 'patch'] as const) {
-    if (left[field] !== right[field]) return left[field] - right[field];
-  }
-  return comparePrereleaseIdentifiers(left.prerelease, right.prerelease);
 }
 
 function resolveNpmSelfUpdatePlan(
@@ -1412,6 +1371,7 @@ async function updateSingleProject(
       true,
       classicProject,
     );
+    if (nativeProject) await ensureCometProjectGitignore(projectPath);
     log(`  ${t(lang, 'configMerged')}`);
   };
 
@@ -1703,10 +1663,13 @@ async function updateSingleProject(
       totalRulesFailed += ruleResult.failed;
       const ruleStatus =
         ruleResult.failed > 0 ? 'failed' : ruleResult.copied > 0 ? 'copied' : 'skipped';
+      const supportsRules =
+        target.platform.rulesFormat === 'dsh' ||
+        Boolean(target.platform.rulesDir && target.platform.rulesFormat);
       const ruleReason =
         ruleResult.failed > 0
           ? `${ruleResult.failed} Rule file(s) failed to install`
-          : !target.platform.rulesDir || !target.platform.rulesFormat
+          : !supportsRules
             ? 'platform does not support rules'
             : undefined;
       ruleTargetResults.push({
@@ -1767,6 +1730,9 @@ async function updateSingleProject(
       if (status === 'installed') {
         totalHooksInstalled++;
         log(`  Comet hooks -> ${target.platform.name}: ${t(lang, 'hooksUpdated')}`);
+        if (reason) {
+          log(`  Comet hooks -> ${target.platform.name}: ${reason}`);
+        }
         if (cleanupFailed > 0) {
           log(`  Comet hooks -> ${target.platform.name}: ${reason}`);
         }
@@ -1820,23 +1786,20 @@ async function updateSingleProject(
       scopeTargets.length === 0;
     if (scopeTargets.length === 0 && !requiresArtifactOnlyRefresh) continue;
     const toolIds = [...new Set(scopeTargets.map((target) => target.platform.openspecToolId))];
-    const mirrorOpenCodePlatformIds = scopeTargets
-      .map((target) => target.platform.id)
-      .filter((id) => id === 'zcode' || id === 'mimocode');
+    const selectedPlatformIds = scopeTargets.map((target) => target.platform.id);
+    const mirrorPlatformIds = resolveOpenSpecMirrorPlatformIds(selectedPlatformIds);
     const artifactLayout = scope === 'project' ? classicArtifactLayout : 'legacy';
     try {
       if (scope === 'project') {
         await assertClassicProjectMutationAllowed?.();
       }
-      const status = await installOpenSpec(
-        projectPath,
-        toolIds,
-        scope,
-        !skipPackageSelfUpdate,
-        mirrorOpenCodePlatformIds,
+      const status = await installOpenSpec(projectPath, toolIds, scope, {
+        shouldInstallCli: !skipPackageSelfUpdate,
+        mirrorPlatformIds,
         artifactLayout,
-        scope === 'project' ? assertClassicProjectMutationAllowed : undefined,
-      );
+        projectMutationGuard: scope === 'project' ? assertClassicProjectMutationAllowed : undefined,
+        selectedPlatformIds,
+      });
       if (status === 'failed') {
         openSpecStatus = 'failed';
         openSpecReason = `OpenSpec ${scope} asset update failed`;
@@ -1966,7 +1929,7 @@ async function updateSingleProject(
       const projectInstructionResult = await syncCometProjectInstructions(
         projectPath,
         projectLanguageId,
-        nativeProject && (projectConfigDocument?.ambient_resume ?? true),
+        projectConfigDocument?.ambient_resume ?? true,
       );
       projectInstructionsUpdated = projectInstructionResult.changed;
       if (projectInstructionsUpdated > 0) {
@@ -2017,6 +1980,7 @@ async function updateSingleProject(
         true,
         classicProject,
       );
+      if (nativeProject) await ensureCometProjectGitignore(configRoot);
     }
     if (scope === 'project' && classicLayoutInitializationPermit) {
       await completeClassicLayoutInitialization(projectPath, classicLayoutInitializationPermit);

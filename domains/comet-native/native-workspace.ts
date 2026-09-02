@@ -2,15 +2,24 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-import { inspectGitWorktree, isLocalGitBranch } from '../../platform/paths/git-worktree.js';
+import {
+  inspectGitWorktree,
+  isLocalGitBranch,
+  resolveGitRef,
+} from '../../platform/paths/git-worktree.js';
 
 import { atomicWriteJson } from './native-atomic-file.js';
 import { readNativeBoundedTextFile } from './native-bounded-file.js';
 import { withNativeMutationLock } from './native-mutation-lock.js';
-import { resolveContainedNativePath } from './native-paths.js';
-import type { NativeProjectPaths } from './native-types.js';
+import {
+  nativeChangeRuntimeDir,
+  nativeStorageRoot,
+  resolveContainedNativePath,
+} from './native-paths.js';
+import type { NativeProjectPaths, NativeWorkspaceProjection } from './native-types.js';
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const GIT_COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const MAX_WORKSPACE_IDENTITY_BYTES = 16 * 1024;
 const HOST_PLATFORM = process.platform;
 
@@ -23,6 +32,13 @@ export interface NativeWorkspaceBinding {
   targetBranch: string | null;
 }
 
+export interface NativeWorkspaceGitProvenance {
+  provider: 'git';
+  baseCommit: string;
+  targetBranch: string;
+  targetCommit: string;
+}
+
 interface NativeWorkspaceIdentityFields {
   capturedAt: string;
   capturedRevision: number;
@@ -33,6 +49,7 @@ interface NativeWorkspaceIdentityFields {
   projectRootPathId?: string;
   nativeRootPathId?: string;
   sessionHash?: string;
+  git?: NativeWorkspaceGitProvenance;
 }
 
 export interface NativeWorkspaceIdentityV2 extends NativeWorkspaceIdentityFields {
@@ -197,6 +214,28 @@ function assertBinding(value: NativeWorkspaceBinding): void {
   }
 }
 
+function assertGitProvenance(value: unknown): asserts value is NativeWorkspaceGitProvenance {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Native workspace Git provenance must be an object');
+  }
+  const root = value as Record<string, unknown>;
+  const allowed = new Set(['provider', 'baseCommit', 'targetBranch', 'targetCommit']);
+  const unknown = Object.keys(root).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) {
+    throw new Error(`Native workspace Git provenance has unknown field(s): ${unknown.join(', ')}`);
+  }
+  if (
+    root.provider !== 'git' ||
+    typeof root.baseCommit !== 'string' ||
+    !GIT_COMMIT_PATTERN.test(root.baseCommit) ||
+    typeof root.targetCommit !== 'string' ||
+    !GIT_COMMIT_PATTERN.test(root.targetCommit)
+  ) {
+    throw new Error('Native workspace Git provenance is invalid');
+  }
+  optionalBranch(root.targetBranch, 'Native workspace Git target branch');
+}
+
 function assertIdentity(value: unknown): asserts value is NativeWorkspaceIdentity {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Native workspace identity must be an object');
@@ -212,6 +251,7 @@ function assertIdentity(value: unknown): asserts value is NativeWorkspaceIdentit
     'projectRootPathId',
     'nativeRootPathId',
     'sessionHash',
+    'git',
     'isolation',
     'changeBranch',
     'targetBranch',
@@ -249,6 +289,7 @@ function assertIdentity(value: unknown): asserts value is NativeWorkspaceIdentit
   if (root.sessionHash !== undefined && !HASH_PATTERN.test(String(root.sessionHash))) {
     throw new Error('Native workspace session hash is invalid');
   }
+  if (root.git !== undefined) assertGitProvenance(root.git);
   if (root.schema === 'comet.native.workspace.v2') {
     if (
       root.isolation !== undefined ||
@@ -347,13 +388,18 @@ export function assertNativeWorkspaceBindingCurrent(
 }
 
 export function nativeWorkspaceFile(paths: NativeProjectPaths, name: string): string {
-  return path.join(paths.changesDir, name, 'runtime', 'workspace.json');
+  return path.join(nativeChangeRuntimeDir(paths, name), 'workspace.json');
 }
 
-function nativeWorkspaceRef(paths: NativeProjectPaths, name: string): string {
-  const relative = portableRelative(paths.nativeRoot, nativeWorkspaceFile(paths, name));
+function nativeWorkspaceRef(
+  paths: NativeProjectPaths,
+  name: string,
+): { root: string; ref: string } {
+  const file = nativeWorkspaceFile(paths, name);
+  const root = nativeStorageRoot(paths, file);
+  const relative = portableRelative(root, file);
   if (!relative || relative === '.') throw new Error('Native workspace file escaped its root');
-  return normalizedPortableRef(relative, 'Native workspace file ref');
+  return { root, ref: normalizedPortableRef(relative, 'Native workspace file ref') };
 }
 
 async function readNativeWorkspaceValue(
@@ -361,9 +407,10 @@ async function readNativeWorkspaceValue(
   name: string,
 ): Promise<unknown | null> {
   try {
+    const workspace = nativeWorkspaceRef(paths, name);
     const artifact = await readNativeBoundedTextFile({
-      root: paths.nativeRoot,
-      ref: nativeWorkspaceRef(paths, name),
+      root: workspace.root,
+      ref: workspace.ref,
       maxBytes: MAX_WORKSPACE_IDENTITY_BYTES,
     });
     return JSON.parse(artifact.text) as unknown;
@@ -396,6 +443,59 @@ export async function inspectNativeWorkspaceSchema(
   throw new Error('Unsupported Native workspace identity');
 }
 
+export async function projectNativeWorkspace(
+  paths: NativeProjectPaths,
+  name: string,
+): Promise<NativeWorkspaceProjection> {
+  const context = inspectGitWorktree(paths.projectRoot);
+  const base = {
+    projectRoot: path.resolve(paths.projectRoot),
+    currentBranch: context.currentBranch,
+    isSecondaryWorktree: context.isSecondaryWorktree,
+  };
+  try {
+    const identity = await readNativeWorkspaceIdentity(paths, name);
+    if (identity === null) {
+      return {
+        ...base,
+        bindingState: 'missing',
+        isolation: null,
+        changeBranch: null,
+        targetBranch: null,
+        finish: null,
+      };
+    }
+    if (identity.schema !== 'comet.native.workspace.v3') {
+      return {
+        ...base,
+        bindingState: 'legacy',
+        isolation: null,
+        changeBranch: null,
+        targetBranch: identity.git?.targetBranch ?? null,
+        finish: null,
+      };
+    }
+    const inspection = await inspectNativeWorkspaceBinding({ paths, identity });
+    return {
+      ...base,
+      bindingState: inspection.state === 'aligned' ? 'aligned' : 'drifted',
+      isolation: identity.isolation,
+      changeBranch: identity.changeBranch,
+      targetBranch: identity.targetBranch,
+      finish: identity.finish,
+    };
+  } catch {
+    return {
+      ...base,
+      bindingState: 'invalid',
+      isolation: null,
+      changeBranch: null,
+      targetBranch: null,
+      finish: null,
+    };
+  }
+}
+
 export async function nativeWorkspaceIdentityNeedsMigration(
   paths: NativeProjectPaths,
   name: string,
@@ -419,6 +519,27 @@ export async function inspectNativeWorkspaceIdentity(
   }
   const nativeRootRef = portableRelative(options.paths.projectRoot, options.paths.nativeRoot);
   if (!nativeRootRef) throw new Error('Native root is outside the project root');
+  const gitContext = inspectGitWorktree(options.paths.projectRoot);
+  const baseCommit = gitContext.isGitWorktree
+    ? resolveGitRef(options.paths.projectRoot, 'HEAD')
+    : null;
+  const targetBranch = options.binding?.targetBranch ?? gitContext.currentBranch;
+  const targetCommit =
+    targetBranch === null || targetBranch === undefined
+      ? null
+      : resolveGitRef(options.paths.projectRoot, targetBranch);
+  const git =
+    baseCommit !== null &&
+    targetBranch !== null &&
+    targetBranch !== undefined &&
+    targetCommit !== null
+      ? {
+          provider: 'git' as const,
+          baseCommit,
+          targetBranch,
+          targetCommit,
+        }
+      : undefined;
   const [projectRootId, nativeRootId, projectRootPathId, nativeRootPathId] = await Promise.all([
     physicalDirectoryIdentity('comet.native.workspace-project-root.v2', options.paths.projectRoot),
     physicalDirectoryIdentity('comet.native.workspace-native-root.v2', options.paths.nativeRoot),
@@ -438,6 +559,7 @@ export async function inspectNativeWorkspaceIdentity(
     nativeRootId,
     projectRootPathId,
     nativeRootPathId,
+    ...(git ? { git } : {}),
     ...(options.sessionId
       ? {
           sessionHash: identityHash(
@@ -464,8 +586,9 @@ export async function writeNativeWorkspaceIdentity(
 ): Promise<NativeWorkspaceIdentity> {
   const identity = await inspectNativeWorkspaceIdentity(options);
   const file = nativeWorkspaceFile(options.paths, options.name);
-  await resolveContainedNativePath(options.paths.nativeRoot, file);
-  await atomicWriteJson(file, identity, { containedRoot: options.paths.nativeRoot });
+  const storageRoot = nativeStorageRoot(options.paths, file);
+  await resolveContainedNativePath(storageRoot, file);
+  await atomicWriteJson(file, identity, { containedRoot: storageRoot });
   return identity;
 }
 
@@ -485,8 +608,9 @@ export async function setNativeWorkspaceFinish(
     const updated: NativeWorkspaceIdentityV3 = { ...identity, finish };
     assertIdentity(updated);
     const file = nativeWorkspaceFile(paths, name);
-    await resolveContainedNativePath(paths.nativeRoot, file);
-    await atomicWriteJson(file, updated, { containedRoot: paths.nativeRoot });
+    const storageRoot = nativeStorageRoot(paths, file);
+    await resolveContainedNativePath(storageRoot, file);
+    await atomicWriteJson(file, updated, { containedRoot: storageRoot });
     return updated;
   });
 }

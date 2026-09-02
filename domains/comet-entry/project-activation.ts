@@ -18,6 +18,7 @@ import { installOpenSpec } from '../integrations/openspec.js';
 import { projectCometHooksFromInstalledScope } from '../skill/project-hook-projection.js';
 import {
   defaultWorkflowProjectConfig,
+  ensureCometProjectGitignore,
   readWorkflowGlobalConfig,
   readWorkflowProjectConfig,
   workflowProjectConfigFromGlobalConfig,
@@ -63,15 +64,11 @@ async function ensureWorkflowDirectories(
   const mutationGuard = async () => {
     await assertClassicLayoutInitializationSafe(projectRoot, artifactLayout, permit);
   };
-  const status = await installOpenSpec(
-    projectRoot,
-    [],
-    'project',
-    false,
-    [],
+  const status = await installOpenSpec(projectRoot, [], 'project', {
+    shouldInstallCli: false,
     artifactLayout,
-    mutationGuard,
-  );
+    projectMutationGuard: mutationGuard,
+  });
   if (status !== 'installed') {
     throw new Error(
       'Classic project activation requires a compatible globally installed OpenSpec CLI',
@@ -150,6 +147,7 @@ export async function activateCometProject(
       .join('; ');
     throw new Error(`Comet project Hook activation failed: ${details}`);
   }
+  await ensureCometProjectGitignore(projectRoot);
   await writeWorkflowProjectConfig(projectRoot, config);
   if (classicPermit) {
     await completeClassicLayoutInitialization(projectRoot, classicPermit);

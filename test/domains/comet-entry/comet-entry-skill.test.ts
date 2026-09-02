@@ -15,10 +15,11 @@ describe('Chinese Comet entry Skills', () => {
 
     expect(source).toContain('name: comet');
     expect(source).toContain(
-      'description: "当用户明确调用 /comet，或明确要求使用 Comet 但未指定 Native/Classic 时使用；首次使用会按全局默认配置激活项目，之后按项目配置加载一个永久入口。"',
+      'description: "Comet 工作流入口。当用户明确调用 /comet，或明确要求使用 Comet 但未指定 Native/Classic 时使用；解析项目配置并加载唯一入口。"',
     );
     expect(source).not.toContain('存在需要恢复的 active Comet change');
     expect(source).toContain('comet workflow resolve . --activate --json');
+    expect(source).not.toContain('--json --task');
     expect(source).not.toContain('comet-entry-runtime.mjs . --json');
     expect(source).toContain('不得搜索 Skill 文件、扫描平台配置目录或直接调用内部 bundle');
     expect(source).toContain('command not found');
@@ -42,13 +43,13 @@ describe('Chinese Comet entry Skills', () => {
     expect(source).toContain('comet state select <change-name>');
     expect(source).toContain('/comet-open');
     expect(source).toContain('/comet-build');
-    expect(source).toContain('comet/reference/scripts.md');
+    expect(source).toContain('comet-classic/reference/scripts.md');
     expect(source.length).toBeGreaterThan(10_000);
     expect(source).not.toMatch(/\/comet(?![-/])/u);
   });
 
   it('keeps shared Classic references on the explicit Classic entry', async () => {
-    const referenceRoot = path.join(chineseRoot, 'comet', 'reference');
+    const referenceRoot = path.join(chineseRoot, 'comet-classic', 'reference');
     const files = (await fs.readdir(referenceRoot)).filter((name) => name.endsWith('.md'));
     const source = (
       await Promise.all(files.map((name) => fs.readFile(path.join(referenceRoot, name), 'utf8')))
@@ -89,10 +90,11 @@ describe('English Comet entry Skills', () => {
 
     expect(source).toContain('name: comet');
     expect(source).toContain(
-      'description: "Use when the user explicitly invokes /comet or asks to use Comet without choosing Native or Classic; activate an unconfigured project from global defaults, then load exactly one permanent entry from project configuration."',
+      'description: "Comet workflow entry. Use when the user invokes /comet or asks to use Comet without choosing Native or Classic; resolve and load exactly one entry from project configuration."',
     );
     expect(source).not.toContain('an active Comet change needs to be resumed');
     expect(source).toContain('comet workflow resolve . --activate --json');
+    expect(source).not.toContain('--json --task');
     expect(source).not.toContain('comet-entry-runtime.mjs . --json');
     expect(source).toContain(
       'Do not search for Skill files, scan platform configuration directories, or invoke an internal bundle directly',
@@ -118,13 +120,13 @@ describe('English Comet entry Skills', () => {
     expect(source).toContain('comet state select <change-name>');
     expect(source).toContain('/comet-open');
     expect(source).toContain('/comet-build');
-    expect(source).toContain('comet/reference/scripts.md');
+    expect(source).toContain('comet-classic/reference/scripts.md');
     expect(source.length).toBeGreaterThan(10_000);
     expect(source).not.toMatch(/\/comet(?![-/])/u);
   });
 
   it('keeps shared Classic references on the explicit Classic entry', async () => {
-    const referenceRoot = path.join(englishRoot, 'comet', 'reference');
+    const referenceRoot = path.join(englishRoot, 'comet-classic', 'reference');
     const files = (await fs.readdir(referenceRoot)).filter((name) => name.endsWith('.md'));
     const source = (
       await Promise.all(files.map((name) => fs.readFile(path.join(referenceRoot, name), 'utf8')))

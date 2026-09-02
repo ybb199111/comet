@@ -1,11 +1,11 @@
 ---
 name: comet-verify
-description: "Use only when explicitly invoked as /comet-verify or routed by the root Comet skill/runtime to the verify phase; verify a Comet change, record evidence, and manage repair loops."
+description: "Phase 4 of Comet Classic — verify a change, record evidence, and drive repair loops."
 ---
 
 # Comet Phase 4: Verify
 
-Before starting or recovering, read and follow `comet/reference/classic-layout.md`. Every OpenSpec CLI call in this file must use the adapter, and every file path must use the `<classic-*>` logical roots bound by that protocol.
+Before starting or recovering, read and follow `comet-classic/reference/classic-layout.md`. Every OpenSpec CLI call in this file must use the adapter, and every file path must use the `<classic-*>` logical roots bound by that protocol.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ Verification reports must use the configured Comet artifact language from `comet
 
 ### 0b. Entry State Verification (Entry Check)
 
-Use the stable `comet` CLI described in `comet/reference/scripts.md`, then run entry verification. When resuming from any entry point, first run the recovery check in `comet/reference/context-recovery.md`:
+Use the stable `comet` CLI described in `comet-classic/reference/scripts.md`, then run entry verification. When resuming from any entry point, first run the recovery check in `comet-classic/reference/context-recovery.md`:
 
 ```bash
 comet state select <change-name>
@@ -29,7 +29,7 @@ comet state check <change-name> verify
 
 Proceed to Step 1 after verification passes. The script outputs specific failure reasons when verification fails.
 
-If the `select` / `check` output is `BLOCKED` because `bound_branch` does not match the current branch, immediately pause under `comet/reference/decision-point.md` and let the user choose one option: switch back to the bound branch and rerun entry verification, or run `comet state rebind <change-name>` after the user explicitly confirms the current branch should take over this change, then rerun entry verification. Do not switch branches or rebind on your own.
+If the `select` / `check` output is `BLOCKED` because `bound_branch` does not match the current branch, immediately pause under `comet-classic/reference/decision-point.md` and let the user choose one option: switch back to the bound branch and rerun entry verification, or run `comet state rebind <change-name>` after the user explicitly confirms the current branch should take over this change, then rerun entry verification. Do not switch branches or rebind on your own.
 
 **Idempotency**: All verify checks are safe to repeat. If `verify_result` is already `pass`, verification is complete and archive should continue; keep `branch_status: pending` until archive changes are committed and final branch handling finishes. If `verify_result` is `pending`, start verification from the beginning.
 
@@ -43,7 +43,9 @@ comet state scale <change-name>
 
 The script automatically counts tasks, delta spec count, changed file count, determines light or full verification mode, and sets the verify_mode field. Decision rule (any condition triggers full): tasks > 3, delta spec capabilities > 1, changed files > 8.
 
-Before verification begins, handle uncommitted changes through `comet/reference/dirty-worktree.md` protocol. Verify phase special handling:
+`comet state scale` resolves the commit baseline from the plan's `base-ref` and falls back to state `base_ref` when the plan is unavailable. Verify does not reread plan frontmatter or maintain a second manual scale calculation.
+
+Before verification begins, handle uncommitted changes through `comet-classic/reference/dirty-worktree.md` protocol. Verify phase special handling:
 
 1. If dirty diff clearly belongs to the current change, it is verification input. Continue verification, but do not modify or commit implementation, tests, tasks, delta specs, or the Design Doc in verify
 2. If dirty diff is only a verify phase artifact such as a verification report draft, may continue and record state in verify phase
@@ -54,21 +56,6 @@ When repair or state reconciliation must return to build, run:
 
 ```bash
 comet state transition <change-name> verify-fail
-```
-
-Note: If every task in build phase was committed, the script's file count based on working tree diff may underestimate change scale. In this case, must read plan file header `base-ref` and verify with commit range:
-
-```bash
-comet state get <change-name> plan
-git diff --stat <base-ref read from plan frontmatter>...HEAD
-```
-
-The first command returns the plan path. Use the file-reading tool to parse the single `base-ref` frontmatter field, validate it as a commit, then substitute it into the second command. Do not depend on POSIX text pipelines.
-
-If commit range shows changes exceed lightweight threshold (> 8 files, cross-module coordination, or delta spec spans more than 1 capability), manually set to full verification:
-
-```bash
-comet state set <change-name> verify_mode full
 ```
 
 **Override mechanism**: If the agent or user believes the automated assessment is inappropriate, override at any time with `comet state set <change-name> verify_mode <light|full>`.
@@ -86,7 +73,7 @@ The report must list:
 
 Handle failures as follows:
 - **CRITICAL/IMPORTANT or objectively repairable in-scope issues**: automatically return to build below the retry limit. Do not manufacture a "whether to fix" decision, and never accept these as deviations
-- **WARNING/SUGGESTION whose fix introduces a behavior, scope, or risk tradeoff**: use `comet/reference/decision-point.md` to ask whether to fix or accept. Record the reason and impact scope when accepted
+- **WARNING/SUGGESTION whose fix introduces a behavior, scope, or risk tradeoff**: use `comet-classic/reference/decision-point.md` to ask whether to fix or accept. Record the reason and impact scope when accepted
 - **WARNING/SUGGESTION with a safe, local, tradeoff-free fix**: repair automatically below the retry limit; low severity alone does not justify a pause
 
 Only accepting WARNING/SUGGESTION deviations or choosing a strategy after the 4th failure is a user decision point. When `verify_failures >= 3`, do not automatically execute another `verify-fail`. Offer only "Continue fixing" or "Stop this workflow and seek an external decision" under the decision protocol. Record the next failure and return to build only after the user chooses continue. CRITICAL/IMPORTANT findings are never waivable.
@@ -107,7 +94,12 @@ This optimization only skips re-reading tasks.md in full. proposal.md and design
 
 **Immediately execute:** Use the Skill tool to load the Superpowers `verification-before-completion` skill. Skipping this step is prohibited.
 
-After the skill loads, follow the `verify_mode` branch:
+Verify owns the only final integrated code review for the entire change. Build keeps only task-level or segmented reviews. Before following the `verify_mode` branch, run one integrated review over the final diff, including Build review fixes:
+
+- `review_mode: off`: skip automatic code review and record the reason in the verification report
+- `review_mode: standard|thorough`: use the Skill tool to load Superpowers `requesting-code-review` once, covering the whole change and focusing on correctness, security, and edge cases; do not dispatch a second final reviewer
+
+For CRITICAL/IMPORTANT findings, return to Build under Step 1b. Handle non-CRITICAL deviations under Step 1b's tradeoff rules. Then follow the `verify_mode` branch:
 
 ### 2a. Lightweight Verification (Small Changes)
 
@@ -118,9 +110,9 @@ Run these 6 checks:
 3. Build passes (run project-specific build command, e.g., `npm run build`, `mvn compile`, `cargo build`, etc.)
 4. Related tests pass
 5. No obvious security issues (no hardcoded keys, no new unsafe operations)
-6. Code review strategy: when `review_mode: standard` or `thorough`, use the Skill tool to load the Superpowers `requesting-code-review` skill and request a lightweight review that checks only correctness, security, and edge cases; when `review_mode: off`, skip automatic code review and record the skip reason in the verification report
+6. The final integrated code review passed, or the `review_mode: off` skip reason is recorded
 
-The lightweight code review input should be limited to this change's diff, tasks.md, and necessary test results; the review scope covers implementation correctness, security risk, and edge cases only, and does not perform spec coverage, Design Doc consistency, or drift checks. If the review finds CRITICAL or IMPORTANT issues, follow Step 1b automatic repair and retry handling. `review_mode: off` only skips automatic code review, not build, test, security checks, or debug gate protocol.
+Limit integrated code review input to this change's diff, tasks.md, and necessary test results. It does not replace spec coverage, Design Doc consistency, or drift checks. `review_mode: off` only skips automatic code review, not build, test, security checks, or debug gate protocol.
 
 If the project has no automatically inferred verification command, the user or Agent must run the real verification command first, then record its evidence separately:
 
@@ -129,8 +121,6 @@ comet state record-check <change-name> verify --command "<actual verification co
 ```
 
 `--command` records command text only; Comet **never executes it**. Verify and build evidence are separate and cannot substitute for each other. Even when a compatibility workflow uses `COMET_SKIP_BUILD=1`, that bypass cannot be treated as auditable verification or build evidence.
-
-**Dedup with build-phase review**: if the build phase (`executing-plans` or `subagent-driven-development`) already completed a final code review of the same diff under `review_mode`, this lightweight verify review focuses on "whether the implementation is correct against spec/tasks" and "changes added after build", and does not re-review the diff that build already reviewed and that has not changed.
 
 **Pass criteria**: All 6 items OK, no CRITICAL or IMPORTANT issues.
 
@@ -205,11 +195,11 @@ State file auto-updates to `phase: archive`, `verify_result: pass`, `verified_at
 
 ## Context Compression Recovery
 
-Follow `comet/reference/context-recovery.md` with phase set to `verify`.
+Follow `comet-classic/reference/context-recovery.md` with phase set to `verify`.
 
 ## Automatic Handoff to Next Phase
 
-Follow `comet/reference/auto-transition.md`. Key command:
+Follow `comet-classic/reference/auto-transition.md`. Key command:
 
 ```bash
 comet state next <change-name>

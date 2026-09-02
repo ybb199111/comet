@@ -15,8 +15,19 @@ import {
   takeOverNativeStaleLock,
   withNativeLockRecovery,
 } from './native-lock.js';
-import { nativeProjectPaths, resolveContainedNativePath } from './native-paths.js';
-import { readNativeProtectedDirectory } from './native-protected-file.js';
+import {
+  nativeChangeRuntimeDir,
+  nativeLegacyChangeRuntimeDir,
+  nativePreferredChangeRuntimeDir,
+  nativeProjectPaths,
+  nativeStorageRoot,
+  inspectNativeRuntimeStorage,
+  resolveContainedNativePath,
+} from './native-paths.js';
+import {
+  captureNativeProtectedDirectoryGuard,
+  readNativeProtectedDirectory,
+} from './native-protected-file.js';
 import { recoverNativeRootMove } from './native-root-move.js';
 import { continueNativeCheckpoint } from './native-checkpoint-journal.js';
 import {
@@ -24,6 +35,7 @@ import {
   readNativeCheckpointJournal,
 } from './native-checkpoint-storage.js';
 import { nativeSelectionFile, readNativeSelectionRecord } from './native-selection.js';
+import { isNativePortableChange } from './native-portable-runtime.js';
 import {
   inspectPendingNativeSchemaMigration,
   migrateNativeChange,
@@ -62,7 +74,7 @@ async function directoryEntries(
 ): Promise<Dirent[]> {
   try {
     const protectedDirectory = await readNativeProtectedDirectory({
-      root: paths.nativeRoot,
+      root: nativeStorageRoot(paths, directory),
       directory,
       label: 'Native doctor directory',
       maxEntries,
@@ -173,6 +185,7 @@ async function inspectSelection(
     ];
   }
   try {
+    if (await isNativePortableChange(paths, value.change)) return [];
     await readNativeChange(paths, value.change);
     return [];
   } catch (error) {
@@ -219,7 +232,7 @@ async function inspectManagedPaths(paths: NativeProjectPaths): Promise<NativeDoc
     paths.transactionsDir,
   ]) {
     try {
-      await resolveContainedNativePath(paths.nativeRoot, managedPath);
+      await resolveContainedNativePath(nativeStorageRoot(paths, managedPath), managedPath);
     } catch (error) {
       findings.push({
         severity: 'error',
@@ -488,7 +501,93 @@ async function inspectTrajectoryTailRepairs(
         severity: 'error',
         code: 'trajectory-tail-repair-failed',
         message: `Native trajectory tail repair failed for ${name}: ${(error as Error).message}`,
-        path: path.join(paths.changesDir, name, 'runtime', 'trajectory.jsonl'),
+        path: path.join(nativeChangeRuntimeDir(paths, name), 'trajectory.jsonl'),
+      });
+    }
+  }
+  return findings;
+}
+
+async function inspectRuntimeLayoutMigrations(
+  paths: NativeProjectPaths,
+  options: { name?: string; repair: boolean },
+): Promise<NativeDoctorFinding[]> {
+  const findings: NativeDoctorFinding[] = [];
+  const names = options.name
+    ? [options.name]
+    : (await directoryEntries(paths, paths.changesDir, NATIVE_DOCTOR_MAX_CHANGE_ENTRIES))
+        .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+        .map((entry) => entry.name)
+        .sort();
+  for (const name of names) {
+    const inspection = await inspectNativeRuntimeStorage(paths, name);
+    if (inspection.status === 'missing') {
+      findings.push({
+        severity: 'warning',
+        code: 'runtime-missing',
+        message: `Native Runtime for ${name} is missing; continue the change to rebuild it`,
+        path: inspection.path,
+      });
+      continue;
+    }
+    if (inspection.status === 'invalid') {
+      findings.push({
+        severity: 'error',
+        code: 'runtime-storage-invalid',
+        message: inspection.message ?? `Native Runtime storage for ${name} is invalid`,
+        path: inspection.path,
+      });
+      continue;
+    }
+    if (inspection.layout !== 'legacy') continue;
+    const legacy = nativeLegacyChangeRuntimeDir(paths, name);
+    const preferred = nativePreferredChangeRuntimeDir(paths, name);
+    if (!options.repair) {
+      findings.push({
+        severity: 'warning',
+        code: 'runtime-layout-legacy',
+        message: `Native Runtime for ${name} still uses the legacy change-local layout`,
+        path: legacy,
+        repair: 'migrate',
+      });
+      continue;
+    }
+    try {
+      await withNativeLockRecovery([paths], `migrate Runtime layout for ${name}`, async () => {
+        const guard = await captureNativeProtectedDirectoryGuard({
+          root: paths.nativeRoot,
+          directory: legacy,
+          label: `Legacy Native Runtime ${name}`,
+        });
+        await resolveContainedNativePath(paths.runtimeDir, preferred);
+        await fs.mkdir(paths.changesRuntimeDir, { recursive: true });
+        const targetParentGuard = await captureNativeProtectedDirectoryGuard({
+          root: paths.runtimeDir,
+          directory: paths.changesRuntimeDir,
+          label: `Native Runtime migration target parent ${name}`,
+        });
+        try {
+          await fs.lstat(preferred);
+          throw new Error(`Target Native Runtime already exists: ${preferred}`);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        await guard.verify();
+        await targetParentGuard.verify();
+        await fs.rename(legacy, preferred);
+      });
+      findings.push({
+        severity: 'info',
+        code: 'runtime-layout-migrated',
+        message: `Moved Native Runtime for ${name} to project-local .comet storage`,
+        path: preferred,
+      });
+    } catch (error) {
+      findings.push({
+        severity: 'error',
+        code: 'runtime-layout-migration-failed',
+        message: `Native Runtime layout migration failed for ${name}: ${(error as Error).message}`,
+        path: legacy,
       });
     }
   }
@@ -761,6 +860,7 @@ export async function doctorNativeProject(options: {
   name?: string;
   repair?: boolean;
   recoveryStrategy?: 'continue' | 'rollback';
+  projectOnly?: boolean;
   now?: Date;
 }): Promise<{ healthy: boolean; findings: NativeDoctorFinding[] }> {
   const repair = options.repair ?? false;
@@ -839,33 +939,38 @@ export async function doctorNativeProject(options: {
     recoveryStrategy: options.recoveryStrategy,
   });
   findings.push(...transactions.findings);
-  findings.push(...(await inspectSchemaMigrations(paths, { name: options.name, repair })));
-  findings.push(
-    ...(await inspectWorkspaceIdentityMigrations(paths, { name: options.name, repair })),
-  );
-  findings.push(...(await inspectTrajectoryTailRepairs(paths, { name: options.name, repair })));
-  findings.push(
-    ...(await inspectTransitionJournals(paths, {
-      name: options.name,
-      repair,
-      recoveryStrategy: options.recoveryStrategy,
-    })),
-  );
-  findings.push(...(await inspectCheckpointJournals(paths, { name: options.name, repair })));
-  findings.push(
-    ...(await inspectNativeEvidenceRetention({
-      paths,
-      name: options.name,
-      repair,
-      now: options.now,
-      deferAll: relocationRecoveryPending || transactions.unfinished.length > 0,
-    })),
-  );
+  if (!options.projectOnly) {
+    findings.push(...(await inspectRuntimeLayoutMigrations(paths, { name: options.name, repair })));
+    findings.push(...(await inspectSchemaMigrations(paths, { name: options.name, repair })));
+    findings.push(
+      ...(await inspectWorkspaceIdentityMigrations(paths, { name: options.name, repair })),
+    );
+    findings.push(...(await inspectTrajectoryTailRepairs(paths, { name: options.name, repair })));
+    findings.push(
+      ...(await inspectTransitionJournals(paths, {
+        name: options.name,
+        repair,
+        recoveryStrategy: options.recoveryStrategy,
+      })),
+    );
+    findings.push(...(await inspectCheckpointJournals(paths, { name: options.name, repair })));
+    findings.push(
+      ...(await inspectNativeEvidenceRetention({
+        paths,
+        name: options.name,
+        repair,
+        now: options.now,
+        deferAll: relocationRecoveryPending || transactions.unfinished.length > 0,
+      })),
+    );
+  }
   findings.push(...(await inspectLocks(paths, repair, transactions.unfinished)));
   findings.push(...(await inspectSelection(paths, repair)));
-  findings.push(
-    ...(await inspectChanges(paths, options.name, config?.native.max_verify_failures ?? 5)),
-  );
+  if (!options.projectOnly) {
+    findings.push(
+      ...(await inspectChanges(paths, options.name, config?.native.max_verify_failures ?? 5)),
+    );
+  }
   return {
     healthy: findings.every((finding) => finding.severity === 'info'),
     findings,

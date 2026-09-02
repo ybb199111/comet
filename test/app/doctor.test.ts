@@ -522,6 +522,54 @@ describe('doctor command', () => {
     }
   });
 
+  it('reports CodeGraph CLI, project index, and Codex MCP registration as separate layers', async () => {
+    const homeDir = path.join(tmpDir, 'codegraph-home');
+    const binDir = path.join(tmpDir, 'codegraph-bin');
+    const executable =
+      process.platform === 'win32'
+        ? path.join(binDir, 'codegraph.cmd')
+        : path.join(binDir, 'codegraph');
+    await fs.mkdir(path.join(tmpDir, '.codegraph'), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, '.codegraph', 'codegraph.db'), '');
+    await fs.mkdir(path.join(homeDir, '.codex'), { recursive: true });
+    await fs.writeFile(
+      path.join(homeDir, '.codex', 'config.toml'),
+      '[mcp_servers.other]\ncommand = "other"\n',
+    );
+    await fs.mkdir(binDir, { recursive: true });
+    const status =
+      '{"initialized":true,"pendingChanges":{"added":0,"modified":0,"removed":0},"index":{"state":"complete","reindexRecommended":false,"pendingRefs":0}}';
+    const script =
+      process.platform === 'win32'
+        ? `@echo off\r\nif "%1"=="status" echo ${status}\r\n`
+        : `#!/bin/sh\nif [ "$1" = "status" ]; then printf '%s\\n' '${status}'; fi\n`;
+    await fs.writeFile(executable, script);
+    if (process.platform !== 'win32') await fs.chmod(executable, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ''}`;
+    try {
+      await writeProjectConfig(tmpDir, defaultProjectConfig('docs'));
+
+      const payload = await collectDoctorPayload(tmpDir, 'project', homeDir);
+
+      expect(payload.codegraph).toMatchObject({
+        cliStatus: 'installed',
+        indexStatus: 'current',
+        mcpStatus: 'not_registered',
+        effectiveForAgent: { codex: false },
+      });
+      expect(payload.results).toContainEqual(
+        expect.objectContaining({
+          check: 'CodeGraph MCP registration',
+          status: 'warn',
+          message: expect.stringContaining('Codex'),
+        }),
+      );
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
   it('reports allowed Classic recovery strategies and never chooses one implicitly', async () => {
     await fs.mkdir(path.join(tmpDir, '.git'));
     await writeReadyClassicRootMove(tmpDir);
@@ -1354,6 +1402,7 @@ describe('doctor command', () => {
     'qwen',
     'kiro',
     'codebuddy',
+    'workbuddy',
     'qoder',
   ])('recognizes exactly one healthy Router for the %s platform', async (id) => {
     const target = PLATFORMS.find((platform) => platform.id === id)!;
@@ -1453,14 +1502,23 @@ describe('doctor command', () => {
     const hookPath = path.join(tmpDir, '.claude', 'settings.local.json');
     const settings = JSON.parse(await fs.readFile(hookPath, 'utf8'));
     const router = settings.hooks.PreToolUse[0].hooks[0];
-    settings.hooks.PreToolUse[0].hooks.push(
-      { ...router },
-      {
-        type: 'command',
-        command: router.command.replace('comet-hook-router.mjs', 'comet-hook-guard.mjs'),
-      },
-      { type: 'command', command: 'node user-hook.mjs' },
-    );
+    const legacyGuard = Array.isArray(router.args)
+      ? {
+          type: 'command',
+          command: router.command,
+          args: [
+            router.args[0].replace('comet-hook-router.mjs', 'comet-hook-guard.mjs'),
+            ...router.args.slice(1),
+          ],
+        }
+      : {
+          type: 'command',
+          command: router.command.replace('comet-hook-router.mjs', 'comet-hook-guard.mjs'),
+        };
+    settings.hooks.PreToolUse[0].hooks.push({ ...router }, legacyGuard, {
+      type: 'command',
+      command: 'node user-hook.mjs',
+    });
     await fs.writeFile(hookPath, JSON.stringify(settings), 'utf8');
     const legacyRule = path.join(tmpDir, '.claude', 'rules', 'comet-phase-guard.md');
     await fs.writeFile(legacyRule, '# Legacy\n', 'utf8');
@@ -1473,17 +1531,18 @@ describe('doctor command', () => {
     }
 
     const repaired = JSON.parse(await fs.readFile(hookPath, 'utf8'));
-    const commands = repaired.hooks.PreToolUse.flatMap(
-      (group: { hooks: Array<{ command?: string }> }) =>
-        group.hooks.map((hook: { command?: string }) => hook.command),
+    const hooks = repaired.hooks.PreToolUse.flatMap(
+      (group: { hooks: Array<{ command?: string; args?: unknown }> }) => group.hooks,
     );
-    expect(
-      commands.filter((command: string) => command?.includes('comet-hook-router.mjs')),
-    ).toHaveLength(1);
-    expect(commands.some((command: string) => command?.includes('comet-hook-guard.mjs'))).toBe(
-      false,
-    );
-    expect(commands).toContain('node user-hook.mjs');
+    const includesScript = (hook: { command?: string; args?: unknown }, scriptName: string) =>
+      hook.command?.includes(scriptName) ||
+      (Array.isArray(hook.args) &&
+        hook.args.some(
+          (arg): arg is string => typeof arg === 'string' && arg.includes(scriptName),
+        ));
+    expect(hooks.filter((hook) => includesScript(hook, 'comet-hook-router.mjs'))).toHaveLength(1);
+    expect(hooks.some((hook) => includesScript(hook, 'comet-hook-guard.mjs'))).toBe(false);
+    expect(hooks).toContainEqual({ type: 'command', command: 'node user-hook.mjs' });
     await expect(fs.access(legacyRule)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 

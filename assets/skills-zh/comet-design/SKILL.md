@@ -1,11 +1,11 @@
 ---
 name: comet-design
-description: "仅在用户明确调用 /comet-design，或由 Comet 根 Skill/runtime 路由到 full workflow 的 design 阶段时使用；创建或恢复深度技术 Design Doc。"
+description: "Comet Classic 阶段 2 —— 为 change 产出深度技术 Design Doc。"
 ---
 
 # Comet 阶段 2：深度设计（Design）
 
-开始或恢复前必须先读取并执行 `comet/reference/classic-layout.md`；本文件中的 OpenSpec CLI 调用必须使用 adapter，文件路径必须使用该协议绑定的 `<classic-*>` 逻辑根。
+开始或恢复前必须先读取并执行 `comet-classic/reference/classic-layout.md`；本文件中的 OpenSpec CLI 调用必须使用 adapter，文件路径必须使用该协议绑定的 `<classic-*>` 逻辑根。
 
 ## 前置条件
 
@@ -18,7 +18,7 @@ description: "仅在用户明确调用 /comet-design，或由 Comet 根 Skill/ru
 
 ### 0. 入口状态验证（Entry Check）
 
-按 `comet/reference/scripts.md` 运行公开 Comet CLI 命令，然后执行入口验证；从任意入口恢复时先按 `comet/reference/context-recovery.md` 运行恢复检查：
+按 `comet-classic/reference/scripts.md` 运行公开 Comet CLI 命令，然后执行入口验证；从任意入口恢复时先按 `comet-classic/reference/context-recovery.md` 运行恢复检查：
 
 ```bash
 comet state select <change-name>
@@ -134,7 +134,7 @@ brainstorming 阶段不写入 Design Doc 文件，仅产出设计方案供 Step 
 
 ### 1c. 用户确认设计方案（阻塞点）
 
-brainstorming 产出设计方案后，**必须按 `comet/reference/decision-point.md` 的协议暂停并等待用户明确确认设计方案**。不得在用户确认前创建最终 Design Doc、写入 `design_doc`、运行 design guard，或进入 `/comet-build`。
+brainstorming 产出设计方案后，**必须按 `comet-classic/reference/decision-point.md` 的协议暂停并等待用户明确确认设计方案**。不得在用户确认前创建最终 Design Doc、写入 `design_doc`、运行 design guard，或进入 `/comet-build`。
 
 暂停时只展示必要摘要：
 - 采用的技术方案
@@ -206,7 +206,7 @@ canonical_spec: openspec
 
 ### 3. 更新 Comet 状态
 
-先记录 design_doc 路径。如果 Spec Patch 回写了 delta spec（新增或修改了 `specs/*/spec.md`），必须重新生成 handoff 以更新 hash：
+先记录 design_doc 路径。如果 Spec Patch 回写了 delta spec（新增、修改或删除了 `specs/*/spec.md`），必须重新生成 handoff 以更新 hash：
 
 ```bash
 # 记录 design_doc 路径
@@ -219,7 +219,7 @@ comet handoff <change-name> design --write
 comet guard <change-name> design --apply
 ```
 
-如果没有 delta spec 变更，跳过 handoff 重新生成步骤。状态文件自动更新，无需手动编辑其他字段。
+delta spec 的增、改、删都会改变 handoff hash，因此删除 delta spec 同样必须重新生成 handoff；否则记录的 `handoff_hash` 与当前 OpenSpec artifacts 不再匹配，design guard 将拒绝推进。如果没有 delta spec 变更，跳过 handoff 重新生成步骤。状态文件自动更新，无需手动编辑其他字段。
 
 ### 3a. 可选主动式上下文压缩
 
@@ -249,11 +249,11 @@ comet guard <change-name> design --apply
 
 ## 上下文压缩恢复
 
-按 `comet/reference/context-recovery.md` 执行，phase 参数为 `design`。
+按 `comet-classic/reference/context-recovery.md` 执行，phase 参数为 `design`。
 
 ## 自动衔接下一阶段
 
-按 `comet/reference/auto-transition.md` 执行。关键命令：
+按 `comet-classic/reference/auto-transition.md` 执行。关键命令：
 
 ```bash
 comet state next <change-name>

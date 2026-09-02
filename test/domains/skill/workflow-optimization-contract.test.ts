@@ -39,6 +39,46 @@ describe('Comet workflow optimization contracts', () => {
     [
       '中文',
       zhSkillRoot,
+      '使用 `writing-plans` Skill 创建实施计划',
+      '计划完成后返回 Comet Build',
+      '由 Comet 统一处理后续执行配置',
+      '主会话直接创建实施计划',
+      'Execution Handoff',
+    ],
+    [
+      'English',
+      skillRoot,
+      'Use the `writing-plans` Skill to create the implementation plan',
+      'return to Comet Build after the plan is complete',
+      'Comet owns the subsequent execution configuration',
+      'Create the implementation plan directly in the main session',
+      'Execution Handoff',
+    ],
+  ])(
+    '%s build plan generation delegates plan mechanics and returns workflow control',
+    async (
+      _language,
+      root,
+      delegation,
+      returnMarker,
+      ownershipMarker,
+      mainSessionMarker,
+      handoffMarker,
+    ) => {
+      const skill = await readSkill(root, 'comet-build');
+
+      expect(skill).toContain(delegation);
+      expect(skill).toContain(returnMarker);
+      expect(skill).toContain(ownershipMarker);
+      expect(skill).not.toContain(mainSessionMarker);
+      expect(skill).not.toContain(handoffMarker);
+    },
+  );
+
+  it.each([
+    [
+      '中文',
+      zhSkillRoot,
       'Design Doc 和状态证据落盘后',
       '压缩只能由用户手动触发时，给出一次非阻塞建议并继续；**不得阻塞**、不得额外制造确认点',
     ],
@@ -127,9 +167,9 @@ describe('Comet workflow optimization contracts', () => {
       '### 5. 交付归档提交并完成',
       '「确认归档并立即推送」',
       '「确认归档、立即推送并创建 PR」',
-      '不执行 `archive-confirm` 或归档命令',
+      '不运行 `archive-confirm` 或归档命令',
       '保留 active change、`phase: archive` 和 `branch_status: pending`',
-      '`handled` 只表示用户已经确认如何远端交付这次完整归档提交，不表示 push 或 PR 创建已经成功',
+      '`handled` 只表示用户已经确认如何处理这次完整归档提交，包括仅保留本地、推送或推送并创建 PR；不表示 push 或 PR 创建已经成功',
       '归档阶段不再调用 Superpowers `finishing-a-development-branch`',
       '使用 Skill 工具加载 Superpowers',
     ],
@@ -141,9 +181,9 @@ describe('Comet workflow optimization contracts', () => {
       '### 5. Deliver the Archive Commit and Complete',
       '"Confirm archive and push now"',
       '"Confirm archive, push now, and create a PR"',
-      'do not run `archive-confirm` or the archive command',
+      'Do not run `archive-confirm` or the archive command',
       'keep the active change, `phase: archive`, and `branch_status: pending`',
-      '`handled` means only that the user confirmed how to deliver this complete archive commit remotely. It does not mean that push or PR creation has succeeded',
+      '`handled` means only that the user confirmed how to handle this complete archive commit, including keeping it local, pushing it, or pushing it and creating a PR. It does not mean that push or PR creation has succeeded',
       'Archive no longer invokes Superpowers `finishing-a-development-branch`',
       'use the Skill tool to load Superpowers',
     ],
@@ -218,23 +258,11 @@ describe('Comet workflow optimization contracts', () => {
   );
 
   it.each([
-    [
-      '中文',
-      zhSkillRoot,
-      '仅在用户明确调用',
-      '或由 Comet 根 Skill/runtime',
-      '明确要求使用 Comet 但未指定 Native/Classic',
-    ],
-    [
-      'English',
-      skillRoot,
-      'Use only when explicitly invoked',
-      'or routed by the root Comet skill/runtime',
-      'asks to use Comet without choosing Native or Classic',
-    ],
+    ['中文', zhSkillRoot, '明确要求使用 Comet 但未指定 Native/Classic'],
+    ['English', skillRoot, 'asks to use Comet without choosing Native or Classic'],
   ])(
     '%s phase skill descriptions cannot bypass root routing',
-    async (_language, root, explicitMarker, routedMarker, rootTrigger) => {
+    async (_language, root, rootTrigger) => {
       const rootDescription = descriptionOf(await readSkill(root, 'comet'));
 
       expect(rootDescription).toContain('/comet');
@@ -252,12 +280,14 @@ describe('Comet workflow optimization contracts', () => {
       ]) {
         const description = descriptionOf(await readSkill(root, name));
 
-        expect(description, name).toContain(explicitMarker);
-        expect(description, name).toContain(routedMarker);
+        // Phase/preset skills are user-invoked (disable-model-invocation: true) and
+        // must never pose as the root entry: no root trigger phrase, no bare `/comet`.
+        expect(description, name).not.toContain(rootTrigger);
+        expect(description, name).not.toMatch(/(^|[^-])\/comet(?!\w)/u);
       }
 
       const anyDescription = descriptionOf(await readSkill(root, 'comet-any'));
-      expect(anyDescription).toMatch(/不要用于一般 Skill|Do not use for general Skill/u);
+      expect(anyDescription).toMatch(/不用于一般 Skill|Not for general Skill/u);
     },
   );
 
@@ -294,29 +324,107 @@ describe('Comet workflow optimization contracts', () => {
     [
       '中文',
       zhSkillRoot,
-      '提供本工作流支持的全部工作区隔离和执行方式',
-      '分支名也必须在 Step 2 的同一个联合决策中确认',
-      '使用 Step 2 已确认的分支名，不得再次暂停',
+      '工作区已经在 Open 阶段准备并绑定',
+      '保留 Open 阶段已绑定的 `isolation`',
+      '不得在 Build 再创建 Worktree',
+      '计划写入后只提供**一个联合决策点**',
+      'Superpowers `subagent-driven-development`',
+      'comet state set <name> review_mode <off|standard|thorough>',
+      '不得自动选择',
     ],
     [
       'English',
       skillRoot,
-      'provide every workspace-isolation and execution choice supported by this workflow',
-      'The branch name must be confirmed in the same Step 2 joint decision',
-      'Use the branch name already confirmed in Step 2; do not pause again',
+      'The workspace was prepared and bound during Open',
+      'preserve the `isolation` and `bound_branch` established during Open',
+      'do not create a Worktree',
+      'provide exactly **one joint decision point**',
+      'Superpowers `subagent-driven-development`',
+      'comet state set <name> review_mode <off|standard|thorough>',
+      'Do not auto-select',
     ],
   ])(
-    '%s build flow has one executable configuration decision',
-    async (_language, root, choices, jointBranch, noSecondPause) => {
+    '%s build flow exposes one joint configuration decision',
+    async (
+      _language,
+      root,
+      workspaceOwnership,
+      preservedBinding,
+      noWorkspaceMutation,
+      jointDecision,
+      executionOption,
+      reviewCommand,
+      noAutoSelect,
+    ) => {
       const skill = await readSkill(root, 'comet-build');
 
-      expect(skill).toContain(choices);
-      expect(skill).toContain(jointBranch);
-      expect(skill).toContain(noSecondPause);
+      expect(skill).toContain(workspaceOwnership);
+      expect(skill).toContain(preservedBinding);
+      expect(skill).toContain(noWorkspaceMutation);
+      expect(skill).toContain(jointDecision);
+      expect(skill).toContain(executionOption);
+      expect(skill).toContain(reviewCommand);
+      expect(skill).toContain(noAutoSelect);
       expect(skill).not.toMatch(/当前平台能力|platform capabilities/u);
       expect(skill).not.toMatch(
         /必须暂停等待用户改选 `executing-plans`|must pause and wait for the user to choose main-window execution/u,
       );
+    },
+  );
+
+  it.each([
+    [
+      '中文',
+      zhSkillRoot,
+      'Verify 负责整个 change 的唯一最终集成代码审查',
+      'Build 只保留任务级或分段审查',
+      '与 build 阶段审查的去重',
+      '从 plan frontmatter 读取的 base-ref',
+    ],
+    [
+      'English',
+      skillRoot,
+      'Verify owns the only final integrated code review for the entire change',
+      'Build keeps only task-level or segmented reviews',
+      'Deduplication with build-stage review',
+      'base-ref read from plan frontmatter',
+    ],
+  ])(
+    '%s verify owns final integrated review and scale owns its baseline resolution',
+    async (_language, root, finalReviewOwner, buildBoundary, duplicateReview, manualBaseline) => {
+      const build = await readSkill(root, 'comet-build');
+      const verify = await readSkill(root, 'comet-verify');
+
+      expect(build).toContain(buildBoundary);
+      expect(verify).toContain(finalReviewOwner);
+      expect(verify).not.toContain(duplicateReview);
+      expect(verify).not.toContain(manualBaseline);
+    },
+  );
+
+  it.each([
+    [
+      '中文',
+      zhSkillRoot,
+      '归档与交付方式合并为同一个最终确认',
+      'full workflow 的 `isolation` 可为 `current`、`branch` 或 `worktree`',
+      'finishing-branch',
+    ],
+    [
+      'English',
+      skillRoot,
+      'Archive and delivery method are combined into one final confirmation',
+      'Full-workflow `isolation` may be `current`, `branch`, or `worktree`',
+      'finishing-branch',
+    ],
+  ])(
+    '%s Classic entry exposes one archive decision and the real isolation contract',
+    async (_language, root, archiveOwnership, isolationContract, staleFinishing) => {
+      const skill = await readSkill(root, 'comet-classic');
+
+      expect(skill).toContain(archiveOwnership);
+      expect(skill).toContain(isolationContract);
+      expect(skill).not.toContain(staleFinishing);
     },
   );
 
@@ -339,7 +447,7 @@ describe('Comet workflow optimization contracts', () => {
     '%s dispatch failure records a blocked task without manufacturing a new choice',
     async (_language, root, stopMarker, blockedMarker, stalePause) => {
       const dispatch = await fs.readFile(
-        path.join(root, 'comet', 'reference', 'subagent-dispatch.md'),
+        path.join(root, 'comet-classic', 'reference', 'subagent-dispatch.md'),
         'utf8',
       );
 
@@ -392,7 +500,7 @@ describe('Comet workflow optimization contracts', () => {
     '%s decision protocol does not manufacture choices for deterministic handling',
     async (_language, root, classification, manualHandoff) => {
       const protocol = await fs.readFile(
-        path.join(root, 'comet', 'reference', 'decision-point.md'),
+        path.join(root, 'comet-classic', 'reference', 'decision-point.md'),
         'utf8',
       );
 
@@ -453,4 +561,43 @@ describe('Comet workflow optimization contracts', () => {
       expect(example).not.toContain(staleGuardPause);
     },
   );
+
+  it('keeps Classic isolation choices user-controlled while making parallel worktree guidance explicit', async () => {
+    const variants = [
+      {
+        language: 'zh' as const,
+        required: [
+          '当前目录有未提交工作',
+          '已有其他 active Classic change',
+          '| A | 当前目录（`current`）',
+          '| B | 新分支（`branch`）',
+          '| C | 新 worktree（`worktree`）',
+          '推荐只作说明',
+          '直接使用 `worktree`',
+        ],
+      },
+      {
+        language: 'en' as const,
+        required: [
+          'current directory has uncommitted work',
+          'Another active Classic change already exists',
+          '| A | Current directory (`current`)',
+          '| B | New branch (`branch`)',
+          '| C | New worktree (`worktree`)',
+          'A recommendation is explanatory only',
+          'select `worktree` directly',
+        ],
+      },
+    ];
+    for (const variant of variants) {
+      const workspaceRoot = variant.language === 'zh' ? zhSkillRoot : skillRoot;
+      const workspace = await fs.readFile(
+        path.join(workspaceRoot, 'comet-classic', 'reference', 'workspace.md'),
+        'utf8',
+      );
+      for (const term of variant.required) {
+        expect(workspace, `${variant.language}: ${term}`).toContain(term);
+      }
+    }
+  });
 });

@@ -27,6 +27,8 @@ function hookConfigPath(baseDir: string, platformId: string): string {
       return path.join(baseDir, '.claude', 'settings.local.json');
     case 'codex':
       return path.join(baseDir, '.codex', 'hooks.json');
+    case 'grok':
+      return path.join(baseDir, '.grok', 'hooks', 'comet.json');
     case 'amazon-q':
       return path.join(baseDir, '.amazonq', 'settings.local.json');
     case 'qwen':
@@ -35,6 +37,8 @@ function hookConfigPath(baseDir: string, platformId: string): string {
       return path.join(baseDir, '.qoder', 'settings.json');
     case 'codebuddy':
       return path.join(baseDir, '.codebuddy', 'settings.json');
+    case 'workbuddy':
+      return path.join(baseDir, '.workbuddy', 'settings.json');
     case 'gemini':
       return path.join(baseDir, '.gemini', 'settings.json');
     case 'windsurf':
@@ -46,6 +50,10 @@ function hookConfigPath(baseDir: string, platformId: string): string {
       return path.join(baseDir, '.github', 'hooks', 'comet-guard.json');
     case 'kiro':
       return path.join(baseDir, '.kiro', 'hooks', 'comet-hook-router.kiro.hook');
+    case 'oh-my-pi':
+      return path.join(baseDir, '.omp', 'hooks', 'pre', 'comet-hook-router.ts');
+    case 'dsh':
+      return path.join(baseDir, '.dsh', 'hooks.json');
     default:
       throw new Error(`missing Hook path fixture: ${platformId}`);
   }
@@ -82,7 +90,10 @@ describe('platform component inspection', () => {
     ['claude', '.claude/rules/comet-workflow-guard.md'],
     ['cursor', '.cursor/rules/comet-workflow-guard.mdc'],
     ['codex', '.codex/rules/comet-workflow-guard.md'],
+    ['grok', '.grok/rules/comet-workflow-guard.md'],
     ['github-copilot', '.github/instructions/comet-workflow-guard.instructions.md'],
+    ['oh-my-pi', '.omp/rules/comet-workflow-guard.mdc'],
+    ['dsh', 'AGENTS.local.md'],
   ])(
     'returns the normalized language-independent Rule destination for %s',
     async (id, relative) => {
@@ -100,7 +111,7 @@ describe('platform component inspection', () => {
     expect(await fs.readdir(tmpDir)).toEqual([]);
   });
 
-  it.each(['claude', 'cursor', 'codex', 'github-copilot'])(
+  it.each(['claude', 'cursor', 'codex', 'github-copilot', 'oh-my-pi'])(
     'replaces both legacy %s Rules with one unified Rule while preserving user files',
     async (id) => {
       const target = platform(id);
@@ -132,12 +143,15 @@ describe('platform component inspection', () => {
     'qwen',
     'qoder',
     'codebuddy',
+    'workbuddy',
     'gemini',
     'windsurf',
     'trae',
     'trae-cn',
     'github-copilot',
     'kiro',
+    'oh-my-pi',
+    'grok',
   ])('recognizes the managed Hook command in the %s format', async (id) => {
     const target = platform(id);
     await installManagedHookScripts(tmpDir, target);
@@ -156,6 +170,20 @@ describe('platform component inspection', () => {
     expect(await fs.readFile(configPath, 'utf8')).toBe(before);
   });
 
+  it('reports dsh Hook config as awaiting the profile bridge', async () => {
+    const target = platform('dsh');
+    await installManagedHookScripts(tmpDir, target);
+    await expect(installCometHooksForPlatform(tmpDir, target, 'project')).resolves.toMatchObject({
+      status: 'installed',
+      reason: expect.stringContaining('--patch .dsh/cordis.patch.yml'),
+    });
+
+    await expect(inspectCometHooksForPlatform(tmpDir, target, 'project')).resolves.toMatchObject({
+      present: true,
+      activationRequired: true,
+    });
+  });
+
   it.each([
     'claude',
     'codex',
@@ -163,19 +191,31 @@ describe('platform component inspection', () => {
     'qwen',
     'qoder',
     'codebuddy',
+    'workbuddy',
     'gemini',
     'windsurf',
     'trae',
     'trae-cn',
     'github-copilot',
     'kiro',
+    'oh-my-pi',
+    'grok',
   ])('removes only the managed %s Router while preserving user configuration', async (id) => {
     const target = platform(id);
     const configPath = hookConfigPath(tmpDir, id);
-    if (id === 'kiro' || id === 'github-copilot') {
+    if (id === 'kiro' || id === 'github-copilot' || id === 'oh-my-pi' || id === 'grok') {
       await fs.mkdir(path.dirname(configPath), { recursive: true });
       await fs.writeFile(
-        path.join(path.dirname(configPath), id === 'kiro' ? 'personal.kiro.hook' : 'personal.json'),
+        path.join(
+          path.dirname(configPath),
+          id === 'kiro'
+            ? 'personal.kiro.hook'
+            : id === 'oh-my-pi' || id === 'grok'
+              ? id === 'grok'
+                ? 'personal.json'
+                : 'personal.ts'
+              : 'personal.json',
+        ),
         '{"userSetting":"keep"}\n',
       );
     } else {
@@ -200,7 +240,11 @@ describe('platform component inspection', () => {
         ? path.join(path.dirname(configPath), 'personal.kiro.hook')
         : id === 'github-copilot'
           ? path.join(path.dirname(configPath), 'personal.json')
-          : configPath;
+          : id === 'oh-my-pi'
+            ? path.join(path.dirname(configPath), 'personal.ts')
+            : id === 'grok'
+              ? path.join(path.dirname(configPath), 'personal.json')
+              : configPath;
     expect(await fs.readFile(preservedPath, 'utf8')).toContain('userSetting');
   });
 
@@ -243,6 +287,21 @@ describe('platform component inspection', () => {
     await expect(inspectCometHooksForPlatform(tmpDir, target, 'project')).resolves.toEqual({
       present: true,
       duplicatePresent: true,
+    });
+  });
+
+  it('installs the Grok Hook matcher that covers write and search_replace', async () => {
+    const target = platform('grok');
+    await installManagedHookScripts(tmpDir, target);
+    await expect(installCometHooksForPlatform(tmpDir, target, 'project')).resolves.toMatchObject({
+      status: 'installed',
+    });
+    const config = JSON.parse(await fs.readFile(hookConfigPath(tmpDir, 'grok'), 'utf8')) as {
+      hooks: { PreToolUse: Array<{ matcher: string }> };
+    };
+    expect(config.hooks.PreToolUse[0]?.matcher).toBe('Write|Edit|write|search_replace');
+    await expect(inspectCometHooksForPlatform(tmpDir, target, 'project')).resolves.toEqual({
+      present: true,
     });
   });
 
@@ -391,10 +450,12 @@ describe('platform component inspection', () => {
     'qwen',
     'qoder',
     'codebuddy',
+    'workbuddy',
     'gemini',
     'windsurf',
     'github-copilot',
     'kiro',
+    'grok',
   ])('does not accept an unmanaged command in an existing %s Hook config', async (id) => {
     const target = platform(id);
     await installManagedHookScripts(tmpDir, target);
@@ -419,10 +480,12 @@ describe('platform component inspection', () => {
     'qwen',
     'qoder',
     'codebuddy',
+    'workbuddy',
     'gemini',
     'windsurf',
     'github-copilot',
     'kiro',
+    'grok',
   ])('migrates a legacy managed %s Hook command to one Router', async (id) => {
     const target = platform(id);
     await installManagedHookScripts(tmpDir, target);
@@ -456,6 +519,24 @@ describe('platform component inspection', () => {
     expect(result.present).toBe(false);
     expect(result.error).toContain('Invalid Hook JSON');
     expect(await fs.readFile(configPath, 'utf8')).toBe(malformed);
+  });
+
+  it('does not overwrite or remove a user-owned Oh My Pi Hook at the Comet path', async () => {
+    const target = platform('oh-my-pi');
+    const hookPath = hookConfigPath(tmpDir, target.id);
+    const userSource = 'export default function userHook() {}\n';
+    await fs.mkdir(path.dirname(hookPath), { recursive: true });
+    await fs.writeFile(hookPath, userSource, 'utf8');
+
+    await expect(installCometHooksForPlatform(tmpDir, target, 'project')).resolves.toMatchObject({
+      status: 'failed',
+      reason: expect.stringContaining('user-owned'),
+    });
+    await expect(removeCometHooksForPlatform(tmpDir, target, 'project')).resolves.toEqual({
+      removed: 0,
+      failed: 0,
+    });
+    await expect(fs.readFile(hookPath, 'utf8')).resolves.toBe(userSource);
   });
 
   it('does not report a current Hook healthy when its manifest-owned script is missing', async () => {

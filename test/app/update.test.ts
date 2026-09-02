@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import { EventEmitter } from 'events';
 import { spawn } from 'child_process';
+import { spawnSync } from 'node:child_process';
 import { select } from '@inquirer/prompts';
 import { parse } from 'yaml';
 import { getLatestVersion } from '../../platform/version/version.js';
@@ -29,34 +30,41 @@ import {
   writeProjectConfig,
 } from '../../domains/comet-native/native-config.js';
 import { assertClassicLayoutReadable } from '../../domains/comet-classic/classic-layout.js';
-import { DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG } from '../../domains/workflow-contract/project-config.js';
 
 // Mock the interactive select prompt so tests don't hang on CI (no TTY).
 vi.mock('@inquirer/prompts', () => ({
   select: vi.fn().mockResolvedValue(false),
 }));
 
-vi.mock('child_process', () => ({
-  spawn: vi.fn(() => {
-    const child = new EventEmitter();
-    queueMicrotask(() => {
-      child.emit('exit', 0);
-      child.emit('close', 0);
-    });
-    return child;
-  }),
-}));
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    spawn: vi.fn(() => {
+      const child = new EventEmitter();
+      queueMicrotask(() => {
+        child.emit('exit', 0);
+        child.emit('close', 0);
+      });
+      return child;
+    }),
+  };
+});
 
-vi.mock('../../platform/version/version.js', () => ({
-  getCurrentVersion: vi.fn(() => '0.4.0-beta.7'),
-  getLatestVersion: vi.fn(async () => '0.4.0-beta.8'),
-  printVersionInfo: vi.fn(async () => ({
-    currentVersion: '0.4.0-beta.7',
-    latestVersion: '0.4.0-beta.8',
-    hasUpdate: true,
-    checked: true,
-  })),
-}));
+vi.mock('../../platform/version/version.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../platform/version/version.js')>();
+  return {
+    ...actual,
+    getCurrentVersion: vi.fn(() => '0.4.0-beta.7'),
+    getLatestVersion: vi.fn(async () => '0.4.0-beta.8'),
+    printVersionInfo: vi.fn(async () => ({
+      currentVersion: '0.4.0-beta.7',
+      latestVersion: '0.4.0-beta.8',
+      hasUpdate: true,
+      checked: true,
+    })),
+  };
+});
 
 vi.mock('../../domains/integrations/openspec.js', () => ({
   installOpenSpec: vi.fn(async () => 'installed'),
@@ -83,6 +91,13 @@ const claudePlatform: Platform = {
 };
 
 const manifestPath = path.resolve('assets', 'manifest.json');
+
+const RETIRED_NATIVE_BUNDLES = [
+  'comet-native/scripts/comet-native-checkpoint.mjs',
+  'comet-native/scripts/comet-native-check.mjs',
+  'comet-native/scripts/comet-native-evidence.mjs',
+  'comet-native/scripts/comet-native-receipt.mjs',
+] as const;
 
 async function readManifest() {
   return JSON.parse(await fs.readFile(manifestPath, 'utf-8')) as { skills: string[] };
@@ -224,21 +239,12 @@ describe('update command helpers', () => {
     mockedSpawn.mockClear();
     mockedGetLatestVersion.mockClear();
     mockedInstallOpenSpec.mockReset();
-    mockedInstallOpenSpec.mockImplementation(
-      async (
-        projectPath,
-        _toolIds,
-        scope,
-        _shouldInstallCli,
-        _mirrorOpenCodePlatformIds,
-        artifactLayout,
-      ) => {
-        if (scope === 'project') {
-          await writeMockOpenSpecProject(projectPath, artifactLayout);
-        }
-        return 'installed';
-      },
-    );
+    mockedInstallOpenSpec.mockImplementation(async (projectPath, _toolIds, scope, options = {}) => {
+      if (scope === 'project') {
+        await writeMockOpenSpecProject(projectPath, options.artifactLayout ?? 'legacy');
+      }
+      return 'installed';
+    });
     mockedInstallSuperpowers.mockReset();
     mockedInstallSuperpowers.mockResolvedValue('installed');
     mockedSpawn.mockImplementation((_command, args, options) => {
@@ -512,6 +518,58 @@ describe('update command helpers', () => {
     expect(JSON.parse(json).skills.targets).toEqual([
       expect.objectContaining({ scope: 'global', platform: 'codex' }),
     ]);
+  });
+
+  it('updates an explicitly scoped WorkBuddy project install and refreshes its project Hook', async () => {
+    const projectDir = path.join(tmpDir, 'workbuddy-project');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(projectDir, {
+        json: true,
+        skipNpm: true,
+        scope: 'project',
+        platform: 'workbuddy',
+      });
+    } finally {
+      log.mockRestore();
+    }
+
+    await expect(
+      fs.access(path.join(projectDir, '.workbuddy', 'skills', 'comet', 'SKILL.md')),
+    ).resolves.toBeUndefined();
+    const settings = JSON.parse(
+      await fs.readFile(path.join(projectDir, '.workbuddy', 'settings.json'), 'utf8'),
+    );
+    expect(settings.hooks.PreToolUse).toEqual([expect.objectContaining({ matcher: 'Write|Edit' })]);
+  });
+
+  it('updates Oh My Pi through the omp alias with native Skills, Rule, and Hook paths', async () => {
+    const projectDir = path.join(tmpDir, 'oh-my-pi-project');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(projectDir, {
+        json: true,
+        skipNpm: true,
+        scope: 'project',
+        platform: 'omp',
+      });
+    } finally {
+      log.mockRestore();
+    }
+
+    await expect(
+      fs.access(path.join(projectDir, '.omp', 'skills', 'comet', 'SKILL.md')),
+    ).resolves.toBeUndefined();
+    const rule = await fs.readFile(
+      path.join(projectDir, '.omp', 'rules', 'comet-workflow-guard.mdc'),
+      'utf8',
+    );
+    expect(rule).toContain('alwaysApply: true');
+    const hook = await fs.readFile(
+      path.join(projectDir, '.omp', 'hooks', 'pre', 'comet-hook-router.ts'),
+      'utf8',
+    );
+    expect(hook).toContain("'--platform', 'oh-my-pi'");
   });
 
   it('detects legacy global Pi skills so update can migrate them', async () => {
@@ -959,6 +1017,43 @@ describe('update command helpers', () => {
       action: 'skip',
       reason: 'registry version 0.4.0-beta.6 is older than current version 0.4.0-beta.7',
     });
+  });
+
+  it('covers self-update semver and package-scope decision branches', async () => {
+    expect(resolveNpmSelfUpdatePlan('not-semver', '0.4.0')).toMatchObject({ action: 'fail' });
+    expect(resolveNpmSelfUpdatePlan('0.4.0', 'not-semver')).toMatchObject({ action: 'fail' });
+    expect(resolveNpmSelfUpdatePlan('0.4.0', '0.4.0')).toMatchObject({ action: 'skip' });
+    expect(resolveNpmSelfUpdatePlan('0.4.0', '0.4.1')).toEqual({
+      action: 'update',
+      version: '0.4.1',
+    });
+    expect(resolveNpmSelfUpdatePlan('0.4.0-beta.10', '0.4.0-beta.2')).toMatchObject({
+      action: 'skip',
+    });
+    expect(resolveNpmSelfUpdatePlan('0.4.0-alpha', '0.4.0-beta')).toMatchObject({
+      action: 'update',
+    });
+    expect(resolveNpmSelfUpdatePlan('0.4.0-alpha.1', '0.4.0-alpha.beta')).toMatchObject({
+      action: 'update',
+    });
+    expect(resolveNpmSelfUpdatePlan('0.4.0-beta.20', '0.4.0-rc.1')).toEqual({
+      action: 'update',
+      version: '0.4.0-rc.1',
+    });
+
+    const project = path.join(tmpDir, 'package-scope');
+    await fs.mkdir(path.join(project, 'node_modules', '@rpamis', 'comet'), { recursive: true });
+    await expect(
+      detectCometPackageScope(project, path.join(project, 'node_modules', '@rpamis', 'comet')),
+    ).resolves.toBe('project');
+    await fs.rm(path.join(project, 'node_modules'), { recursive: true, force: true });
+    await fs.writeFile(
+      path.join(project, 'package.json'),
+      JSON.stringify({ optionalDependencies: { '@rpamis/comet': '^0.4.0' } }),
+    );
+    await expect(detectCometPackageScope(project, path.join(tmpDir, 'other'))).resolves.toBe(
+      'project',
+    );
   });
 
   it('does not self-update the global package for an explicit current-project refresh', async () => {
@@ -2067,10 +2162,13 @@ describe('update command helpers', () => {
       tmpDir,
       ['claude'],
       'project',
-      true,
-      [],
-      'docs',
-      expect.any(Function),
+      expect.objectContaining({
+        shouldInstallCli: true,
+        mirrorPlatformIds: [],
+        artifactLayout: 'docs',
+        projectMutationGuard: expect.any(Function),
+        selectedPlatformIds: ['claude'],
+      }),
     );
     await expect(fs.access(path.join(tmpDir, 'openspec'))).rejects.toMatchObject({
       code: 'ENOENT',
@@ -2140,12 +2238,66 @@ describe('update command helpers', () => {
       tmpDir,
       ['claude'],
       'project',
-      true,
-      [],
-      'docs',
-      expect.any(Function),
+      expect.objectContaining({
+        shouldInstallCli: true,
+        mirrorPlatformIds: [],
+        artifactLayout: 'docs',
+        projectMutationGuard: expect.any(Function),
+        selectedPlatformIds: ['claude'],
+      }),
     );
     expect(mockedInstallSuperpowers).toHaveBeenCalledWith(tmpDir, 'project', ['claude'], true);
+  });
+
+  it('updates dsh Classic dependencies through the Claude-shaped OpenSpec contract', async () => {
+    const fakeHome = path.join(tmpDir, 'dsh-classic-dependencies-self-update-home');
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    await fs.mkdir(path.join(tmpDir, '.dsh', 'skills', 'comet-classic'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.dsh', 'skills', 'comet-classic', 'SKILL.md'),
+      '# Comet Classic\n',
+      'utf8',
+    );
+    await fs.mkdir(path.join(tmpDir, '.dsh', 'skills', 'openspec-propose'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.dsh', 'skills', 'openspec-propose', 'SKILL.md'),
+      '# OpenSpec\n',
+      'utf8',
+    );
+    await fs.mkdir(path.join(tmpDir, '.dsh', 'skills', 'brainstorming'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.dsh', 'skills', 'brainstorming', 'SKILL.md'),
+      '# Brainstorming\n',
+      'utf8',
+    );
+
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'copy',
+        platform: 'dsh',
+        selfUpdate: true,
+      });
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    expect(mockedInstallOpenSpec).toHaveBeenCalledWith(
+      tmpDir,
+      ['claude'],
+      'project',
+      expect.objectContaining({
+        shouldInstallCli: true,
+        mirrorPlatformIds: [],
+        artifactLayout: 'docs',
+        projectMutationGuard: expect.any(Function),
+        selectedPlatformIds: ['dsh'],
+      }),
+    );
+    expect(mockedInstallSuperpowers).toHaveBeenCalledWith(tmpDir, 'project', ['dsh'], true);
   });
 
   it.each(['missing', 'corrupt'] as const)(
@@ -2156,16 +2308,13 @@ describe('update command helpers', () => {
       const configPath = path.join(tmpDir, '.comet', 'config.yaml');
       const configBefore = await fs.readFile(configPath, 'utf8');
       mockedInstallOpenSpec.mockImplementationOnce(
-        async (
-          projectPath,
-          _toolIds,
-          scope,
-          _shouldInstallCli,
-          _mirrorOpenCodePlatformIds,
-          artifactLayout,
-        ) => {
+        async (projectPath, _toolIds, scope, options = {}) => {
           if (scope === 'project') {
-            await writeMockOpenSpecProject(projectPath, artifactLayout, openSpecConfig);
+            await writeMockOpenSpecProject(
+              projectPath,
+              options.artifactLayout ?? 'legacy',
+              openSpecConfig,
+            );
           }
           return 'installed';
         },
@@ -2278,10 +2427,13 @@ describe('update command helpers', () => {
       tmpDir,
       ['claude'],
       'project',
-      true,
-      [],
-      'legacy',
-      expect.any(Function),
+      expect.objectContaining({
+        shouldInstallCli: true,
+        mirrorPlatformIds: [],
+        artifactLayout: 'legacy',
+        projectMutationGuard: expect.any(Function),
+        selectedPlatformIds: ['claude'],
+      }),
     );
     await expect(fs.access(path.join(tmpDir, 'docs', 'openspec'))).rejects.toMatchObject({
       code: 'ENOENT',
@@ -2340,16 +2492,9 @@ describe('update command helpers', () => {
       native: {
         artifact_root: 'docs',
         language: 'en',
-        clarification_mode: 'sequential',
+        clarification_mode: 'batch',
         archive_confirmation: 'automatic',
         max_verify_failures: 5,
-        snapshot: {
-          include: ['**/*'],
-          exclude: DEFAULT_WORKFLOW_NATIVE_SNAPSHOT_CONFIG.exclude,
-          max_files: 10_000,
-          max_total_bytes: 256 * 1024 * 1024,
-          max_duration_ms: 60_000,
-        },
       },
       classic: {
         artifact_layout: 'docs',
@@ -2368,10 +2513,13 @@ describe('update command helpers', () => {
       tmpDir,
       ['claude'],
       'project',
-      true,
-      [],
-      'docs',
-      expect.any(Function),
+      expect.objectContaining({
+        shouldInstallCli: true,
+        mirrorPlatformIds: [],
+        artifactLayout: 'docs',
+        projectMutationGuard: expect.any(Function),
+        selectedPlatformIds: ['claude'],
+      }),
     );
   });
 
@@ -2408,10 +2556,13 @@ describe('update command helpers', () => {
       tmpDir,
       ['claude'],
       'project',
-      true,
-      [],
-      'docs',
-      expect.any(Function),
+      expect.objectContaining({
+        shouldInstallCli: true,
+        mirrorPlatformIds: [],
+        artifactLayout: 'docs',
+        projectMutationGuard: expect.any(Function),
+        selectedPlatformIds: ['claude'],
+      }),
     );
     await expect(
       fs.readFile(path.join(tmpDir, 'openspec', 'legacy-marker.txt'), 'utf8'),
@@ -2531,10 +2682,13 @@ describe('update command helpers', () => {
       tmpDir,
       [],
       'project',
-      true,
-      [],
-      'docs',
-      expect.any(Function),
+      expect.objectContaining({
+        shouldInstallCli: true,
+        mirrorPlatformIds: [],
+        artifactLayout: 'docs',
+        projectMutationGuard: expect.any(Function),
+        selectedPlatformIds: [],
+      }),
     );
   });
 
@@ -2577,10 +2731,13 @@ describe('update command helpers', () => {
       tmpDir,
       [],
       'project',
-      true,
-      [],
-      'docs',
-      expect.any(Function),
+      expect.objectContaining({
+        shouldInstallCli: true,
+        mirrorPlatformIds: [],
+        artifactLayout: 'docs',
+        projectMutationGuard: expect.any(Function),
+        selectedPlatformIds: [],
+      }),
     );
     await expect(fs.readFile(configPath)).resolves.toEqual(configBefore);
   });
@@ -2707,10 +2864,13 @@ describe('update command helpers', () => {
       tmpDir,
       ['claude'],
       'global',
-      true,
-      [],
-      'legacy',
-      undefined,
+      expect.objectContaining({
+        shouldInstallCli: true,
+        mirrorPlatformIds: [],
+        artifactLayout: 'legacy',
+        projectMutationGuard: undefined,
+        selectedPlatformIds: ['claude'],
+      }),
     );
     await expect(fs.access(path.join(tmpDir, 'openspec'))).rejects.toMatchObject({
       code: 'ENOENT',
@@ -2914,7 +3074,7 @@ describe('update command helpers', () => {
     expect(updatedConfig).toContain('ambient_resume: true');
     expect(updatedConfig).toContain('keep: true');
     expect(updatedConfig).toContain('artifact_root: docs');
-    expect(updatedConfig).toContain('clarification_mode: sequential');
+    expect(updatedConfig).toContain('clarification_mode: batch');
     expect(updatedConfig).not.toContain('classic:');
     expect(updatedConfig).toContain('language: legacy');
     await expect(
@@ -2948,6 +3108,96 @@ describe('update command helpers', () => {
     expect(claude).toContain('# User\nAlso keep this.');
     expect(mockedSelect).not.toHaveBeenCalled();
     await expect(fs.readFile(selectionPath, 'utf8')).resolves.toBe(legacySelection);
+  });
+
+  it('upgrades a beta17 Native project without leaving retired bundles or hiding config', async () => {
+    expect(spawnSync('git', ['init'], { cwd: tmpDir }).status).toBe(0);
+    await fs.mkdir(path.join(tmpDir, '.comet'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.comet', 'config.yaml'),
+      [
+        'schema: comet.project.v1',
+        'default_workflow: native',
+        'workflows: [native]',
+        'native:',
+        '  artifact_root: .',
+        '  snapshot:',
+        '    include: ["**/*"]',
+        '    exclude: ["custom/generated/**"]',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await fs.mkdir(path.join(tmpDir, '.claude', 'skills', 'comet'), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, '.claude', 'skills', 'comet', 'SKILL.md'), '# Comet\n');
+    const installedSkillsRoot = path.join(tmpDir, '.claude', 'skills');
+    const userBundle = path.join(installedSkillsRoot, 'comet-native', 'scripts', 'user-helper.mjs');
+    await fs.mkdir(path.dirname(userBundle), { recursive: true });
+    for (const relativePath of RETIRED_NATIVE_BUNDLES) {
+      await fs.writeFile(
+        path.join(installedSkillsRoot, ...relativePath.split('/')),
+        'legacy bundle\n',
+        'utf8',
+      );
+    }
+    await fs.writeFile(userBundle, 'keep user content\n', 'utf8');
+    await fs.writeFile(
+      path.join(tmpDir, '.gitignore'),
+      ['node_modules/', '.comet/', 'dist/', ''].join('\n'),
+      'utf8',
+    );
+    for (const relativePath of [
+      '.comet/runtime/native/locks/demo.lock',
+      '.comet/runtime/native/logs/demo.log',
+    ]) {
+      const target = path.join(tmpDir, ...relativePath.split('/'));
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, `${relativePath}\n`, 'utf8');
+    }
+
+    const fakeHome = path.join(tmpDir, 'native-snapshot-update-home');
+    const homeSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await updateCommand(tmpDir, {
+        currentProject: true,
+        installMode: 'symlink',
+        skipNpm: true,
+      });
+    } finally {
+      log.mockRestore();
+      homeSpy.mockRestore();
+    }
+
+    const updated = parse(
+      await fs.readFile(path.join(tmpDir, '.comet', 'config.yaml'), 'utf8'),
+    ) as {
+      native: { snapshot?: unknown };
+    };
+    expect(updated.native.snapshot).toBeUndefined();
+    for (const relativePath of RETIRED_NATIVE_BUNDLES) {
+      await expect(
+        fs.access(path.join(installedSkillsRoot, ...relativePath.split('/'))),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+    await expect(fs.readFile(userBundle, 'utf8')).resolves.toBe('keep user content\n');
+
+    const gitignore = await fs.readFile(path.join(tmpDir, '.gitignore'), 'utf8');
+    expect(gitignore).toContain('node_modules/\n');
+    expect(gitignore).toContain('dist/\n');
+    expect(gitignore).toContain('!/.comet/config.yaml\n');
+    expect(
+      spawnSync('git', ['check-ignore', '--quiet', '.comet/config.yaml'], { cwd: tmpDir }).status,
+    ).toBe(1);
+    for (const relativePath of [
+      '.comet/runtime/native/locks/demo.lock',
+      '.comet/runtime/native/logs/demo.log',
+    ]) {
+      expect(
+        spawnSync('git', ['check-ignore', '--quiet', relativePath], { cwd: tmpDir }).status,
+        relativePath,
+      ).toBe(0);
+    }
   });
 
   it('migrates Classic v1 selection after update installs the project Router', async () => {
@@ -3358,6 +3608,36 @@ describe('update command helpers', () => {
     expect(claude).toContain('# User\n\nAlso keep this.');
     expect(agents).toContain('<comet-ambient-resume>');
     expect(claude).toContain('<comet-ambient-resume>');
+  });
+
+  it('installs ambient resume instructions for Classic-only projects', async () => {
+    await arrangeClassicDocsOpenSpecUpdate(tmpDir);
+    await fs.writeFile(path.join(tmpDir, 'AGENTS.md'), '# User\n\nKeep this.\n', 'utf8');
+    await fs.writeFile(path.join(tmpDir, 'CLAUDE.md'), '# User\n\nAlso keep this.\n', 'utf8');
+
+    const fakeHome = path.join(tmpDir, 'fake-home-classic-instructions');
+    const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    let json: string;
+    try {
+      await updateCommand(tmpDir, { json: true, skipNpm: true });
+      json = log.mock.calls.map((call) => call.join(' ')).join('\n');
+    } finally {
+      log.mockRestore();
+      homedirSpy.mockRestore();
+    }
+
+    const result = JSON.parse(json);
+    expect(result.projectInstructions.updated).toBe(2);
+
+    const agents = await fs.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf8');
+    const claude = await fs.readFile(path.join(tmpDir, 'CLAUDE.md'), 'utf8');
+    for (const content of [agents, claude]) {
+      expect(content).toContain('<comet-ambient-resume>');
+      expect(content).toContain('comet resume-probe . --stdin --json');
+    }
+    expect(agents).toContain('# User\n\nKeep this.');
+    expect(claude).toContain('# User\n\nAlso keep this.');
   });
 
   it('removes ambient resume instructions when the project disables the probe', async () => {

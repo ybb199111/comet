@@ -4,6 +4,8 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { parseDocument } from 'yaml';
 import type { ClassicCommandHandler, ClassicCommandResult } from './classic-cli.js';
+import { classicGuardCheckEnvelope, classicLocale } from './classic-output-language.js';
+import type { CliOutputEnvelope } from '../workflow-contract/output-envelope.js';
 import {
   latestCommandCheck,
   type CommandCheckScope,
@@ -37,7 +39,7 @@ import {
 import {
   classicCommandInvocationCwd,
   classicCommandProjectRoot,
-  withClassicCommandContext,
+  withProjectContext,
 } from './classic-command-context.js';
 
 const GREEN = '\u001b[32m';
@@ -101,6 +103,9 @@ class GuardFailure extends Error {
 class GuardOutput {
   readonly stderr: string[] = [];
   diagnostics?: Record<string, unknown>;
+  envelope?: CliOutputEnvelope;
+  checksPassed = 0;
+  checksFailed = 0;
 
   toResult(exitCode = 0): ClassicCommandResult {
     return {
@@ -109,6 +114,7 @@ class GuardOutput {
         ? { stdout: JSON.stringify({ diagnostics: this.diagnostics }) + '\n' }
         : {}),
       ...(this.stderr.length > 0 ? { stderr: this.stderr.join('\n') + '\n' } : {}),
+      ...(this.envelope === undefined ? {} : { envelope: this.envelope }),
     };
   }
 }
@@ -237,11 +243,11 @@ async function handoffSourceFiles(changeDir: string): Promise<string[]> {
   const files = [`${changeRef}/proposal.md`, `${changeRef}/design.md`, `${changeRef}/tasks.md`];
   const specs = `${changeRef}/specs`;
   if (await exists(specs)) {
-    await inspectClassicProjectTarget(classicCommandProjectRoot(), specs, {
+    const specsInspection = await inspectClassicProjectTarget(classicCommandProjectRoot(), specs, {
       label: `Classic delta-spec directory ${specs}`,
       expected: 'directory',
     });
-    for (const entry of (await fs.readdir(specs)).sort()) {
+    for (const entry of (await fs.readdir(specsInspection.target)).sort()) {
       const spec = `${specs}/${entry}/spec.md`;
       if (await exists(spec)) files.push(spec);
     }
@@ -297,11 +303,13 @@ type CheckResult = { passed: true; detail?: string } | { passed: false; detail: 
 
 function pushCheck(output: GuardOutput, outcome: CheckOutcome): void {
   if (outcome.passed) {
+    output.checksPassed += 1;
     output.stderr.push(green(`  [PASS] ${outcome.description}`));
     if (outcome.detail) {
       for (const line of outcome.detail.split('\n')) output.stderr.push(green(`    ${line}`));
     }
   } else {
+    output.checksFailed += 1;
     output.stderr.push(red(`  [FAIL] ${outcome.description}`));
     if (outcome.detail) {
       for (const line of outcome.detail.split('\n')) output.stderr.push(red(`    ${line}`));
@@ -596,7 +604,7 @@ async function subagentDispatchConfirmed(changeDir: string, change: string): Pro
   if (buildMode !== 'subagent-driven-development') return pass();
   if (subagentDispatch === 'confirmed') return pass();
   return fail(
-    `subagent_dispatch must be confirmed before using build_mode=subagent-driven-development\nNext: record the selected subagent-driven execution, then run:\n  comet state set ${change} subagent_dispatch confirmed`,
+    `subagent_dispatch must be confirmed after the user selects subagent-driven-development\nNext: resume /comet-build and use the single joint decision to confirm the supported execution configuration for ${change}`,
   );
 }
 
@@ -1007,8 +1015,8 @@ async function applyStateUpdate(
   output.stderr.push(green(message));
 }
 
-export const classicGuardCommand: ClassicCommandHandler = async (args, options) =>
-  withClassicCommandContext(options, async () => {
+export const classicGuardCommand: ClassicCommandHandler = withProjectContext(
+  async (args, options) => {
     const output = new GuardOutput();
     const [change, phase, flag] = args;
     try {
@@ -1042,12 +1050,25 @@ export const classicGuardCommand: ClassicCommandHandler = async (args, options) 
         blocked = await guardVerifyChecks(output, changeDir, change, runContext.run);
       else blocked = await guardArchiveChecks(output, changeDir, change);
 
+      const envelope = classicGuardCheckEnvelope({
+        name: change,
+        phase,
+        failed: output.checksFailed,
+        total: output.checksPassed + output.checksFailed,
+        locale: classicLocale(runContext.classic.language),
+      });
+      output.envelope = envelope;
+
       if (blocked) {
+        output.stderr.push('');
+        output.stderr.push(envelope.summary);
+        if (envelope.user_message) output.stderr.push(`RELAY TO USER: ${envelope.user_message}`);
         output.stderr.push('');
         output.stderr.push(red('BLOCKED — fix failing checks before proceeding to next phase'));
         return output.toResult(1);
       }
       output.stderr.push('');
+      output.stderr.push(envelope.summary);
       output.stderr.push(green('ALL CHECKS PASSED — ready for next phase'));
       if (flag === '--apply') {
         await applyStateUpdate(output, change, changeDir, phase);
@@ -1060,4 +1081,5 @@ export const classicGuardCommand: ClassicCommandHandler = async (args, options) 
       }
       throw error;
     }
-  });
+  },
+);

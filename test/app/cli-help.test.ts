@@ -29,7 +29,7 @@ describe('CLI help text', () => {
     expect(help.status, help.stderr).toBe(0);
     expect(help.stdout).toContain(tagline);
     expect(packageJson.description).toBe(tagline);
-    expect(packageJson.version).toBe('0.4.0-beta.18');
+    expect(packageJson.version).toBe('0.4.0-rc.2');
   });
 
   it('marks bundle as the advanced backend and skill Engine runs as advanced', () => {
@@ -88,6 +88,15 @@ describe('CLI help text', () => {
     expect(help.stdout).toContain('Manage the self-contained Comet Native workflow');
   });
 
+  it('does not expose the unpublished project rules plugin command', () => {
+    const help = runCli('--help');
+    const rulesHelp = runCli('rules', '--help');
+
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stdout).not.toMatch(/^\s+rules\b/mu);
+    expect(rulesHelp.stdout).not.toMatch(/^\s+rules\b/mu);
+  });
+
   it('documents the layout-aware Classic command group', () => {
     const help = runCli('classic', '--help');
 
@@ -110,6 +119,13 @@ describe('CLI help text', () => {
     expect(nativeHelp.stdout).toContain('Usage: comet native <command> [options]');
     expect(nativeHelp.stdout).toContain('root move <artifact-root>');
     expect(nativeHelp.stdout).toContain('doctor [<change-name>]');
+    expect(nativeHelp.stdout).not.toContain('hook-guard');
+
+    const statusHelp = runCli('native', 'status', '--help');
+    expect(statusHelp.status).toBe(0);
+    expect(statusHelp.stdout).toContain('Usage: comet native status');
+    expect(statusHelp.stdout).toContain('--cursor <token>');
+    expect(statusHelp.stdout).toContain('--project-root <path>');
   });
 
   it('separates repository evals from Engine Run runtime checks', () => {
@@ -121,6 +137,10 @@ describe('CLI help text', () => {
     expect(evalHelp.stdout).toContain('Evaluate a Skill or eval manifest with one command');
     expect(evalHelp.stdout).toContain('Usage: comet eval [options] [target]');
     expect(evalHelp.stdout).toContain('--suite <suite>');
+    expect(evalHelp.stdout).toContain('--model <model>');
+    expect(evalHelp.stdout).toContain('--base-url <url>');
+    expect(evalHelp.stdout).toContain('--judge-model <model>');
+    expect(evalHelp.stdout).toContain('--judge-base-url <url>');
     expect(evalHelp.stdout).toContain('--collect');
     expect(evalHelp.stdout).not.toContain('run [options]');
     expect(evalHelp.stdout).not.toContain('collect [options]');

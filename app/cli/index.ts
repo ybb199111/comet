@@ -57,16 +57,298 @@ program
     await statusCommand(targetPath, options);
   });
 
+program
+  .command('task [path]')
+  .description('为普通 Comet Skill 任务选择上下文并在结束时记录结果')
+  .requiredOption('--task <text>', '用户原始请求')
+  .option('--path <path>', '当前任务目标路径')
+  .option('--phase <phase>', '当前工作阶段，例如 build 或 verify')
+  .option('--operation <operation>', '当前操作，例如 edit、review 或 verify')
+  .option('--session <id>', '当前 Agent 会话标识，用于避免重复注入')
+  .option('--context-budget <characters>', '本次注入的字符预算')
+  .option('--expand-context <id>', '按 Context Manifest 标识渐进加载完整内容')
+  .option('--application <id>', '记录一次上下文应用结果')
+  .addOption(
+    new Option('--outcome <outcome>', '上下文应用结果').choices([
+      'used-successfully',
+      'ignored',
+      'overridden',
+      'corrected',
+      'contributed-to-failure',
+    ]),
+  )
+  .option('--complete', '记录成功任务')
+  .option('--workflow <workflow>', '工作流类型')
+  .option('--change <id>', '当前 change ID')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { cometTaskCommand } = await import('../commands/comet-task.js');
+    await cometTaskCommand(targetPath, options);
+  });
+
 const workflow = program.command('workflow').description('Resolve the configured Comet workflow');
 
 workflow
   .command('resolve [path]')
   .description('Resolve /comet to its permanent Native or Classic entry')
   .option('--activate', 'Create project configuration from global defaults when missing')
+  .option('--task <text>', '当前任务，用于自动选择个人记忆上下文')
+  .option('--path <path>', '当前任务目标路径')
+  .option('--phase <phase>', '当前工作阶段，例如 build 或 verify')
   .option('--json', 'Output as JSON')
   .action(async (targetPath = '.', options) => {
     const { workflowResolveCommand } = await import('../commands/workflow.js');
     await workflowResolveCommand(targetPath, options);
+  });
+
+const memory = program.command('memory').description('查看和维护跨会话的个人记忆');
+
+memory
+  .command('list [path]')
+  .description('查看可管理的个人记忆及其状态')
+  .option('--query <text>', '关键词')
+  .addOption(new Option('--scope <scope>', '记忆范围').choices(['global', 'project']))
+  .option('--category <category>', '记忆类别')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryManageCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryManageCommand(targetPath, options);
+  });
+
+memory
+  .command('status [path]')
+  .description('查看个人记忆状态和同步状态')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryStatusCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryStatusCommand(targetPath, options);
+  });
+
+memory
+  .command('retrieve [path]')
+  .description('按当前任务检索相关个人记忆')
+  .addOption(new Option('--scope <scope>', '记忆范围').choices(['global', 'project']))
+  .option('--project <key>', '项目记忆 key')
+  .option('--task <text>', '任务描述')
+  .option('--path <path>', '当前文件或目录')
+  .option('--operation <operation>', '当前操作')
+  .option('--category <category>', '记忆类别')
+  .option('--tag <tag>', '记忆标签', collect, [])
+  .option('--query <text>', '关键词')
+  .option('--max-entries <count>', '最多返回条目数')
+  .option('--max-bytes <bytes>', '最多返回字节数')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryRetrieveCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryRetrieveCommand(targetPath, { ...options, tags: options.tag });
+  });
+
+memory
+  .command('remember [path]')
+  .description('手动记录一条个人记忆')
+  .requiredOption('--text <text>', '记忆内容')
+  .option('--category <category>', '记忆类别')
+  .addOption(
+    new Option('--scope <scope>', '记忆范围').choices(['global', 'project']).default('project'),
+  )
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryRememberCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryRememberCommand(targetPath, options);
+  });
+
+memory
+  .command('correct [path]')
+  .description('纠正一条个人记忆')
+  .requiredOption('--id <id>', '记忆标识')
+  .option('--text <text>', '新的记忆内容')
+  .option('--category <category>', '新的记忆类别')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryCorrectCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryCorrectCommand(targetPath, options);
+  });
+
+memory
+  .command('forget [path]')
+  .description('忘记一条个人记忆（默认保留回滚能力）')
+  .requiredOption('--id <id>', '记忆标识')
+  .option('--permanent', '永久删除且不可回滚')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryForgetCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryForgetCommand(targetPath, options);
+  });
+
+memory
+  .command('rollback [path]')
+  .description('回滚一条个人记忆')
+  .requiredOption('--id <id>', '记忆标识')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryRollbackCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryRollbackCommand(targetPath, options);
+  });
+
+memory
+  .command('observe [path]')
+  .description('记录一次可跨任务复用的用户偏好或稳定协作方式')
+  .requiredOption('--text <text>', '只填写偏好或约定，不填写任务摘要、命令输出或测试结果')
+  .requiredOption('--workflow <workflow>', '工作流类型')
+  .requiredOption('--change <id>', 'Change ID')
+  .requiredOption('--candidate-key <key>', '候选行为标识')
+  .option('--category <category>', '记忆类别')
+  .option('--no-success', '将本次结果记录为失败')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryObserveCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryObserveCommand(targetPath, options);
+  });
+
+memory
+  .command('context [path]')
+  .description('为当前任务选择应注入的个人记忆')
+  .requiredOption('--task <text>', '任务描述')
+  .option('--path <path>', '当前文件或目录')
+  .option('--phase <phase>', '验证阶段，例如 build 或 verify')
+  .option('--operation <operation>', '当前操作，例如 edit、review 或 verify')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryContextCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryContextCommand(targetPath, options);
+  });
+
+memory
+  .command('sync [path]')
+  .description('同步个人记忆仓库')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemorySyncCommand } = await import('../commands/personal-memory.js');
+    await personalMemorySyncCommand(targetPath, options);
+  });
+
+memory
+  .command('remote [path]')
+  .description('查看或配置专用记忆仓库的 Git remote')
+  .option('--set <url>', '设置 origin remote')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryRemoteCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryRemoteCommand(targetPath, options);
+  });
+
+memory
+  .command('pause [path]')
+  .description('暂停或恢复指定项目的记忆学习/检索')
+  .option('--project <key>', '项目记忆 key')
+  .option('--learning', '仅暂停学习')
+  .option('--retrieval', '仅暂停检索')
+  .option('--resume', '恢复项目记忆')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { personalMemoryPauseCommand } = await import('../commands/personal-memory.js');
+    await personalMemoryPauseCommand(targetPath, options);
+  });
+
+const knowledge = program.command('knowledge').description('查看和查询当前项目的项目知识');
+
+knowledge
+  .command('status [path]')
+  .description('查看 Local 索引或 Remote Provider 状态')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { projectKnowledgeStatusCommand } = await import('../commands/project-knowledge.js');
+    await projectKnowledgeStatusCommand(targetPath, options);
+  });
+
+knowledge
+  .command('query [path]')
+  .description('查询项目知识记录与来源')
+  .option('--task <text>', '查询或任务描述')
+  .option('--path <path>', '当前文件或目录')
+  .option('--phase <phase>', '当前阶段')
+  .option('--operation <operation>', '当前操作')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { projectKnowledgeQueryCommand } = await import('../commands/project-knowledge.js');
+    await projectKnowledgeQueryCommand(targetPath, options);
+  });
+
+knowledge
+  .command('rebuild [path]')
+  .description('重新核对当前项目知识来源')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { projectKnowledgeRebuildCommand } = await import('../commands/project-knowledge.js');
+    await projectKnowledgeRebuildCommand(targetPath, options);
+  });
+
+knowledge
+  .command('list [path]')
+  .description('列出项目知识记录')
+  .addOption(
+    new Option('--state <state>', '记录状态').choices([
+      'trial',
+      'proven',
+      'enforced',
+      'superseded',
+      'all',
+    ]),
+  )
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { projectKnowledgeListCommand } = await import('../commands/project-knowledge.js');
+    await projectKnowledgeListCommand(targetPath, options);
+  });
+
+knowledge
+  .command('get [path]')
+  .description('查看一条项目知识记录')
+  .requiredOption('--id <id>', '记录标识')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { projectKnowledgeGetCommand } = await import('../commands/project-knowledge.js');
+    await projectKnowledgeGetCommand(targetPath, options);
+  });
+
+knowledge
+  .command('correct [path]')
+  .description('纠正一条项目知识记录')
+  .requiredOption('--id <id>', '记录标识')
+  .requiredOption('--text <text>', '新的记录说明')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { projectKnowledgeCorrectCommand } = await import('../commands/project-knowledge.js');
+    await projectKnowledgeCorrectCommand(targetPath, options);
+  });
+
+knowledge
+  .command('forget [path]')
+  .description('忘记一条项目知识记录')
+  .requiredOption('--id <id>', '记录标识')
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { projectKnowledgeForgetCommand } = await import('../commands/project-knowledge.js');
+    await projectKnowledgeForgetCommand(targetPath, options);
+  });
+
+knowledge
+  .command('feedback [path]')
+  .description('记录一条项目知识在真实任务中的应用结果')
+  .requiredOption('--id <id>', '记录标识')
+  .addOption(
+    new Option('--outcome <outcome>', '应用结果').choices([
+      'used-successfully',
+      'ignored',
+      'overridden',
+      'corrected',
+      'contributed-to-failure',
+    ]),
+  )
+  .option('--json', 'Output as JSON')
+  .action(async (targetPath = '.', options) => {
+    const { projectKnowledgeFeedbackCommand } = await import('../commands/project-knowledge.js');
+    await projectKnowledgeFeedbackCommand(targetPath, options);
   });
 
 program
@@ -185,8 +467,16 @@ program
   .option('--manifest <path>', 'Path to comet/eval.yaml')
   .option('--skill-path <path>', 'Local Skill directory or SKILL.md')
   .option('--skill-name <name>', 'Skill name used with --skill-path')
+  .option('--agent <agent>', 'Evaluation agent (built-in or explicitly installed custom adapter)')
+  .option('--model <model>', 'Main evaluation model override')
+  .option('--base-url <url>', 'Main evaluation API base URL override')
+  .option('--judge-agent <agent>', 'Independent Judge agent (built-in or installed custom adapter)')
+  .option('--judge-model <model>', 'Independent Judge model (required when enabled)')
+  .option('--judge-base-url <url>', 'Independent Judge API base URL override')
   .addOption(
-    new Option('--suite <suite>', 'Eval suite').choices(['local', 'langsmith']).default('local'),
+    new Option('--suite <suite>', 'Eval suite')
+      .choices(['local', 'langsmith', 'langfuse'])
+      .default('local'),
   )
   .option('--profile <name>', 'Eval profile override')
   .option('--task <task>', 'Explicit eval task override')
@@ -635,8 +925,21 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function classicGroupArgs(argv: readonly string[]): string[] | null {
+  const args = argv.slice(2);
+  const classicIndex = args[0] === '--' ? 1 : 0;
+  return args[classicIndex] === 'classic' ? args.slice(classicIndex + 1) : null;
+}
+
 async function runCli(): Promise<void> {
   try {
+    const classicArgs = classicGroupArgs(process.argv);
+    if (classicArgs) {
+      const { runClassicGroupFacade } = await import('../commands/classic.js');
+      process.exitCode = await runClassicGroupFacade(classicArgs);
+      return;
+    }
+
     await program.parseAsync();
   } catch (error) {
     const cancelled = error instanceof Error && error.name === 'ExitPromptError';

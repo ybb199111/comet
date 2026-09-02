@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import path from 'path';
 
+import { stripUtf8Bom } from '../../platform/fs/strip-bom.js';
 import type { CometHookDecision, CometHookProcessOutput, CometHookRequest } from './hook-types.js';
 
 const WRITE_TOOL_NAMES = new Set([
@@ -11,6 +12,7 @@ const WRITE_TOOL_NAMES = new Set([
   'edit',
   'editfile',
   'patch',
+  'searchreplace',
   'strreplaceeditor',
   'write',
   'writefile',
@@ -42,9 +44,12 @@ export const COMET_HOOK_PLATFORM_IDS = new Set([
   'qwen',
   'kiro',
   'codebuddy',
+  'workbuddy',
+  'oh-my-pi',
   'qoder',
   'trae',
   'trae-cn',
+  'grok',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,6 +73,30 @@ function readWorkingDirectory(input: Record<string, unknown>): string | undefine
     const value = input[key];
     if (typeof value !== 'string' || !value.trim() || !path.isAbsolute(value.trim())) continue;
     return path.resolve(value.trim());
+  }
+  return undefined;
+}
+
+function readSessionId(input: Record<string, unknown>): string | undefined {
+  for (const key of ['session_id', 'sessionId', 'conversation_id', 'conversationId'] as const) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 256);
+  }
+  return undefined;
+}
+
+function readHookEventName(input: Record<string, unknown>): string | undefined {
+  for (const key of ['hook_event_name', 'hookEventName', 'event_name', 'eventName'] as const) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) return normalizedToolName(value);
+  }
+  return undefined;
+}
+
+function readTask(input: Record<string, unknown>): string | undefined {
+  for (const key of ['task', 'prompt', 'user_prompt', 'userPrompt'] as const) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
   }
   return undefined;
 }
@@ -145,7 +174,7 @@ export function parseCometHookRequest(source: string, filePath?: string): CometH
 
   let input: unknown;
   try {
-    input = JSON.parse(source) as unknown;
+    input = JSON.parse(stripUtf8Bom(source)) as unknown;
   } catch {
     const targets = patchTargets(source);
     if (targets.length > 0) {
@@ -158,23 +187,50 @@ export function parseCometHookRequest(source: string, filePath?: string): CometH
   const toolName = readToolName(input);
   const targets = collectTargets(input, readToolArguments(input));
   const cwd = readWorkingDirectory(input);
+  const sessionId = readSessionId(input);
+  if (readHookEventName(input) === 'beforeagentstart') {
+    const task = readTask(input);
+    return {
+      intent: 'context',
+      targets: [],
+      toolName: null,
+      ...(task ? { task } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    };
+  }
   if (toolName && WRITE_TOOL_NAMES.has(normalizedToolName(toolName))) {
     return {
       intent: targets.length > 0 ? 'write' : 'unknown',
       targets,
       toolName,
       ...(cwd ? { cwd } : {}),
+      ...(sessionId ? { sessionId } : {}),
     };
   }
   if (toolName && NON_WRITE_TOOL_NAMES.has(normalizedToolName(toolName))) {
-    return { intent: 'non-write', targets: [], toolName, ...(cwd ? { cwd } : {}) };
+    return {
+      intent: 'non-write',
+      targets: [],
+      toolName,
+      ...(cwd ? { cwd } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    };
   }
-  if (toolName) return { intent: 'unknown', targets, toolName, ...(cwd ? { cwd } : {}) };
+  if (toolName)
+    return {
+      intent: 'unknown',
+      targets,
+      toolName,
+      ...(cwd ? { cwd } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    };
   return {
     intent: targets.length > 0 ? 'write' : 'unknown',
     targets,
     toolName: null,
     ...(cwd ? { cwd } : {}),
+    ...(sessionId ? { sessionId } : {}),
   };
 }
 
@@ -204,11 +260,23 @@ export function renderCometHookDecision(
     return {
       exitCode: 0,
       stdout: decision.allowed
-        ? '{}\n'
+        ? `${JSON.stringify(decision.context ? { additionalContext: decision.context } : {})}\n`
         : `${JSON.stringify({
             permissionDecision: 'deny',
             permissionDecisionReason: decision.reason,
           })}\n`,
+      stderr: '',
+    };
+  }
+  if (decision.allowed && decision.context) {
+    return {
+      exitCode: 0,
+      stdout: `${JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          additionalContext: decision.context,
+        },
+      })}\n`,
       stderr: '',
     };
   }

@@ -33,6 +33,44 @@ export interface WorkflowNativeSnapshotConfig {
   max_duration_ms: number;
 }
 
+export interface WorkflowNativePullRequestFinishConfig {
+  provider: 'repository-command';
+  command: string[];
+  timeout_ms: number;
+}
+
+export interface WorkflowNativeFinishConfig {
+  pull_request?: WorkflowNativePullRequestFinishConfig;
+}
+
+export interface WorkflowHookProjectConfig {
+  allow_paths: string[];
+}
+
+export interface WorkflowMemoryProjectConfig {
+  learning: boolean;
+  retrieval: boolean;
+}
+
+export type WorkflowKnowledgeProvider = 'local' | 'remote';
+
+export interface WorkflowKnowledgeRemoteConfig {
+  endpoint: string;
+  token_env?: string;
+  scope?: string;
+  timeout_ms: number;
+}
+
+export interface WorkflowKnowledgeLocalConfig {
+  include: string[];
+}
+
+export interface WorkflowKnowledgeProjectConfig {
+  provider: WorkflowKnowledgeProvider;
+  local?: WorkflowKnowledgeLocalConfig;
+  remote?: WorkflowKnowledgeRemoteConfig;
+}
+
 export interface WorkflowNativeProjectConfig {
   artifact_root: string;
   language: ProjectConfigLanguage;
@@ -40,6 +78,7 @@ export interface WorkflowNativeProjectConfig {
   archive_confirmation: WorkflowNativeArchiveConfirmation;
   max_verify_failures: number;
   snapshot: WorkflowNativeSnapshotConfig;
+  finish?: WorkflowNativeFinishConfig;
   pending_root_move?: WorkflowNativePendingRootMove;
 }
 
@@ -56,6 +95,9 @@ export interface WorkflowProjectConfig {
   default_workflow: CometProjectWorkflow;
   workflows?: CometProjectWorkflow[];
   ambient_resume: boolean;
+  hook?: WorkflowHookProjectConfig;
+  memory?: WorkflowMemoryProjectConfig;
+  knowledge?: WorkflowKnowledgeProjectConfig;
   native?: WorkflowNativeProjectConfig;
   classic?: WorkflowClassicProjectConfig;
 }
@@ -76,6 +118,8 @@ export interface ParsedWorkflowProjectConfigDocument {
   value: Record<string, unknown>;
   config: WorkflowProjectConfig | null;
   ambient_resume: boolean;
+  memory?: WorkflowMemoryProjectConfig;
+  knowledge?: WorkflowKnowledgeProjectConfig;
   native?: WorkflowNativeProjectConfig;
   classic?: WorkflowClassicProjectConfig;
 }
